@@ -1,0 +1,26 @@
+{
+  "name": "ai-conversation-archive",
+  "version": "0.2.18",
+  "private": true,
+  "packageManager": "pnpm@11.8.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "test:e2e-api": "node scripts/e2e-api.mjs",
+    "lint": "pnpm -r --if-present lint",
+    "dev:server": "pnpm --filter @ai-archive/server dev",
+    "dev:web": "pnpm --filter @ai-archive/web dev",
+    "dev:extension": "pnpm --filter @ai-archive/extension dev",
+    "db:migrate": "pnpm --filter @ai-archive/server db:migrate",
+    "db:generate": "pnpm --filter @ai-archive/server db:generate"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}

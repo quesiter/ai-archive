@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+**/dist
+**/.output
+**/.wxt
+**/*.tsbuildinfo
+.git
+.env
+data
+imports
+coverage
+release
+*.log
+*.zip
+*.tar.gz

@@ -1,0 +1,13 @@
+{
+  "extends": "./.wxt/tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@ai-archive/contracts": ["../../packages/contracts/src/index.ts"]
+    }
+  }
+}

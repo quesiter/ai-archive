@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.ai-archive.openclaw-sync</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>__NODE__</string>
+      <string>__SCRIPT__</string>
+      <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>AI_ARCHIVE_SYNC_CONFIG</key>
+      <string>__CONFIG__</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/openclaw-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/openclaw-sync.error.log</string>
+  </dict>
+</plist>

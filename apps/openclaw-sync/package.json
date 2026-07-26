@@ -1,0 +1,30 @@
+{
+  "name": "@ai-archive/openclaw-sync",
+  "version": "0.2.20",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ai-archive-openclaw-sync": "./dist/index.cjs"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts run",
+    "rebuild": "tsx src/index.ts rebuild",
+    "build": "tsup src/index.ts",
+    "start": "node dist/index.cjs run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-archive/contracts": "workspace:*",
+    "chokidar": "^4.0.3",
+    "fast-glob": "^3.3.3",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}

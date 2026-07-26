@@ -1,0 +1,229 @@
+# 部署与使用
+
+本文面向群晖 NAS、Chrome 插件、本地 Codex/OpenClaw 同步代理和数据备份恢复。当前服务端版本为 `0.2.18`，Chrome 插件版本为 `0.4.0`。
+
+## 1. 群晖 NAS 全新安装
+
+推荐环境：群晖 DSM 7.2.2、Container Manager、x86-64 机型。DS923+ 的 Ryzen R1600 可以运行本项目；默认配置下不要在同一台 NAS 上同时部署本地大模型。
+
+1. 上传源码包到 NAS：
+
+```sh
+/volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.18-clean-install.tar.gz
+```
+
+2. 创建源码目录和数据目录：
+
+```sh
+mkdir -p /volume1/docker/ai-conversation-archive/source
+mkdir -p /volume1/docker/ai-conversation-archive/data/postgres
+mkdir -p /volume1/docker/ai-conversation-archive/data/imports/inbox
+mkdir -p /volume1/docker/ai-conversation-archive/data/imports/processed
+mkdir -p /volume1/docker/ai-conversation-archive/data/imports/failed
+cd /volume1/docker/ai-conversation-archive/source
+tar -xzf /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.18-clean-install.tar.gz
+```
+
+3. 生成配置文件、数据库密码和主密钥：
+
+```sh
+cp deploy/.env.synology.example deploy/.env
+POSTGRES_PASSWORD=$(openssl rand -hex 24 2>/dev/null || dd if=/dev/urandom bs=24 count=1 2>/dev/null | hexdump -ve '1/1 "%02x"')
+APP_MASTER_KEY=$(openssl rand -base64 32 2>/dev/null || dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')
+sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$POSTGRES_PASSWORD|" deploy/.env
+sed -i "s|^APP_MASTER_KEY=.*|APP_MASTER_KEY=$APP_MASTER_KEY|" deploy/.env
+```
+
+按需编辑 `deploy/.env` 中的 `APP_ORIGIN`、`ARCHIVE_PORT` 和 `ARCHIVE_DATA_DIR`。生产环境建议 `APP_ORIGIN` 使用 HTTPS 外部地址。
+
+4. 构建并启动：
+
+```sh
+cd /volume1/docker/ai-conversation-archive/source/deploy
+docker compose --env-file .env build
+docker compose --env-file .env up -d
+docker compose --env-file .env ps
+curl -fsS http://127.0.0.1:18080/healthz
+```
+
+5. 首次访问 Web 后台，创建管理员账号。系统会显示 TOTP Secret/URI，请立即加入验证器，之后用密码和六位验证码登录。
+
+## 2. 反向代理与端口
+
+推荐在 DSM 的“登录门户”或“反向代理服务器”中新增规则：
+
+| 项目 | 值 |
+| --- | --- |
+| 来源协议 | HTTPS |
+| 来源主机 | `ai-archive.gyee.tech` |
+| 来源端口 | `18443` |
+| 目标协议 | HTTP |
+| 目标主机 | `127.0.0.1` |
+| 目标端口 | `18080` |
+
+路由器只转发公网 TCP `18443` 到 NAS TCP `18443`。不要把 DSM 管理端口、PostgreSQL 端口或应用内部 HTTP 端口直接暴露到公网。
+
+如果没有固定公网 IP，可以使用 Cloudflare Tunnel、Tailscale、ZeroTier 或 VPN。无论哪种方式，`APP_ORIGIN` 都应填写用户实际访问 Web 后台的 HTTPS 地址。
+
+## 3. 服务器更新
+
+把新版源码包上传到 `/volume1/docker/ai-conversation-archive/`，然后执行：
+
+```sh
+cd /volume1/docker/ai-conversation-archive/source
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.18-clean-install.tar.gz
+```
+
+脚本会保留现有 `deploy/.env`，创建必要数据目录，尝试数据库备份，解压新版源码包，构建镜像，切换源码目录，强制重建 app/worker 容器，并检查 `/healthz` 返回的版本号。
+
+测试环境如果确认不需要备份，可以跳过备份：
+
+```sh
+cd /volume1/docker/ai-conversation-archive/source
+SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.18-clean-install.tar.gz
+```
+
+如果已经手动把源码覆盖到 `source` 目录，可以原地构建重启：
+
+```sh
+cd /volume1/docker/ai-conversation-archive/source
+sh scripts/update-server.sh
+```
+
+## 4. Chrome 插件
+
+最新插件包：
+
+```text
+release/ai-archiveextension-0.4.0-chrome.zip
+```
+
+安装方式：
+
+1. 解压 zip。
+2. 打开 `chrome://extensions`。
+3. 开启“开发者模式”。
+4. 点击“加载已解压的扩展程序”，选择解压目录。
+5. 在 Web 后台“设备”页生成 Chrome 配对码。
+6. 打开插件，只输入配对码即可；设备名称只在后台填写。
+
+Chrome 不允许普通扩展自动固定到工具栏，也不允许扩展自行默认启用无痕模式。插件已声明支持无痕上下文；用户仍需在 Chrome 扩展详情页打开“允许在无痕模式下使用”。企业环境可以通过 Chrome 企业策略统一固定和开启权限。
+
+支持的页面入口包括：
+
+- `chatgpt.com`
+- `gemini.google.com`
+- `grok.com`
+- `yuanbao.tencent.com`
+- `agent.minimax.io`
+- `agent.minimaxi.com`
+- `chat.deepseek.com`
+- `qianwen.com`
+- `www.kimi.com`
+
+扩展会贴在页面右上侧边，自动采集或上传时有轻微动效提示。未变化的会话只做轻量检查，不滚动页面、不扫描全量消息、不重复上传。
+
+## 5. 本地同步代理
+
+### Windows
+
+公司 Windows 电脑推荐使用便携包：
+
+```text
+release/ai-conversation-archive-windows-sync-0.2.18.zip
+```
+
+解压到任意目录后双击 `sync-local-windows.bat`。首次运行输入 Web 后台生成的 `OpenClaw/Codex 同步代理` 配对码。默认模式只导入近期安全范围并持续监听新增会话。
+
+完整历史导入需要显式执行：
+
+```bat
+sync-local-windows.bat full-rebuild
+```
+
+只导入一次、不持续监听：
+
+```bat
+sync-local-windows.bat rebuild-only
+```
+
+### macOS / OpenClaw
+
+MacBook 上使用最新 macOS 同步包：
+
+```text
+release/ai-conversation-archive-macos-sync-0.2.20.tar.gz
+```
+
+解压后执行：
+
+```sh
+sh sync-local-macos.sh
+```
+
+如果 OpenClaw 不在默认目录，可以手工配对：
+
+```sh
+node openclaw-sync.cjs pair \
+  --server https://ai-archive.gyee.tech:18443 \
+  --code ABCD1234 \
+  --openclaw-root "$HOME/.openclaw"
+```
+
+同时导入 Codex：
+
+```sh
+node openclaw-sync.cjs pair \
+  --server https://ai-archive.gyee.tech:18443 \
+  --code ABCD1234 \
+  --with-codex
+```
+
+代理会读取 OpenClaw、Codex 和 Claude Code 的本地 JSONL 会话文件。它只上传会话内容，不读取模型密钥、Cookie、token 或 credential 文件。
+
+## 6. 历史导入
+
+Web 后台“导入”页支持：
+
+- ChatGPT 官方数据导出 ZIP。
+- Gemini Takeout ZIP。
+- 把 ZIP 放入 `IMPORT_INBOX` 目录，由 Worker 定时发现并入队。
+
+Grok、腾讯元宝、MiniMax、DeepSeek、千问、Kimi 等平台没有稳定官方批量历史 API，旧会话主要通过浏览器打开会话后由插件补录。
+
+## 7. 分析、分类与知识
+
+在“设置”页填写 OpenAI 兼容接口的 Base URL、API Key 和模型名，并点击“测试”确认可用。
+
+智能归类会优先复用已有项目，节能模式会尽量使用本地匹配和缓存，减少把大量会话重复发送给模型。周报/月报会从已归类会话中抽取知识，再生成报告。知识数量为 0 通常表示还没有成功运行报告/知识抽取，或智能归类尚未完成。
+
+模型不是归档核心链路依赖；没有配置模型时，采集、导入、同步、会话列表、搜索、修订查看和备份恢复仍可运行。
+
+## 8. 备份与恢复
+
+Web 后台“设置 > 备份与恢复”支持下载业务备份和导入备份。备份包含会话、修订、消息、设备、项目、知识、报告、设置、导入记录和操作日志，不包含管理员账号、登录会话和一次性配对码。
+
+重建网站后的恢复流程：
+
+1. 全新安装并启动服务。
+2. 首次访问后台，重新创建管理员并绑定 TOTP。
+3. 打开“设置 > 备份与恢复”。
+4. 上传 `.json.gz` 备份文件。
+5. 点击“导入备份并替换数据”。
+
+如果重建时更换了 `APP_MASTER_KEY`，导入会跳过加密设置，之后需要在设置页重新填写 LLM API Key 和 SMTP 密码。
+
+数据库级备份可以放在 DSM 任务计划中每日执行：
+
+```sh
+POSTGRES_USER=archive POSTGRES_DB=archive \
+BACKUP_ROOT=/volume1/backup/ai-conversation-archive \
+sh /volume1/docker/ai-conversation-archive/source/scripts/backup.sh
+```
+
+## 9. 已知边界
+
+- 全量归档指当前页面可见分支的全部可见文本。
+- 隐藏推理、已删除消息、未访问分支、附件和未同步临时会话无法保证归档。
+- 平台页面 DOM 会变化；适配器失败会记录日志，但不会影响其他平台。
+- 上游删除不会自动删除本地版本；需要在 Web 面板手工永久删除归档。

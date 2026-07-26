@@ -1,0 +1,46 @@
+{
+  "name": "@ai-archive/server",
+  "version": "0.2.18",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "dev:worker": "tsx watch src/worker.ts",
+    "build": "tsup src/index.ts src/worker.ts src/migrate.ts --format esm --target node22 --out-dir dist --sourcemap",
+    "start": "node dist/index.js",
+    "start:worker": "node dist/worker.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/migrate.ts"
+  },
+  "dependencies": {
+    "@ai-archive/contracts": "workspace:*",
+    "@fastify/cookie": "^11.0.0",
+    "@fastify/cors": "^10.0.0",
+    "@fastify/multipart": "^9.0.0",
+    "@fastify/rate-limit": "^10.0.0",
+    "@fastify/static": "^8.0.0",
+    "@node-rs/argon2": "^2.0.0",
+    "croner": "^9.0.0",
+    "drizzle-orm": "^0.44.0",
+    "fastify": "^5.0.0",
+    "fflate": "^0.8.2",
+    "node-html-parser": "^7.0.1",
+    "nodemailer": "^7.0.0",
+    "openai": "^5.0.0",
+    "otpauth": "^9.4.0",
+    "pg-boss": "^10.4.0",
+    "postgres": "^3.4.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/nodemailer": "^6.4.0",
+    "drizzle-kit": "^0.31.0",
+    "tsx": "^4.20.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}

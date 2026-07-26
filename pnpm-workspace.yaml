@@ -1,0 +1,8 @@
+packages:
+  - apps/*
+  - packages/*
+
+allowBuilds:
+  '@node-rs/argon2': true
+  esbuild: true
+  spawn-sync: true
