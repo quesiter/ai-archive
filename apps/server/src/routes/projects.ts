@@ -11,6 +11,7 @@ import {
 } from "../schema.js";
 import {
   createBackgroundTask,
+  failStaleBackgroundTasks,
   getBackgroundTask,
   getLatestBackgroundTask,
   updateBackgroundTask,
@@ -276,6 +277,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       .parse(request.body ?? {});
     const savedMode = await getSetting("classification.runMode");
     const mode = input.mode ?? (savedMode === "full" ? "full" : "economy");
+    await failStaleBackgroundTasks("classification_rebuild");
     const activeTask = await getLatestBackgroundTask("classification_rebuild", [
       "queued",
       "running",
@@ -302,6 +304,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/api/v1/classification/tasks/latest", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
+    await failStaleBackgroundTasks("classification_rebuild");
     return {
       task: await getLatestBackgroundTask("classification_rebuild"),
     };
@@ -312,6 +315,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
       const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      await failStaleBackgroundTasks("classification_rebuild");
       const task = await getBackgroundTask(params.id);
       if (!task) return reply.code(404).send({ error: "Task not found" });
       return task;

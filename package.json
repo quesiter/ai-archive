@@ -1,6 +1,6 @@
 {
   "name": "ai-conversation-archive",
-  "version": "0.2.18",
+  "version": "0.2.20",
   "private": true,
   "packageManager": "pnpm@11.8.0",
   "engines": {

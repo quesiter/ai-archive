@@ -7,7 +7,7 @@ AI Conversation Archive server update
 
 Usage:
   sh scripts/update-server.sh
-  sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.18-clean-install.tar.gz
+  sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.20-clean-install.tar.gz
 
 Environment:
   APP_ROOT=/volume1/docker/ai-conversation-archive

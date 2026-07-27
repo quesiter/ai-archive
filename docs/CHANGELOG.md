@@ -2,6 +2,21 @@
 
 本文件合并原 `docs/UPDATE-*.md` 的版本说明。具体部署、升级、备份和排错步骤统一查看 [运维手册](OPERATIONS.md)。
 
+## 2026-07-27 v42：0.2.20 导入假死恢复与知识抽取容错
+
+- `import-archive` job 显式设置 6 小时过期时间，避免大 ZIP 解析被 PgBoss 默认 15 分钟超时打断。
+- 导入页、Worker 启动和导入目录扫描会识别没有活跃 PgBoss job 的 processing 导入任务；源 ZIP 仍在 inbox 时自动重新入队，源文件缺失时标记失败并写入日志。
+- 知识抽取支持顶层数组、`items`/`knowledge`/`results`/`data` 等包装字段，以及 `category/name/content/score/sources` 等常见别名。
+- 单条会话知识抽取返回格式异常时改为记录 warning 并跳过该会话，不再拖垮整轮周报/月报。
+- 批量智能归类 job 过期时间提升到 6 小时，配合分片续跑降低慢模型和大批量会话导致的超时风险。
+
+## 2026-07-27 v41：0.2.19 智能归类分片续跑与僵尸任务修复
+
+- 批量智能归类改为分片执行：单个 PgBoss job 只处理一批会话或一段软时间，到点后自动入队下一批。
+- `reclassify-unlocked` job 显式设置更长过期时间，避免使用 PgBoss 默认 15 分钟导致 `handler execution exceeded 900000ms`。
+- 后台任务接口和 Worker 启动时会自动把长时间无进度的 queued/running 归类任务标记为失败，避免 UI 一直显示运行中。
+- 续跑时根据 `background_tasks.processed_count` 恢复进度，PgBoss 重试同一批时不会从头累计。
+
 ## 2026-07-26 v40：0.2.18 总览与日志展示重构
 
 - 总览页移除旧任务中心模块，改为展示总项目、总会话、已归类会话、未归类会话、文本量和估算 token。

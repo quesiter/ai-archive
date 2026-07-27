@@ -206,7 +206,9 @@ flowchart TD
 1. Web 后台上传 ZIP。
 2. Worker 定时扫描 `IMPORT_INBOX` 目录。
 
-导入任务使用文件 SHA-256 去重。任务进入 `import-archive` 队列，由 Worker 异步解析。解析完成后移动到 processed 目录，失败后移动到 failed 目录，并在 `import_jobs` 和 `operation_logs` 中记录状态。
+导入任务使用文件 SHA-256 去重。任务进入 `import-archive` 队列，由 Worker 异步解析，job 过期时间显式设置为 6 小时，避免大 ZIP 被 PgBoss 默认 15 分钟超时打断。解析完成后移动到 processed 目录，失败后移动到 failed 目录，并在 `import_jobs` 和 `operation_logs` 中记录状态。
+
+导入页刷新、Worker 启动和 inbox 扫描都会检查 processing 状态的导入任务。如果任务长时间没有更新且 PgBoss 中已没有对应的 created/retry/active job，源 ZIP 仍在 inbox 时会自动改回 queued 并重新入队；源文件缺失时会标记 failed，避免 UI 长期误判为仍在解析。
 
 ### 4.7 系统备份与恢复
 
@@ -248,7 +250,9 @@ Web 后台备份是逻辑业务备份，面向“重建网站后导入数据”�
 2. 本地命中：标题、已有建议名、正文前部匹配项目名时不调用 AI。
 3. 输入截断：`classification.maxConversationChars` 默认 8000，配置范围 2000 到 40000。
 4. 批量任务逐条处理，单条失败只计入失败样本，不中断整批。
-5. 用户锁定项目后，不再进入自动覆盖路径。
+5. 手动批量归类按批次续跑：单个 `reclassify-unlocked` job 到达批次数量或软时间上限后，会把下一批重新入队，任务总进度继续累计在同一个 `background_tasks` 记录中；job 过期时间显式设置为 6 小时。
+6. 长时间没有进度更新的 queued/running 任务会被自动标记失败，避免页面长期误判为运行中。
+7. 用户锁定项目后，不再进入自动覆盖路径。
 
 任务进度写入 `background_tasks`：
 

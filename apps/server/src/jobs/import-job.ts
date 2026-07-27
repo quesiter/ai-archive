@@ -1,17 +1,18 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readdir, rename, unlink } from "node:fs/promises";
+import { access, mkdir, readdir, rename, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { and, eq, lt, ne, or } from "drizzle-orm";
+import { and, eq, lt, lte, ne, or } from "drizzle-orm";
 import { config } from "../config.js";
-import { db } from "../db.js";
+import { db, sqlClient } from "../db.js";
 import { parseArchive } from "../importers/archive.js";
 import { importJobs } from "../schema.js";
 import { ingestCapture } from "../services/capture.js";
 import { writeOperationLog } from "../services/operation-log.js";
-import { enqueueImport } from "../services/queue.js";
+import { enqueueImport, queueNames } from "../services/queue.js";
 
 const IMPORT_PROCESSING_STALE_MS = 2 * 60 * 60 * 1000;
+const IMPORT_ORPHAN_GRACE_MS = 20 * 60 * 1000;
 const IMPORT_PROGRESS_HEARTBEAT_MS = 5_000;
 
 async function fileHash(path: string): Promise<string> {
@@ -45,6 +46,130 @@ async function moveArchive(
 
 function processingStaleBefore(): Date {
   return new Date(Date.now() - IMPORT_PROCESSING_STALE_MS);
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function activeImportJobPaths(): Promise<Set<string> | null> {
+  try {
+    const rows = await sqlClient`
+      select data->>'path' as path
+      from pgboss.job
+      where name = ${queueNames.importArchive}
+        and state in ('created', 'retry', 'active')
+    `;
+    return new Set(
+      (rows as Array<{ path?: unknown }>)
+        .map((row) => row.path)
+        .filter((path): path is string => typeof path === "string" && path.length > 0),
+    );
+  } catch {
+    return null;
+  }
+}
+
+export async function recoverStaleImportJobs(options: {
+  olderThanMs?: number;
+  requeue?: boolean;
+} = {}): Promise<{
+  inspected: number;
+  recovered: number;
+  failed: number;
+  skippedActive: number;
+}> {
+  const olderThanMs = options.olderThanMs ?? IMPORT_ORPHAN_GRACE_MS;
+  const cutoff = new Date(Date.now() - olderThanMs);
+  const staleJobs = await db
+    .select({
+      id: importJobs.id,
+      filename: importJobs.filename,
+      stats: importJobs.stats,
+      updatedAt: importJobs.updatedAt,
+    })
+    .from(importJobs)
+    .where(and(eq(importJobs.status, "processing"), lte(importJobs.updatedAt, cutoff)));
+
+  if (!staleJobs.length) {
+    return { inspected: 0, recovered: 0, failed: 0, skippedActive: 0 };
+  }
+
+  const activePaths = await activeImportJobPaths();
+  if (!activePaths) {
+    return { inspected: staleJobs.length, recovered: 0, failed: 0, skippedActive: staleJobs.length };
+  }
+
+  let recovered = 0;
+  let failed = 0;
+  let skippedActive = 0;
+  for (const job of staleJobs) {
+    const path = join(config.IMPORT_INBOX, job.filename);
+    if (activePaths.has(path)) {
+      skippedActive += 1;
+      continue;
+    }
+
+    const present = await fileExists(path);
+    const now = new Date();
+    const nextStatus = present ? "queued" : "failed";
+    const error = present
+      ? null
+      : "Import job stopped updating and the source archive is missing.";
+    const [updated] = await db
+      .update(importJobs)
+      .set({
+        status: nextStatus,
+        error,
+        stats: {
+          ...(job.stats ?? {}),
+          stage: nextStatus,
+          recoveredFromStaleProcessing: true,
+          staleUpdatedAt: job.updatedAt.toISOString(),
+        },
+        completedAt: present ? null : now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(importJobs.id, job.id),
+          eq(importJobs.status, "processing"),
+          lte(importJobs.updatedAt, cutoff),
+        ),
+      )
+      .returning({ id: importJobs.id });
+
+    if (!updated) continue;
+    await writeOperationLog({
+      scope: "import",
+      level: present ? "warning" : "error",
+      message: present
+        ? `历史导入任务超时中断，已自动重新入队：${job.filename}`
+        : `历史导入任务超时中断且源文件不存在，已标记失败：${job.filename}`,
+      status: nextStatus,
+      entityType: "import_job",
+      entityId: job.id,
+      metadata: {
+        filename: job.filename,
+        staleUpdatedAt: job.updatedAt.toISOString(),
+        recoveredFromStaleProcessing: true,
+      },
+    });
+
+    if (present) {
+      recovered += 1;
+      if (options.requeue) await enqueueImport(path).catch(() => null);
+    } else {
+      failed += 1;
+    }
+  }
+
+  return { inspected: staleJobs.length, recovered, failed, skippedActive };
 }
 
 export async function processArchive(
@@ -234,6 +359,7 @@ export async function processArchive(
 
 export async function scanImportInbox(): Promise<number> {
   await mkdir(config.IMPORT_INBOX, { recursive: true });
+  await recoverStaleImportJobs({ requeue: false });
   const files = (await readdir(config.IMPORT_INBOX, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".zip"))
     .map((entry) => join(config.IMPORT_INBOX, entry.name));

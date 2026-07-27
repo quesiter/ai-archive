@@ -13,11 +13,17 @@ import {
   enqueueUnlockedReclassification,
   getBoss,
   queueNames,
+  type ReclassificationJobData,
   stopBoss,
 } from "./services/queue.js";
+import { failStaleBackgroundTasks } from "./services/background-tasks.js";
 import { getBooleanSetting, getSetting } from "./services/settings.js";
 
 const boss = await getBoss();
+
+await failStaleBackgroundTasks("classification_rebuild").catch((error) => {
+  console.warn("Failed to mark stale classification tasks", error);
+});
 
 await boss.work(queueNames.weekly, async () => runAnalysis("weekly"));
 await boss.work(queueNames.monthly, async () => runAnalysis("monthly"));
@@ -38,15 +44,24 @@ await boss.work(
   queueNames.reclassifyUnlocked,
   { includeMetadata: true },
   async (jobs) => {
-    const data = jobs[0]?.data as
-      | { taskId?: unknown; mode?: unknown }
-      | undefined;
+    const data = jobs[0]?.data as ReclassificationJobData | undefined;
     const taskId = data?.taskId;
     const mode = data?.mode;
-    return reclassifyUnlockedConversations(
-      typeof taskId === "string" ? taskId : undefined,
-      mode === "economy" || mode === "full" ? mode : undefined,
-    );
+    const input: {
+      taskId?: string;
+      modeOverride?: "economy" | "full";
+      conversationIds?: string[];
+      offset?: number;
+    } = {};
+    if (typeof taskId === "string") input.taskId = taskId;
+    if (mode === "economy" || mode === "full") input.modeOverride = mode;
+    if (Array.isArray(data?.conversationIds)) {
+      input.conversationIds = data.conversationIds.filter(
+        (id): id is string => typeof id === "string",
+      );
+    }
+    if (typeof data?.offset === "number") input.offset = data.offset;
+    return reclassifyUnlockedConversations(input);
   },
 );
 await boss.work(queueNames.importArchive, { includeMetadata: true }, async (jobs) => {

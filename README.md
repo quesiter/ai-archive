@@ -2,7 +2,7 @@
 
 个人自托管的跨平台 AI 会话归档数据库。系统把网页 AI 平台和本地 AI 编程工具里的会话统一归档到自己的 PostgreSQL 中；智能归类、知识沉淀、周报、月报和个人分析是可选能力，不影响核心采集、搜索和备份恢复。
 
-当前服务端版本：`0.2.18`。Chrome 插件版本：`0.4.0`。
+当前服务端版本：`0.2.20`。Chrome 插件版本：`0.4.0`。
 
 ## 当前能力
 
@@ -21,7 +21,7 @@ Chrome 插件先做轻量变化检测；未变化时不会滚动页面、不会�
 
 | 包 | 路径 |
 | --- | --- |
-| NAS 服务端源码包 | `release/ai-conversation-archive-nas-0.2.18-clean-install.tar.gz` |
+| NAS 服务端源码包 | `release/ai-conversation-archive-nas-0.2.20-clean-install.tar.gz` |
 | Chrome 插件 | `release/ai-archiveextension-0.4.0-chrome.zip` |
 | Windows 同步代理 | `release/ai-conversation-archive-windows-sync-0.2.18.zip` |
 | macOS 同步代理 | `release/ai-conversation-archive-macos-sync-0.2.20.tar.gz` |
@@ -30,7 +30,7 @@ NAS 更新命令：
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.18-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.20-clean-install.tar.gz
 ```
 
 ## 文档

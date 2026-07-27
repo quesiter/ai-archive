@@ -8,6 +8,7 @@ import { desc, eq } from "drizzle-orm";
 import { db } from "../db.js";
 import { config } from "../config.js";
 import { requireWebUser } from "../http.js";
+import { recoverStaleImportJobs } from "../jobs/import-job.js";
 import { importJobs } from "../schema.js";
 import { writeOperationLog } from "../services/operation-log.js";
 import { enqueueImport } from "../services/queue.js";
@@ -21,6 +22,7 @@ async function fileSha256(path: string): Promise<string> {
 export async function importRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/v1/imports", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
+    await recoverStaleImportJobs({ requeue: true });
     return db.select().from(importJobs).orderBy(desc(importJobs.createdAt)).limit(100);
   });
 

@@ -10,6 +10,13 @@ export const queueNames = {
   emailReport: "email-report",
 } as const;
 
+export interface ReclassificationJobData {
+  taskId?: string;
+  mode?: "economy" | "full";
+  conversationIds?: string[];
+  offset?: number;
+}
+
 let bossPromise: Promise<PgBoss> | null = null;
 
 export function getBoss(): Promise<PgBoss> {
@@ -59,17 +66,31 @@ export async function enqueueConversationClassification(
 }
 
 export async function enqueueUnlockedReclassification(
-  taskId?: string,
+  input?: string | ReclassificationJobData,
   mode?: "economy" | "full",
 ): Promise<string | null> {
   const boss = await getBoss();
-  const options = taskId
-    ? { singletonKey: taskId }
+  const data =
+    typeof input === "string"
+      ? { taskId: input, mode }
+      : {
+          ...input,
+          mode: input?.mode ?? mode,
+        };
+  const offset = Math.max(0, Math.trunc(data.offset ?? 0));
+  const options = data.taskId
+    ? { singletonKey: `${data.taskId}:${offset}` }
     : { singletonKey: "all-unlocked", singletonSeconds: 300 };
   return boss.send(
     queueNames.reclassifyUnlocked,
-    { requestedAt: new Date().toISOString(), taskId, mode },
-    options,
+    { ...data, offset, requestedAt: new Date().toISOString() },
+    {
+      ...options,
+      expireInHours: 6,
+      retryLimit: 1,
+      retryDelay: 60,
+      retryBackoff: true,
+    },
   );
 }
 
@@ -79,6 +100,7 @@ export async function enqueueImport(path: string): Promise<string | null> {
     queueNames.importArchive,
     { path },
     {
+      expireInHours: 6,
       retryLimit: 3,
       retryDelay: 60,
       retryBackoff: true,
