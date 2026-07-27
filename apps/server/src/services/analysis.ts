@@ -7,8 +7,10 @@ import {
   gte,
   inArray,
   isNull,
+  lt,
   lte,
   or,
+  sql,
 } from "drizzle-orm";
 import { z } from "zod";
 import {
@@ -297,6 +299,18 @@ const TOO_GENERIC_PROJECT_NAMES = new Set([
 ]);
 
 type ClassificationRunMode = "economy" | "full";
+type ReclassificationScope = "incremental" | "all";
+type ClassificationCandidateReason =
+  | "full"
+  | "unassigned"
+  | "low_confidence"
+  | "changed";
+
+type ClassificationCandidateRow = {
+  id: string;
+  title: string | null;
+  candidateReason: ClassificationCandidateReason | null;
+};
 
 interface ClassificationRuntimeOptions {
   mode: ClassificationRunMode;
@@ -307,6 +321,7 @@ interface ClassificationRuntimeOptions {
 interface ReclassificationRunInput {
   taskId?: string;
   modeOverride?: ClassificationRunMode;
+  scope?: ReclassificationScope;
   conversationIds?: string[];
   offset?: number;
 }
@@ -325,6 +340,8 @@ interface ClassificationTaskStats {
   mode: ClassificationRunMode;
   maxConversationChars: number;
   reuseStable: boolean;
+  scope: ReclassificationScope;
+  candidateReasons: Record<string, number>;
   failureSamples: Array<{
     conversationId: string;
     title: string | null;
@@ -948,6 +965,25 @@ export function shouldReuseClassification(input: {
       input.assignmentUpdatedAt &&
       input.assignmentUpdatedAt >= input.revisionCapturedAt,
   );
+}
+
+export function classificationCandidateReason(input: {
+  scope: ReclassificationScope;
+  projectId: string | null | undefined;
+  confidence: number | null | undefined;
+  assignmentUpdatedAt: Date | null | undefined;
+  revisionCapturedAt: Date | null | undefined;
+}): ClassificationCandidateReason | null {
+  if (input.scope === "all") return "full";
+  if (!input.revisionCapturedAt) return null;
+  if (!input.projectId) return "unassigned";
+  if ((input.confidence ?? 0) < STABLE_CLASSIFICATION_CONFIDENCE) {
+    return "low_confidence";
+  }
+  if (!input.assignmentUpdatedAt || input.assignmentUpdatedAt < input.revisionCapturedAt) {
+    return "changed";
+  }
+  return null;
 }
 
 export function localProjectGuess(
@@ -1608,10 +1644,20 @@ function normalizeFailureSamples(
     .filter((item) => item.conversationId && item.error);
 }
 
+function normalizeCandidateReasons(value: unknown): Record<string, number> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([key, count]) => [key, numberStat(count)] as const)
+      .filter(([, count]) => count > 0),
+  );
+}
+
 function normalizeClassificationTaskStats(
   value: unknown,
   options: ClassificationRuntimeOptions,
   attempted: number,
+  scope: ReclassificationScope,
 ): ClassificationTaskStats {
   const record = isRecord(value) ? value : {};
   return {
@@ -1628,22 +1674,49 @@ function normalizeClassificationTaskStats(
     mode: options.mode,
     maxConversationChars: options.maxConversationChars,
     reuseStable: options.reuseStable,
+    scope,
+    candidateReasons: normalizeCandidateReasons(record.candidateReasons),
     failureSamples: normalizeFailureSamples(record.failureSamples),
   };
 }
 
 async function loadUnlockedClassificationRows(
   conversationIds?: string[],
-): Promise<Array<{ id: string; title: string | null }>> {
+  scope: ReclassificationScope = "incremental",
+): Promise<ClassificationCandidateRow[]> {
   if (conversationIds && conversationIds.length === 0) return [];
   const unlockedCondition = or(
     isNull(conversationProjects.lockedByUser),
     eq(conversationProjects.lockedByUser, false),
   );
+  const latestRevisionCapturedAt = sql<Date | null>`coalesce(
+    (
+      select max(${conversationRevisions.capturedAt})
+      from ${conversationRevisions}
+      where ${conversationRevisions.conversationId} = ${conversations.id}
+        and ${conversationRevisions.completeness} = 'complete'
+    ),
+    (
+      select max(${conversationRevisions.capturedAt})
+      from ${conversationRevisions}
+      where ${conversationRevisions.conversationId} = ${conversations.id}
+    )
+  )`;
+  const incrementalCondition = or(
+    isNull(conversationProjects.conversationId),
+    isNull(conversationProjects.projectId),
+    isNull(conversationProjects.confidence),
+    lt(conversationProjects.confidence, STABLE_CLASSIFICATION_CONFIDENCE),
+    sql`${conversationProjects.updatedAt} < ${latestRevisionCapturedAt}`,
+  );
   const baseRows = await db
     .select({
       id: conversations.id,
       title: conversations.title,
+      projectId: conversationProjects.projectId,
+      confidence: conversationProjects.confidence,
+      assignmentUpdatedAt: conversationProjects.updatedAt,
+      revisionCapturedAt: latestRevisionCapturedAt,
     })
     .from(conversations)
     .leftJoin(
@@ -1653,19 +1726,32 @@ async function loadUnlockedClassificationRows(
     .where(
       conversationIds?.length
         ? and(
-            isNull(conversations.deletedAt),
             inArray(conversations.id, conversationIds),
-            unlockedCondition,
           )
-        : and(isNull(conversations.deletedAt), unlockedCondition),
+        : scope === "all"
+          ? and(isNull(conversations.deletedAt), unlockedCondition)
+          : and(isNull(conversations.deletedAt), unlockedCondition, incrementalCondition),
     )
     .orderBy(desc(conversations.updatedAt));
 
-  if (!conversationIds?.length) return baseRows;
-  const rowById = new Map(baseRows.map((row) => [row.id, row]));
+  const rows = baseRows
+    .map((row) => ({
+      id: row.id,
+      title: row.title,
+      candidateReason: classificationCandidateReason({
+        scope,
+        projectId: row.projectId,
+        confidence: row.confidence,
+        assignmentUpdatedAt: row.assignmentUpdatedAt,
+        revisionCapturedAt: row.revisionCapturedAt,
+      }),
+    }))
+    .filter((row) => conversationIds?.length || Boolean(row.candidateReason));
+
+  if (!conversationIds?.length) return rows;
+  const rowById = new Map(rows.map((row) => [row.id, row]));
   return conversationIds
-    .map((id) => rowById.get(id))
-    .filter((row): row is { id: string; title: string | null } => Boolean(row));
+    .map((id) => rowById.get(id) ?? { id, title: null, candidateReason: null });
 }
 
 function normalizeReclassificationInput(
@@ -1676,8 +1762,21 @@ function normalizeReclassificationInput(
     typeof input === "string" ? { taskId: input } : { ...(input ?? {}) };
   const resolvedMode = typeof input === "string" ? modeOverride : input?.modeOverride ?? modeOverride;
   if (resolvedMode) normalized.modeOverride = resolvedMode;
+  const scope =
+    typeof input === "string" ? undefined : input?.scope;
+  normalized.scope =
+    scope === "all" || scope === "incremental"
+      ? scope
+      : resolvedMode === "full"
+        ? "all"
+        : "incremental";
   if (typeof normalized.offset === "number") {
     normalized.offset = Math.max(0, Math.trunc(normalized.offset));
+  }
+  if (Array.isArray(normalized.conversationIds)) {
+    normalized.conversationIds = Array.from(
+      new Set(normalized.conversationIds.filter((id) => typeof id === "string")),
+    );
   }
   return normalized;
 }
@@ -1694,9 +1793,15 @@ export async function reclassifyUnlockedConversations(
   const taskId = runInput.taskId;
   try {
     const options = await classificationRuntimeOptions(runInput.modeOverride);
-    const rows = await loadUnlockedClassificationRows(runInput.conversationIds);
+    const scope = runInput.scope ?? (options.mode === "full" ? "all" : "incremental");
+    const rows = await loadUnlockedClassificationRows(runInput.conversationIds, scope);
     const conversationIds = runInput.conversationIds ?? rows.map((row) => row.id);
     const existingTask = taskId ? await getBackgroundTask(taskId) : null;
+    const freshCandidateReasons = rows.reduce<Record<string, number>>((accumulator, row) => {
+      if (!row.candidateReason) return accumulator;
+      accumulator[row.candidateReason] = (accumulator[row.candidateReason] ?? 0) + 1;
+      return accumulator;
+    }, {});
 
     if (
       existingTask &&
@@ -1715,8 +1820,10 @@ export async function reclassifyUnlockedConversations(
           taskId,
           rows.length,
           rows.length
-            ? `正在以${options.mode === "economy" ? "节能" : "完整"}模式评估 0/${rows.length} 个未锁定会话`
-            : "没有需要评估的会话",
+            ? `正在以${options.mode === "economy" ? "节能" : "完整"}模式${scope === "incremental" ? "增量评估" : "重评"} 0/${rows.length} 个候选会话`
+            : scope === "incremental"
+              ? "没有需要重新评估的会话"
+              : "没有需要评估的会话",
         ).catch(() => null);
       } else {
         await updateBackgroundTask(taskId, {
@@ -1732,7 +1839,11 @@ export async function reclassifyUnlockedConversations(
       refreshedTask?.stats,
       options,
       rows.length,
+      scope,
     );
+    const candidateReasons = Object.keys(stats.candidateReasons).length
+      ? stats.candidateReasons
+      : freshCandidateReasons;
     let processed = Math.min(
       rows.length,
       Math.max(runInput.offset ?? 0, refreshedTask?.processedCount ?? 0),
@@ -1784,6 +1895,8 @@ export async function reclassifyUnlockedConversations(
           mode: options.mode,
           maxConversationChars: options.maxConversationChars,
           reuseStable: options.reuseStable,
+          scope,
+          candidateReasons,
           failureSamples,
         },
         message: rows.length
@@ -1846,6 +1959,7 @@ export async function reclassifyUnlockedConversations(
         const nextJobId = await enqueueUnlockedReclassification({
           taskId,
           mode: options.mode,
+          scope,
           conversationIds,
           offset: processed,
         });
@@ -1875,6 +1989,8 @@ export async function reclassifyUnlockedConversations(
               mode: options.mode,
               maxConversationChars: options.maxConversationChars,
               reuseStable: options.reuseStable,
+              scope,
+              candidateReasons,
               failureSamples,
             },
             message: `已处理 ${processed}/${rows.length} 个，下一批已入队`,
@@ -1902,6 +2018,8 @@ export async function reclassifyUnlockedConversations(
           mode: options.mode,
           maxConversationChars: options.maxConversationChars,
           reuseStable: options.reuseStable,
+          scope,
+          candidateReasons,
           failureSamples,
         },
         message: `智能归类完成：处理 ${processed} 个，AI 调用 ${aiCalls} 次，本地命中 ${localMatches} 个，复用 ${cached} 个，失败 ${failed} 个`,

@@ -136,10 +136,12 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .progress-panel { padding: 1rem 1.15rem; }
 .progress-header > div { display: flex; flex-direction: column; gap: .25rem; min-width: 0; }
 .progress-header strong { color: #1d4a4f; }
-.progress-header span, .progress-stats, .run-row span, .run-progress small { color: var(--muted); font-size: .75rem; }
+.progress-header span, .progress-stats, .progress-breakdown, .run-row span, .run-progress small { color: var(--muted); font-size: .75rem; }
 .progress-bar { height: 9px; width: 100%; overflow: hidden; border-radius: 999px; background: #dbecea; margin: .72rem 0 .58rem; }
 .progress-bar span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .25s ease; }
 .progress-stats { display: flex; gap: .8rem; flex-wrap: wrap; }
+.progress-breakdown { display: flex; gap: .45rem; flex-wrap: wrap; margin-top: .55rem; }
+.progress-breakdown span { border-radius: 999px; background: #eef5f3; color: #4e6970; padding: .18rem .5rem; font-weight: 750; }
 .progress-error { margin: .62rem 0 0; color: #a53b4c; font-size: .82rem; }
 .failure-list { margin-top: .72rem; padding-top: .72rem; border-top: 1px solid rgba(52,118,117,.1); color: #8a4350; font-size: .78rem; }
 .failure-list p { margin: .22rem 0; line-height: 1.55; word-break: break-word; }

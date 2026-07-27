@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  classificationCandidateReason,
   coarseProjectNameFromMaterial,
   fallbackSuggestedNameFromTitle,
   isLikelyOverSpecificProjectName,
@@ -166,6 +167,66 @@ describe("shouldReuseClassification", () => {
     expect(
       shouldReuseClassification({ ...stableInput, confidence: 0.8, mode: "full" }),
     ).toBe(false);
+  });
+});
+
+describe("classificationCandidateReason", () => {
+  const revisionCapturedAt = new Date("2026-07-25T00:00:00.000Z");
+  const freshAssignmentAt = new Date("2026-07-25T00:01:00.000Z");
+  const staleAssignmentAt = new Date("2026-07-24T23:59:00.000Z");
+
+  it("marks all rows as candidates for explicit full re-evaluation", () => {
+    expect(
+      classificationCandidateReason({
+        scope: "all",
+        projectId: "11111111-1111-1111-1111-111111111111",
+        confidence: 0.95,
+        assignmentUpdatedAt: freshAssignmentAt,
+        revisionCapturedAt,
+      }),
+    ).toBe("full");
+  });
+
+  it("selects unassigned, low-confidence, and changed conversations incrementally", () => {
+    expect(
+      classificationCandidateReason({
+        scope: "incremental",
+        projectId: null,
+        confidence: null,
+        assignmentUpdatedAt: null,
+        revisionCapturedAt,
+      }),
+    ).toBe("unassigned");
+    expect(
+      classificationCandidateReason({
+        scope: "incremental",
+        projectId: "11111111-1111-1111-1111-111111111111",
+        confidence: 0.77,
+        assignmentUpdatedAt: freshAssignmentAt,
+        revisionCapturedAt,
+      }),
+    ).toBe("low_confidence");
+    expect(
+      classificationCandidateReason({
+        scope: "incremental",
+        projectId: "11111111-1111-1111-1111-111111111111",
+        confidence: 0.8,
+        assignmentUpdatedAt: staleAssignmentAt,
+        revisionCapturedAt,
+      }),
+    ).toBe("changed");
+  });
+
+  it("skips stable fresh assignments in incremental mode", () => {
+    expect(
+      classificationCandidateReason({
+        scope: "incremental",
+        projectId: "11111111-1111-1111-1111-111111111111",
+        confidence: 0.8,
+        assignmentUpdatedAt: freshAssignmentAt,
+        revisionCapturedAt,
+      }),
+    ).toBeNull();
   });
 });
 

@@ -642,11 +642,21 @@ Content-Type: application/json
 
 ```json
 {
-  "mode": "economy"
+  "mode": "economy",
+  "scope": "incremental"
 }
 ```
 
 `mode` 可选 `economy` 或 `full`。不传时使用设置中的 `classification.runMode`。
+
+`scope` 可选：
+
+| 值 | 行为 |
+| --- | --- |
+| `incremental` | 默认日常模式。只处理新会话、未归类、低置信度或最新修订晚于上次归类的候选会话。 |
+| `all` | 完整重评所有未人工锁定会话。 |
+
+如果不传 `scope`，`mode=full` 时默认为 `all`，其他情况默认为 `incremental`。
 
 响应：
 
@@ -657,7 +667,15 @@ Content-Type: application/json
     "id": "uuid",
     "status": "queued",
     "totalCount": 0,
-    "processedCount": 0
+    "processedCount": 0,
+    "stats": {
+      "scope": "incremental",
+      "candidateReasons": {
+        "unassigned": 12,
+        "changed": 3,
+        "low_confidence": 1
+      }
+    }
   }
 }
 ```

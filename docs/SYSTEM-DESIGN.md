@@ -235,7 +235,7 @@ Web 后台备份是逻辑业务备份，面向“重建网站后导入数据”�
 | 队列 | 用途 |
 | --- | --- |
 | `classify-conversation` | 单个会话归类，通常由采集后自动触发。 |
-| `reclassify-unlocked` | 批量重新归类未人工锁定会话。 |
+| `reclassify-unlocked` | 批量归类任务。默认先筛增量候选；完整重评时处理全部未人工锁定会话。 |
 
 归类运行模式：
 
@@ -244,15 +244,24 @@ Web 后台备份是逻辑业务备份，面向“重建网站后导入数据”�
 | 节能模式 `economy` | 复用稳定结果，本地项目名匹配优先，必要时才调用 AI。 | 日常使用，减少上下文和费用。 |
 | 完整模式 `full` | 对未锁定会话强制重新评估。 | 测试、纠错、项目结构大改后重跑。 |
 
+批量归类还有 `scope`：
+
+| 范围 | 行为 |
+| --- | --- |
+| `incremental` | 默认。SQL 先筛出无项目、低置信度、无归类记录或归类时间早于最新修订的未锁定会话。 |
+| `all` | 显式完整重评全部未锁定会话。 |
+
 节省上下文的机制：
 
-1. 稳定分类复用：置信度大于等于 `0.78` 且分类时间不早于最新修订时，节能模式直接复用。
-2. 本地命中：标题、已有建议名、正文前部匹配项目名时不调用 AI。
-3. 输入截断：`classification.maxConversationChars` 默认 8000，配置范围 2000 到 40000。
-4. 批量任务逐条处理，单条失败只计入失败样本，不中断整批。
-5. 手动批量归类按批次续跑：单个 `reclassify-unlocked` job 到达批次数量或软时间上限后，会把下一批重新入队，任务总进度继续累计在同一个 `background_tasks` 记录中；job 过期时间显式设置为 6 小时。
-6. 长时间没有进度更新的 queued/running 任务会被自动标记失败，避免页面长期误判为运行中。
-7. 用户锁定项目后，不再进入自动覆盖路径。
+1. 默认增量候选：日常手动归类和自动重归类不再按总会话数扫描正文，而是在数据库层先筛出需要评估的候选。
+2. 稳定分类复用：置信度大于等于 `0.78` 且分类时间不早于最新修订时，节能模式直接复用。
+3. 本地命中：标题、已有建议名、正文前部匹配项目名时不调用 AI。
+4. 输入截断：`classification.maxConversationChars` 默认 8000，配置范围 2000 到 40000。
+5. 批量任务逐条处理，单条失败只计入失败样本，不中断整批。
+6. 手动批量归类按批次续跑：单个 `reclassify-unlocked` job 到达批次数量或软时间上限后，会把下一批重新入队，任务总进度继续累计在同一个 `background_tasks` 记录中；job 过期时间显式设置为 6 小时。
+7. 续跑使用首次筛出的固定候选 ID 列表和顺序，避免上一批写入归类结果后导致下一批 offset 跳过未处理会话。
+8. 长时间没有进度更新的 queued/running 任务会被自动标记失败，避免页面长期误判为运行中。
+9. 用户锁定项目后，不再进入自动覆盖路径。
 
 任务进度写入 `background_tasks`：
 
@@ -260,7 +269,7 @@ Web 后台备份是逻辑业务备份，面向“重建网站后导入数据”�
 totalCount, processedCount, succeededCount, failedCount, message, stats
 ```
 
-`stats` 包含 attempted、analyzed、classified、suggested、skipped、failed、aiCalls、localMatches、cached、mode、maxConversationChars、reuseStable、failureSamples 等。
+`stats` 包含 attempted、analyzed、classified、suggested、skipped、failed、aiCalls、localMatches、cached、mode、scope、candidateReasons、maxConversationChars、reuseStable、failureSamples 等。
 
 ### 4.9 周报与月报
 

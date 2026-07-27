@@ -13,6 +13,7 @@ export const queueNames = {
 export interface ReclassificationJobData {
   taskId?: string;
   mode?: "economy" | "full";
+  scope?: "incremental" | "all";
   conversationIds?: string[];
   offset?: number;
 }

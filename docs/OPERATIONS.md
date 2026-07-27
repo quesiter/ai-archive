@@ -83,13 +83,13 @@ curl -fsS http://127.0.0.1:18080/healthz
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.20-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
 ```
 
 测试环境可跳过升级前数据库备份：
 
 ```sh
-SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.20-clean-install.tar.gz
+SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
 ```
 
 升级后检查：
@@ -101,7 +101,7 @@ docker compose --env-file .env logs --tail=120 app worker
 curl -fsS http://127.0.0.1:18080/healthz
 ```
 
-`/healthz` 应返回当前版本，例如 `0.2.20`。如果健康检查版本仍是旧号，通常是 Docker 镜像缓存、反向代理指向旧容器，或没有强制重建 app/worker。
+`/healthz` 应返回当前版本，例如 `0.2.21`。如果健康检查版本仍是旧号，通常是 Docker 镜像缓存、反向代理指向旧容器，或没有强制重建 app/worker。
 
 ## 6. Chrome 插件运维
 
@@ -210,7 +210,7 @@ Worker 负责：
 | 自动重归类 | 每周日 06:15，需要开启 `classification.autoReclassify`。 |
 | 导入目录扫描 | 每 5 分钟。 |
 
-分类、导入或报告一直不动时，优先检查 Worker 容器是否运行。批量智能归类会分片续跑；如果某个 `background_tasks` 记录长时间没有进度更新，Worker 启动和任务状态接口会自动把它标记为失败，用户可在升级或修复模型配置后重新点击“智能归类”。历史导入会额外检查 PgBoss 中是否仍有对应的活跃 `import-archive` job：没有活跃 job 且源 ZIP 仍在 inbox 时自动重新入队，源文件缺失时标记失败。
+分类、导入或报告一直不动时，优先检查 Worker 容器是否运行。批量智能归类默认先在数据库里筛增量候选，只处理新会话、未归类、低置信度和内容更新的会话；完整重评是显式操作。归类会分片续跑，续跑时使用首次筛出的固定候选列表，避免 offset 因已处理记录更新而跳过后续会话。如果某个 `background_tasks` 记录长时间没有进度更新，Worker 启动和任务状态接口会自动把它标记为失败，用户可在升级或修复模型配置后重新点击“智能归类”。历史导入会额外检查 PgBoss 中是否仍有对应的活跃 `import-archive` job：没有活跃 job 且源 ZIP 仍在 inbox 时自动重新入队，源文件缺失时标记失败。
 
 ## 11. 模型与邮件配置
 

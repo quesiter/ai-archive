@@ -273,10 +273,14 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/v1/classification/run", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
     const input = z
-      .object({ mode: z.enum(["economy", "full"]).optional() })
+      .object({
+        mode: z.enum(["economy", "full"]).optional(),
+        scope: z.enum(["incremental", "all"]).optional(),
+      })
       .parse(request.body ?? {});
     const savedMode = await getSetting("classification.runMode");
     const mode = input.mode ?? (savedMode === "full" ? "full" : "economy");
+    const scope = input.scope ?? (mode === "full" ? "all" : "incremental");
     await failStaleBackgroundTasks("classification_rebuild");
     const activeTask = await getLatestBackgroundTask("classification_rebuild", [
       "queued",
@@ -287,9 +291,9 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     }
     const task = await createBackgroundTask(
       "classification_rebuild",
-      `已加入队列，等待 Worker 以${mode === "full" ? "完整" : "节能"}模式接手`,
+      `已加入队列，等待 Worker 以${mode === "full" ? "完整" : "节能"}模式${scope === "incremental" ? "增量处理候选会话" : "重评未锁定会话"}`,
     );
-    const jobId = await enqueueUnlockedReclassification(task.id, mode);
+    const jobId = await enqueueUnlockedReclassification({ taskId: task.id, mode, scope });
     if (!jobId) {
       await updateBackgroundTask(task.id, {
         status: "failed",

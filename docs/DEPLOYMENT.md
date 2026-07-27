@@ -1,6 +1,6 @@
 # 部署与使用
 
-本文面向群晖 NAS、Chrome 插件、本地 Codex/OpenClaw 同步代理和数据备份恢复。当前服务端版本为 `0.2.20`，Chrome 插件版本为 `0.4.0`。
+本文面向群晖 NAS、Chrome 插件、本地 Codex/OpenClaw 同步代理和数据备份恢复。当前服务端版本为 `0.2.21`，Chrome 插件版本为 `0.4.0`。
 
 ## 1. 群晖 NAS 全新安装
 
@@ -9,7 +9,7 @@
 1. 上传源码包到 NAS：
 
 ```sh
-/volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.20-clean-install.tar.gz
+/volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
 ```
 
 2. 创建源码目录和数据目录：
@@ -21,7 +21,7 @@ mkdir -p /volume1/docker/ai-conversation-archive/data/imports/inbox
 mkdir -p /volume1/docker/ai-conversation-archive/data/imports/processed
 mkdir -p /volume1/docker/ai-conversation-archive/data/imports/failed
 cd /volume1/docker/ai-conversation-archive/source
-tar -xzf /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.20-clean-install.tar.gz
+tar -xzf /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
 ```
 
 3. 生成配置文件、数据库密码和主密钥：
@@ -71,7 +71,7 @@ curl -fsS http://127.0.0.1:18080/healthz
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.20-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
 ```
 
 脚本会保留现有 `deploy/.env`，创建必要数据目录，尝试数据库备份，解压新版源码包，构建镜像，切换源码目录，强制重建 app/worker 容器，并检查 `/healthz` 返回的版本号。
@@ -80,7 +80,7 @@ sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversat
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.20-clean-install.tar.gz
+SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
 ```
 
 如果已经手动把源码覆盖到 `source` 目录，可以原地构建重启：
@@ -195,7 +195,7 @@ Grok、腾讯元宝、MiniMax、DeepSeek、千问、Kimi 等平台没有稳定�
 
 在“设置”页填写 OpenAI 兼容接口的 Base URL、API Key 和模型名，并点击“测试”确认可用。
 
-智能归类会优先复用已有项目，节能模式会尽量使用本地匹配和缓存，减少把大量会话重复发送给模型。周报/月报会从已归类会话中抽取知识，再生成报告。知识数量为 0 通常表示还没有成功运行报告/知识抽取，或智能归类尚未完成。
+智能归类默认使用增量候选：只处理新会话、未归类、低置信度或最新修订晚于上次归类的会话。节能模式会尽量使用本地匹配和缓存，减少把大量会话重复发送给模型；完整重评需要在项目页手动选择。周报/月报会从已归类会话中抽取知识，再生成报告。知识数量为 0 通常表示还没有成功运行报告/知识抽取，或智能归类尚未完成。
 
 模型不是归档核心链路依赖；没有配置模型时，采集、导入、同步、会话列表、搜索、修订查看和备份恢复仍可运行。
 

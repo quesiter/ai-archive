@@ -50,11 +50,15 @@ await boss.work(
     const input: {
       taskId?: string;
       modeOverride?: "economy" | "full";
+      scope?: "incremental" | "all";
       conversationIds?: string[];
       offset?: number;
     } = {};
     if (typeof taskId === "string") input.taskId = taskId;
     if (mode === "economy" || mode === "full") input.modeOverride = mode;
+    if (data?.scope === "incremental" || data?.scope === "all") {
+      input.scope = data.scope;
+    }
     if (Array.isArray(data?.conversationIds)) {
       input.conversationIds = data.conversationIds.filter(
         (id): id is string => typeof id === "string",

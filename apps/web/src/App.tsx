@@ -325,6 +325,32 @@ function taskFailureSamples(task: UnknownRecord | null): UnknownRecord[] {
   return Array.isArray(samples) ? samples.slice(0, 5) : [];
 }
 
+const classificationScopeLabels: Record<string, string> = {
+  incremental: "增量候选",
+  all: "完整重评",
+};
+
+const classificationCandidateReasonLabels: Record<string, string> = {
+  full: "完整重评",
+  unassigned: "未归类",
+  low_confidence: "低置信度",
+  changed: "内容已更新",
+};
+
+function taskCandidateReasonEntries(task: UnknownRecord | null) {
+  const reasons = taskStats(task).candidateReasons;
+  if (!reasons || typeof reasons !== "object" || Array.isArray(reasons)) return [];
+  const order = ["unassigned", "changed", "low_confidence", "full"];
+  return Object.entries(reasons as Record<string, unknown>)
+    .map(([key, value]) => ({ key, count: toFiniteNumber(value) }))
+    .filter((item) => item.count > 0)
+    .sort((left, right) => {
+      const leftIndex = order.indexOf(left.key);
+      const rightIndex = order.indexOf(right.key);
+      return (leftIndex < 0 ? 99 : leftIndex) - (rightIndex < 0 ? 99 : rightIndex);
+    });
+}
+
 function compactErrorMessage(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) return "";
   const trimmed = value.trim();
@@ -1189,7 +1215,10 @@ function Projects() {
         reused?: boolean;
       }>("/api/v1/classification/run", {
         method: "POST",
-        ...jsonBody({ mode: classificationRunMode }),
+        ...jsonBody({
+          mode: classificationRunMode,
+          scope: classificationRunMode === "full" ? "all" : "incremental",
+        }),
       });
       setClassificationTask(payload.task);
       setClassificationMessage(
@@ -1209,6 +1238,9 @@ function Projects() {
   const percent = taskPercent(classificationTask);
   const stats = taskStats(classificationTask);
   const failureSamples = taskFailureSamples(classificationTask);
+  const candidateReasonEntries = taskCandidateReasonEntries(classificationTask);
+  const classificationScopeLabel =
+    classificationScopeLabels[String(stats.scope ?? "")] ?? "未记录";
   return (
     <>
       <PageHeader
@@ -1225,8 +1257,8 @@ function Projects() {
                 )
               }
             >
-              <option value="economy">节能归类</option>
-              <option value="full">完整重评</option>
+              <option value="economy">增量节能归类</option>
+              <option value="full">完整重评未锁定会话</option>
             </select>
             <button disabled={classificationActive} onClick={() => void runClassification()}>
               {classificationActive ? "智能归类中" : "立即智能归类"}
@@ -1253,6 +1285,7 @@ function Projects() {
             <span style={{ width: `${percent}%` }} />
           </div>
           <div className="progress-stats">
+            <span>范围 {classificationScopeLabel}</span>
             <span>已处理 {classificationTask.processedCount ?? 0}/{classificationTask.totalCount ?? 0}</span>
             <span>AI 调用 {stats.aiCalls ?? 0}</span>
             <span>AI 兜底 {stats.aiFallbacks ?? 0}</span>
@@ -1263,6 +1296,15 @@ function Projects() {
             <span>跳过 {stats.skipped ?? 0}</span>
             <span>失败 {classificationTask.failedCount ?? 0}</span>
           </div>
+          {candidateReasonEntries.length > 0 && (
+            <div className="progress-breakdown">
+              {candidateReasonEntries.map((item) => (
+                <span key={item.key}>
+                  {classificationCandidateReasonLabels[item.key] ?? item.key} {formatCount(item.count)}
+                </span>
+              ))}
+            </div>
+          )}
           {classificationTask.error && (
             <p className="progress-error">{classificationTask.error}</p>
           )}
