@@ -18,3 +18,7 @@ Dockerfile text eol=lf
 *.bat text eol=crlf
 *.zip binary
 *.tar.gz binary
+
+.gitignore export-ignore
+.gitattributes export-ignore
+release/ai-conversation-archive-nas-*-clean-install.tar.gz export-ignore

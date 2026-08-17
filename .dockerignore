@@ -10,9 +10,10 @@ data
 imports
 coverage
 release/*
-!release/ai-archiveextension-*-chrome.zip
-!release/ai-conversation-archive-windows-sync-*.zip
-!release/ai-conversation-archive-macos-sync-*.tar.gz
 *.log
 *.zip
 *.tar.gz
+!release/
+!release/ai-archiveextension-*-chrome.zip
+!release/ai-conversation-archive-windows-sync-*.zip
+!release/ai-conversation-archive-macos-sync-*.tar.gz
