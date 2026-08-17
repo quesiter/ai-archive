@@ -1428,23 +1428,23 @@ function Projects() {
       </section>
 
       <section className="panel project-create-panel">
-        <div>
+        <div className="project-action-copy">
           <h2>新建项目</h2>
           <p className="panel-subtitle">新增项目后，可重新运行智能归类或在会话详情中人工锁定。</p>
         </div>
-        <form className="inline-form" onSubmit={createProject}>
-          <input name="name" placeholder="新项目名称" required />
-          <input name="description" placeholder="描述（可选）" />
+        <form className="project-create-form" onSubmit={createProject}>
+          <input name="name" aria-label="项目名称" placeholder="新项目名称" required />
+          <input name="description" aria-label="项目描述" placeholder="描述（可选）" />
           <button>创建</button>
         </form>
       </section>
 
       <section className="panel project-admin-panel">
-        <div>
+        <div className="project-action-copy">
           <h2>合并项目</h2>
           <p className="panel-subtitle">把 A 项目的会话、知识和关联报告迁移到 B 项目；完成后删除 A 项目。</p>
         </div>
-        <form className="inline-form project-merge-form" onSubmit={mergeProjects}>
+        <form className="project-merge-form" onSubmit={mergeProjects}>
           <label>A · 源项目
             <select value={mergeSourceId} onChange={(event) => setMergeSourceId(event.target.value)} required>
               <option value="">请选择</option>
