@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { z, ZodError } from "zod";
 import { getSetting } from "./settings.js";
+import { withPinnedNetworkDispatcher } from "./network-target.js";
 
 export interface LlmConfig {
   baseURL: string;
@@ -16,6 +17,7 @@ export interface LlmConfigInput {
 
 const STRUCTURED_COMPLETION_TIMEOUT_MS = 120_000;
 const TEST_COMPLETION_TIMEOUT_MS = 30_000;
+export const TOKEN_PLAN_RETRY_DELAY_MS = 5 * 60 * 60_000;
 
 async function loadLlmConfig(input: LlmConfigInput = {}): Promise<LlmConfig> {
   const [baseURL, apiKey, model] = await Promise.all([
@@ -117,10 +119,10 @@ export function extractJson(content: string): unknown {
       // Try the next candidate before reporting the original model output.
     }
   }
-  throw new Error(`Model did not return valid JSON; response excerpt: ${excerpt(content)}`);
+  throw new Error("Model did not return valid JSON");
 }
 
-function schemaErrorMessage(error: ZodError, content: string): string {
+function schemaErrorMessage(error: ZodError): string {
   const issues = error.issues
     .slice(0, 6)
     .map((issue) => {
@@ -128,7 +130,22 @@ function schemaErrorMessage(error: ZodError, content: string): string {
       return `${path}: ${issue.message}`;
     })
     .join("; ");
-  return `Model JSON did not match expected schema: ${issues}; response excerpt: ${excerpt(content)}`;
+  return `Model JSON did not match expected schema: ${issues}`;
+}
+
+export function isRetryableRateLimitError(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? `${error.name}: ${error.message}`.toLowerCase()
+      : String(error).toLowerCase();
+  return (
+    message.includes("token plan") ||
+    message.includes("rate limit") ||
+    message.includes("too many requests") ||
+    message.includes("429") ||
+    message.includes("insufficient_quota") ||
+    message.includes("quota exceeded")
+  );
 }
 
 function parseStructured<T>(
@@ -139,7 +156,7 @@ function parseStructured<T>(
   try {
     return schema.parse(parsed);
   } catch (error) {
-    if (error instanceof ZodError) throw new Error(schemaErrorMessage(error, content));
+    if (error instanceof ZodError) throw new Error(schemaErrorMessage(error));
     throw error;
   }
 }
@@ -150,35 +167,41 @@ export async function completeStructured<T>(input: {
   schema: z.ZodType<T, z.ZodTypeDef, unknown>;
 }): Promise<T> {
   const llm = await loadLlmConfig();
-  const client = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
-  const baseRequest = {
-    model: llm.model,
-    temperature: 0,
-    messages: [
-      { role: "system" as const, content: input.system },
-      { role: "user" as const, content: input.user },
-    ],
-  };
-  let response;
-  try {
-    response = await client.chat.completions.create(
-      {
-        ...baseRequest,
-        response_format: { type: "json_object" },
-      },
-      { timeout: STRUCTURED_COMPLETION_TIMEOUT_MS },
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "";
-    if (!/response_format|json_object|unsupported/i.test(message)) throw error;
-    response = await client.chat.completions.create(
-      baseRequest,
-      { timeout: STRUCTURED_COMPLETION_TIMEOUT_MS },
-    );
-  }
-  const content = response.choices[0]?.message.content;
-  if (!content) throw new Error("Model returned an empty response");
-  return parseStructured(input.schema, content);
+  return withPinnedNetworkDispatcher(llm.baseURL, async (dispatcher) => {
+    const client = new OpenAI({
+      apiKey: llm.apiKey,
+      baseURL: llm.baseURL,
+      fetchOptions: { dispatcher },
+    });
+    const baseRequest = {
+      model: llm.model,
+      temperature: 0,
+      messages: [
+        { role: "system" as const, content: input.system },
+        { role: "user" as const, content: input.user },
+      ],
+    };
+    let response;
+    try {
+      response = await client.chat.completions.create(
+        {
+          ...baseRequest,
+          response_format: { type: "json_object" },
+        },
+        { timeout: STRUCTURED_COMPLETION_TIMEOUT_MS },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (!/response_format|json_object|unsupported/i.test(message)) throw error;
+      response = await client.chat.completions.create(
+        baseRequest,
+        { timeout: STRUCTURED_COMPLETION_TIMEOUT_MS },
+      );
+    }
+    const content = response.choices[0]?.message.content;
+    if (!content) throw new Error("Model returned an empty response");
+    return parseStructured(input.schema, content);
+  });
 }
 
 export async function testLlmConnection(input: LlmConfigInput = {}): Promise<{
@@ -187,34 +210,40 @@ export async function testLlmConnection(input: LlmConfigInput = {}): Promise<{
   response: string;
 }> {
   const llm = await loadLlmConfig(input);
-  const client = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
-  const request = {
-    model: llm.model,
-    temperature: 0,
-    messages: [{ role: "user" as const, content: "Reply with OK." }],
-  };
-  let response;
-  try {
-    response = await client.chat.completions.create(
-      {
-        ...request,
-        max_tokens: 8,
-      },
-      { timeout: TEST_COMPLETION_TIMEOUT_MS },
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "";
-    if (!/max_tokens|unsupported|not support/i.test(message)) throw error;
-    response = await client.chat.completions.create(
-      request,
-      { timeout: TEST_COMPLETION_TIMEOUT_MS },
-    );
-  }
-  const content = response.choices[0]?.message.content?.trim();
-  if (!content) throw new Error("Model returned an empty response");
-  return {
-    baseURL: llm.baseURL,
-    model: llm.model,
-    response: content.slice(0, 200),
-  };
+  return withPinnedNetworkDispatcher(llm.baseURL, async (dispatcher) => {
+    const client = new OpenAI({
+      apiKey: llm.apiKey,
+      baseURL: llm.baseURL,
+      fetchOptions: { dispatcher },
+    });
+    const request = {
+      model: llm.model,
+      temperature: 0,
+      messages: [{ role: "user" as const, content: "Reply with OK." }],
+    };
+    let response;
+    try {
+      response = await client.chat.completions.create(
+        {
+          ...request,
+          max_tokens: 8,
+        },
+        { timeout: TEST_COMPLETION_TIMEOUT_MS },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (!/max_tokens|unsupported|not support/i.test(message)) throw error;
+      response = await client.chat.completions.create(
+        request,
+        { timeout: TEST_COMPLETION_TIMEOUT_MS },
+      );
+    }
+    const content = response.choices[0]?.message.content?.trim();
+    if (!content) throw new Error("Model returned an empty response");
+    return {
+      baseURL: llm.baseURL,
+      model: llm.model,
+      response: content.slice(0, 200),
+    };
+  });
 }

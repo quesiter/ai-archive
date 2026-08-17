@@ -2,13 +2,13 @@
 
 个人自托管的跨平台 AI 会话归档数据库。系统把网页 AI 平台和本地 AI 编程工具里的会话统一归档到自己的 PostgreSQL 中；智能归类、知识沉淀、周报、月报和个人分析是可选能力，不影响核心采集、搜索和备份恢复。
 
-当前服务端版本：`0.2.21`。Chrome 插件版本：`0.4.0`。
+当前服务端版本：`V20260817`。Chrome 插件版本：`V20260817`。
 
 ## 当前能力
 
 - 网页自动采集：ChatGPT、Gemini、Grok、腾讯元宝、MiniMax Agent、DeepSeek、千问、Kimi。
 - 本地同步：OpenClaw、Codex、Claude Code。
-- 历史导入：ChatGPT 官方导出 ZIP、Gemini Takeout ZIP。
+- 历史导入：ChatGPT 官方导出 ZIP、Gemini Takeout ZIP、Chat Memo 多平台导出 ZIP（含 ChatGPT、Gemini、元宝、DeepSeek、千问和豆包）。
 - 管理后台：总览、会话、项目知识、报告、导入、设备、日志、设置、备份恢复。
 - 总览页展示归档规模、分类分布、近 7 日分类增长、总文本量、估算 token、知识数量、近 24 小时采集健康和最近报告。
 - 智能归类默认只处理增量候选：新会话、未归类、低置信度和内容更新的会话；需要时可手动选择完整重评未锁定会话。
@@ -22,16 +22,16 @@ Chrome 插件先做轻量变化检测；未变化时不会滚动页面、不会�
 
 | 包 | 路径 |
 | --- | --- |
-| NAS 服务端源码包 | `release/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz` |
-| Chrome 插件 | `release/ai-archiveextension-0.4.0-chrome.zip` |
-| Windows 同步代理 | `release/ai-conversation-archive-windows-sync-0.2.18.zip` |
-| macOS 同步代理 | `release/ai-conversation-archive-macos-sync-0.2.20.tar.gz` |
+| NAS 服务端源码包 | `release/ai-conversation-archive-nas-V20260817-clean-install.tar.gz` |
+| Chrome 插件 | `release/ai-archiveextension-V20260817-chrome.zip` |
+| Windows 同步代理 | `release/ai-conversation-archive-windows-sync-V20260817.zip` |
+| macOS 同步代理 | `release/ai-conversation-archive-macos-sync-V20260817.tar.gz` |
 
 NAS 更新命令：
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
 ```
 
 ## 文档

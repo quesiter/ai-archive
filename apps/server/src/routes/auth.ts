@@ -1,7 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { config } from "../config.js";
-import { errorMessage, requireWebUser, SESSION_COOKIE } from "../http.js";
+import {
+  requireSameOrigin,
+  requireWebUser,
+  SESSION_COOKIE,
+} from "../http.js";
 import {
   bootstrapAdmin,
   isInitialized,
@@ -25,17 +29,24 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     initialized: await isInitialized(),
   }));
 
-  app.post("/api/v1/auth/bootstrap", async (request, reply) => {
+  app.post("/api/v1/auth/bootstrap", {
+    config: { rateLimit: { max: 3, timeWindow: "15 minutes" } },
+  }, async (request, reply) => {
+    if (!(await requireSameOrigin(request, reply))) return;
     try {
       const input = BootstrapSchema.parse(request.body);
       const result = await bootstrapAdmin(input);
       return reply.code(201).send(result);
-    } catch (error) {
-      return reply.code(400).send({ error: errorMessage(error) });
+    } catch {
+      request.log.warn("administrator bootstrap rejected");
+      return reply.code(409).send({ error: "Administrator is already initialized" });
     }
   });
 
-  app.post("/api/v1/auth/login", async (request, reply) => {
+  app.post("/api/v1/auth/login", {
+    config: { rateLimit: { max: 5, timeWindow: "5 minutes" } },
+  }, async (request, reply) => {
+    if (!(await requireSameOrigin(request, reply))) return;
     try {
       const input = LoginSchema.parse(request.body);
       const result = await login(input);
@@ -47,12 +58,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         expires: result.expiresAt,
       });
       return { user: { username: input.username }, expiresAt: result.expiresAt };
-    } catch (error) {
-      return reply.code(401).send({ error: errorMessage(error) });
+    } catch {
+      request.log.warn("administrator login rejected");
+      return reply.code(401).send({ error: "Invalid username, password, or TOTP code" });
     }
   });
 
   app.post("/api/v1/auth/logout", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
     await logout(request.cookies[SESSION_COOKIE]);
     reply.clearCookie(SESSION_COOKIE, { path: "/" });
     return reply.code(204).send();

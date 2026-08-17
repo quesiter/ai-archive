@@ -9,6 +9,8 @@ if /I "%~1"=="--help" goto :usage
 
 set "ROOT=%~dp0"
 set "AGENT=%ROOT%openclaw-sync.cjs"
+set "INSTALLER=%ROOT%install-windows-sync-task.ps1"
+set "UNINSTALLER=%ROOT%uninstall-windows-sync-task.ps1"
 if not exist "%AGENT%" (
   echo Missing sync agent: %AGENT%
   echo Do not copy this .bat file alone.
@@ -47,6 +49,7 @@ set "SAFE_DELAY_MS=%AI_ARCHIVE_SYNC_DELAY_MS%"
 if "%SAFE_DELAY_MS%"=="" set "SAFE_DELAY_MS=750"
 
 set "NODE_OPTIONS=--max-old-space-size=4096 %NODE_OPTIONS%"
+set "PAIRED_ON_THIS_RUN=0"
 
 echo.
 echo AI Conversation Archive - Windows portable local sync
@@ -91,15 +94,25 @@ if not exist "%CONFIG_PATH%" (
     call node "%AGENT%" pair --server "%SERVER_URL%" --code "!PAIR_CODE!" --openclaw-root "%OPENCLAW_ROOT%" --codex-root "%CODEX_ROOT%"
   )
   if errorlevel 1 goto :failed
+  set "PAIRED_ON_THIS_RUN=1"
 ) else (
   echo Existing pairing config found; pairing step skipped.
 )
 
 echo.
+if /I "%~1"=="install-background" goto :install_background
+if /I "%~1"=="install" goto :install_background
+if /I "%~1"=="background" goto :install_background
+if /I "%~1"=="uninstall-background" goto :uninstall_background
+if /I "%~1"=="uninstall" goto :uninstall_background
 if /I "%~1"=="full-rebuild" goto :full_rebuild
 if /I "%~1"=="rebuild-all" goto :full_rebuild
 if /I "%~1"=="watch-only" goto :watch_only
+if /I "%~1"=="rebuild-only" goto :safe_rebuild
+if /I "%~1"=="once" goto :safe_rebuild
+goto :install_background
 
+:safe_rebuild
 echo Importing recent local history in safe mode...
 call node "%AGENT%" rebuild --recent-days "%SAFE_RECENT_DAYS%" --max-files "%SAFE_MAX_FILES%" --max-file-mb "%SAFE_MAX_FILE_MB%" --max-messages "%SAFE_MAX_MESSAGES%" --delay-ms "%SAFE_DELAY_MS%"
 if errorlevel 1 goto :failed
@@ -122,9 +135,35 @@ echo Close other heavy apps first. The command will reset sync state and import 
 call node "%AGENT%" full-rebuild --delay-ms "%SAFE_DELAY_MS%"
 if errorlevel 1 goto :failed
 
+:install_background
+if not exist "%INSTALLER%" (
+  echo Missing installer: %INSTALLER%
+  goto :failed
+)
+echo.
+echo Installing background sync task...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%INSTALLER%"
+if errorlevel 1 goto :failed
+echo.
+echo Background sync is installed and running. You can close this window.
+goto :done
+
+:uninstall_background
+if not exist "%UNINSTALLER%" (
+  echo Missing uninstaller: %UNINSTALLER%
+  goto :failed
+)
+echo.
+echo Uninstalling background sync task...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%UNINSTALLER%"
+if errorlevel 1 goto :failed
+goto :done
+
 :done
 echo.
 echo Local sync finished.
+echo This window will close automatically in 8 seconds.
+timeout /t 8 /nobreak >nul 2>nul
 exit /b 0
 
 :failed
@@ -137,11 +176,13 @@ exit /b 1
 echo AI Conversation Archive Windows portable local sync
 echo.
 echo Usage:
-echo   sync-local-windows.bat              Safe recent import, then watch future changes.
+echo   sync-local-windows.bat              Install or restart hidden background auto-sync.
 echo   sync-local-windows.bat rebuild-only Safe recent import once.
 echo   sync-local-windows.bat once         Same as rebuild-only.
 echo   sync-local-windows.bat watch-only   Watch future changes without an initial scan.
 echo   sync-local-windows.bat full-rebuild Explicit full import of all local history.
+echo   sync-local-windows.bat install      Install hidden background auto-sync.
+echo   sync-local-windows.bat uninstall    Uninstall hidden background auto-sync.
 echo.
 echo Requirements:
 echo   Node.js 22 or newer must be installed and available in PATH.

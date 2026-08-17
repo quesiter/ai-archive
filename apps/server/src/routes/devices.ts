@@ -1,4 +1,5 @@
 import { desc, eq } from "drizzle-orm";
+import { createReadStream } from "node:fs";
 import type { FastifyInstance } from "fastify";
 import {
   DeviceKindSchema,
@@ -13,6 +14,11 @@ import {
   createPairingCode,
 } from "../services/auth.js";
 import { writeOperationLog } from "../services/operation-log.js";
+import {
+  discoverDeviceComponents,
+  publicDeviceComponent,
+  resolveDeviceComponent,
+} from "../services/device-components.js";
 
 const CreateCodeSchema = z.object({
   name: z.string().min(1).max(128),
@@ -20,7 +26,9 @@ const CreateCodeSchema = z.object({
 });
 
 export async function deviceRoutes(app: FastifyInstance): Promise<void> {
-  app.post("/api/v1/devices/claim", async (request, reply) => {
+  app.post("/api/v1/devices/claim", {
+    config: { rateLimit: { max: 10, timeWindow: "10 minutes" } },
+  }, async (request, reply) => {
     try {
       const input = PairingClaimSchema.parse(request.body);
       const claimed = await claimPairingCode(input);
@@ -60,6 +68,54 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
       .orderBy(desc(devices.createdAt));
   });
 
+  app.get("/api/v1/device-components", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    const components = await discoverDeviceComponents();
+    return components.map(publicDeviceComponent);
+  });
+
+  app.get<{ Params: { id: string } }>(
+    "/api/v1/device-components/:id/download",
+    async (request, reply) => {
+      const user = await requireWebUser(request, reply);
+      if (!user) return;
+      const { id } = z
+        .object({ id: z.enum(["chrome", "windows", "macos"]) })
+        .parse(request.params);
+      const component = await resolveDeviceComponent(id);
+      if (!component?.absolutePath || !component.filename) {
+        return reply.code(404).send({ error: "Device component is not available" });
+      }
+      await writeOperationLog({
+        scope: "device",
+        message: `设备组件下载已开始：${component.name}`,
+        status: "completed",
+        entityType: "device_component",
+        entityId: component.id,
+        metadata: {
+          filename: component.filename,
+          version: component.version,
+          sizeBytes: component.sizeBytes,
+          userId: user.id,
+        },
+      });
+      reply
+        .header(
+          "Content-Type",
+          component.archiveType === "zip"
+            ? "application/zip"
+            : "application/gzip",
+        )
+        .header(
+          "Content-Disposition",
+          `attachment; filename*=UTF-8''${encodeURIComponent(component.filename)}`,
+        )
+        .header("Content-Length", String(component.sizeBytes ?? 0))
+        .header("Cache-Control", "private, no-store");
+      return reply.send(createReadStream(component.absolutePath));
+    },
+  );
+
   app.post("/api/v1/pairing-codes", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
     try {
@@ -82,11 +138,12 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/devices/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
+      const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
       const input = z.object({ name: z.string().min(1).max(128) }).parse(request.body);
       const [device] = await db
         .update(devices)
         .set({ name: input.name })
-        .where(eq(devices.id, request.params.id))
+        .where(eq(devices.id, id))
         .returning({
           id: devices.id,
           name: devices.name,
@@ -112,14 +169,15 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/devices/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
+      const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
       const [existing] = await db
         .select({ id: devices.id, revokedAt: devices.revokedAt })
         .from(devices)
-        .where(eq(devices.id, request.params.id))
+        .where(eq(devices.id, id))
         .limit(1);
       if (!existing) return reply.code(404).send({ error: "Device not found" });
       if (existing.revokedAt) {
-        await db.delete(devices).where(eq(devices.id, request.params.id));
+        await db.delete(devices).where(eq(devices.id, id));
         await writeOperationLog({
           scope: "device",
           message: "已删除撤销设备",
@@ -131,7 +189,7 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
         await db
           .update(devices)
           .set({ revokedAt: new Date() })
-          .where(eq(devices.id, request.params.id));
+          .where(eq(devices.id, id));
         await writeOperationLog({
           scope: "device",
           message: "设备已撤销",

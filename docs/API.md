@@ -224,6 +224,17 @@ DELETE /api/v1/devices/:id
 1. 未撤销设备：设置 `revokedAt`，设备令牌失效。
 2. 已撤销设备：从设备列表中删除。
 
+### 3.6 下载采集组件
+
+```http
+GET /api/v1/device-components
+GET /api/v1/device-components/:id/download
+```
+
+认证：Web 管理员登录。
+
+`id` 可选：`chrome`、`windows`、`macos`。列表接口返回服务器当前检测到的安装包版本、大小、更新时间和下载地址；下载接口只允许读取配置发布目录中符合命名规则的 ZIP/TAR.GZ 文件。
+
 ## 4. 采集上传
 
 ### 4.1 上传采集快照

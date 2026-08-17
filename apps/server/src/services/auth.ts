@@ -1,5 +1,5 @@
 import { hash, verify } from "@node-rs/argon2";
-import { and, eq, gt, isNull, lt } from "drizzle-orm";
+import { and, eq, gt, isNull, lt, sql } from "drizzle-orm";
 import * as OTPAuth from "otpauth";
 import type { DeviceKind, PairingClaim } from "@ai-archive/contracts";
 import { db } from "../db.js";
@@ -18,6 +18,8 @@ import {
 } from "./crypto.js";
 
 const WEB_SESSION_DAYS = 30;
+const DUMMY_PASSWORD_HASH =
+  "$argon2id$v=19$m=19456,t=2,p=1$hw8wQUjy5Rh5SOo41guauQ$3oNTAJQ5Fv5YWslDsTK7i9Uketwtv2ylpdR8F8vV/lc";
 
 export async function isInitialized(): Promise<boolean> {
   const [user] = await db.select({ id: users.id }).from(users).limit(1);
@@ -28,9 +30,6 @@ export async function bootstrapAdmin(input: {
   username: string;
   password: string;
 }): Promise<{ secret: string; otpauthUrl: string }> {
-  if (await isInitialized()) {
-    throw new Error("Administrator already initialized");
-  }
   const totp = new OTPAuth.TOTP({
     issuer: "AI Conversation Archive",
     label: input.username,
@@ -40,15 +39,22 @@ export async function bootstrapAdmin(input: {
     secret: new OTPAuth.Secret({ size: 20 }),
   });
   const secret = totp.secret.base32;
-  await db.insert(users).values({
-    username: input.username,
-    passwordHash: await hash(input.password, {
+  const passwordHash = await hash(input.password, {
       memoryCost: 19_456,
       timeCost: 2,
       outputLen: 32,
       parallelism: 1,
-    }),
-    totpSecretEncrypted: encryptSecret(secret),
+  });
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(742938515)`);
+    const [existing] = await tx.select({ id: users.id }).from(users).limit(1);
+    if (existing) throw new Error("Administrator already initialized");
+    await tx.insert(users).values({
+      singletonKey: 1,
+      username: input.username,
+      passwordHash,
+      totpSecretEncrypted: encryptSecret(secret),
+    });
   });
   return { secret, otpauthUrl: totp.toString() };
 }
@@ -63,7 +69,8 @@ export async function login(input: {
     .from(users)
     .where(eq(users.username, input.username))
     .limit(1);
-  if (!user || !(await verify(user.passwordHash, input.password))) {
+  const passwordValid = await verify(user?.passwordHash ?? DUMMY_PASSWORD_HASH, input.password);
+  if (!user || !passwordValid) {
     throw new Error("Invalid username, password, or TOTP code");
   }
   const totp = new OTPAuth.TOTP({
@@ -140,17 +147,18 @@ export async function claimPairingCode(
 ): Promise<{ deviceId: string; token: string; name: string }> {
   return db.transaction(async (tx) => {
     const [pairing] = await tx
-      .select()
-      .from(pairingCodes)
+      .update(pairingCodes)
+      .set({ claimedAt: new Date() })
       .where(
         and(
           eq(pairingCodes.codeHash, sha256(input.code.toUpperCase())),
+          eq(pairingCodes.requestedKind, input.kind),
           gt(pairingCodes.expiresAt, new Date()),
           isNull(pairingCodes.claimedAt),
         ),
       )
-      .limit(1);
-    if (!pairing || pairing.requestedKind !== input.kind) {
+      .returning();
+    if (!pairing) {
       throw new Error("Pairing code is invalid, expired, or for another device type");
     }
     const token = randomToken();
@@ -164,10 +172,6 @@ export async function claimPairingCode(
       })
       .returning({ id: devices.id });
     if (!device) throw new Error("Failed to create device");
-    await tx
-      .update(pairingCodes)
-      .set({ claimedAt: new Date() })
-      .where(eq(pairingCodes.id, pairing.id));
     return { deviceId: device.id, token, name };
   });
 }

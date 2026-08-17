@@ -25,6 +25,9 @@
 | `APP_ORIGIN` | `http://localhost:5173` | Web 外部访问地址，生产远程访问应使用 HTTPS。 |
 | `APP_MASTER_KEY` | 开发环境内置派生值 | 32 字节 Base64，生产必须生成真实随机值。 |
 | `COOKIE_SECURE` | 跟随生产环境 | Cookie 是否只允许 HTTPS。 |
+| `TRUST_PROXY` | `false` | 是否信任代理转发头；推荐填写可信代理跳数，例如 `1`。 |
+| `EXTENSION_ORIGINS` | 官方 Chrome 扩展来源 | 允许跨域调用 API 的固定 Chrome 扩展来源，多个值用逗号分隔。 |
+| `ALLOW_PRIVATE_NETWORK_TARGETS` | `false` | 是否允许 LLM/SMTP 访问内网；默认启用 SSRF 和 DNS 重绑定防护。 |
 | `IMPORT_INBOX` | `./data/imports/inbox` | 待处理导入目录。 |
 | `IMPORT_PROCESSED` | `./data/imports/processed` | 导入成功归档目录。 |
 | `IMPORT_FAILED` | `./data/imports/failed` | 导入失败归档目录。 |
@@ -83,13 +86,13 @@ curl -fsS http://127.0.0.1:18080/healthz
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
 ```
 
 测试环境可跳过升级前数据库备份：
 
 ```sh
-SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
+SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
 ```
 
 升级后检查：
@@ -101,14 +104,14 @@ docker compose --env-file .env logs --tail=120 app worker
 curl -fsS http://127.0.0.1:18080/healthz
 ```
 
-`/healthz` 应返回当前版本，例如 `0.2.21`。如果健康检查版本仍是旧号，通常是 Docker 镜像缓存、反向代理指向旧容器，或没有强制重建 app/worker。
+`/healthz` 应返回当前版本，例如 `V20260817`。如果健康检查版本仍是旧号，通常是 Docker 镜像缓存、反向代理指向旧容器，或没有强制重建 app/worker。
 
 ## 6. Chrome 插件运维
 
 最新插件包：
 
 ```text
-release/ai-archiveextension-0.4.0-chrome.zip
+release/ai-archiveextension-V20260817-chrome.zip
 ```
 
 升级插件：
@@ -126,13 +129,22 @@ Chrome 的无痕模式和工具栏固定不能由普通插件自动打开。插�
 Windows 便携包：
 
 ```text
-release/ai-conversation-archive-windows-sync-0.2.18.zip
+release/ai-conversation-archive-windows-sync-V20260817.zip
 ```
+
+Windows 后台运行：
+
+```bat
+sync-local-windows.bat install
+sync-local-windows.bat uninstall
+```
+
+后台任务复用 `%USERPROFILE%\.config\ai-archive\openclaw-sync.json`，升级同步器代码通常不需要重新配对。后台日志位于 `%LOCALAPPDATA%\AIArchive\Sync\Logs`。
 
 macOS 同步包：
 
 ```text
-release/ai-conversation-archive-macos-sync-0.2.20.tar.gz
+release/ai-conversation-archive-macos-sync-V20260817.tar.gz
 ```
 
 默认配置文件：
@@ -141,15 +153,17 @@ release/ai-conversation-archive-macos-sync-0.2.20.tar.gz
 ~/.config/ai-archive/openclaw-sync.json
 ```
 
-Windows 可用 `AI_ARCHIVE_SYNC_CONFIG` 指定配置路径。服务地址或设备被撤销后需要重新配对；只是升级同步器代码通常不需要重新配对。
+macOS 后台运行：双击 `AI-Archive-Sync.command`，按菜单安装或卸载 LaunchAgent。后台日志位于 `~/Library/Logs/AIArchive`。
+
+Windows 和 macOS 都可用 `AI_ARCHIVE_SYNC_CONFIG` 指定配置路径。服务地址或设备被撤销后需要重新配对；只是升级同步器代码通常不需要重新配对。
 
 常用命令：
 
 ```sh
-node openclaw-sync.cjs pair --server https://ai-archive.gyee.tech:18443 --code ABCD1234
-node openclaw-sync.cjs run
-node openclaw-sync.cjs rebuild
-node openclaw-sync.cjs full-rebuild
+./AI-Archive-Sync.command
+./AI-Archive-Sync.command install
+./AI-Archive-Sync.command uninstall
+./AI-Archive-Sync.command rebuild
 ```
 
 ## 8. 数据库迁移
@@ -234,6 +248,8 @@ OpenAI 兼容模型配置项：
 
 SMTP 未配置时，报告仍保存到后台，只是不发送邮件。
 
+LLM Base URL 和 SMTP Host 默认禁止回环、RFC1918 内网、链路本地、云元数据与保留地址，并把实际连接固定到验证过的 IP，避免 DNS 重绑定。需要访问可信的局域网模型或邮件服务器时，可显式设置 `ALLOW_PRIVATE_NETWORK_TARGETS=true`；启用后应同时依靠网络 ACL、防火墙和独立服务账号限制访问范围。
+
 ## 12. 日志与排错
 
 后台“日志”页支持按范围、级别、AI 平台、状态和关键字筛选。平台筛选会显示 Session 数，例如 `ChatGPT（40）`。
@@ -271,6 +287,10 @@ docker compose --env-file .env logs --tail=200 postgres
 8. 不使用过期或测试设备令牌。
 9. 定期备份数据库和 `.env`。
 10. LLM API Key 使用最小权限和可撤销密钥。
+11. `TRUST_PROXY` 只填写实际可信的代理跳数，不使用无边界的 `true`。
+12. `EXTENSION_ORIGINS` 只包含当前发布扩展的固定 ID。
+13. 除可信内网模型/SMTP 外，保持 `ALLOW_PRIVATE_NETWORK_TARGETS=false`。
+14. app/worker 使用非 root 用户运行，导入数据目录只授予 UID 1000 所需读写权限。
 
 ## 14. 发布包检查
 

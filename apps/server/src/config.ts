@@ -14,6 +14,13 @@ for (const candidate of [
   }
 }
 
+function defaultComponentReleaseDirectory(): string {
+  return [
+    resolve(process.cwd(), "release"),
+    resolve(process.cwd(), "../../release"),
+  ].find((candidate) => existsSync(candidate)) ?? resolve(process.cwd(), "release");
+}
+
 const EnvSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -28,15 +35,37 @@ const EnvSchema = z
       .string()
       .optional()
       .transform((value) => value === "true"),
+    TRUST_PROXY: z.string().default("false"),
+    EXTENSION_ORIGINS: z
+      .string()
+      .default("chrome-extension://daolmhnfgimkgnnadojnmhkkjdolplfi"),
+    ALLOW_PRIVATE_NETWORK_TARGETS: z
+      .string()
+      .optional()
+      .transform((value) => value === "true"),
     IMPORT_INBOX: z.string().default("./data/imports/inbox"),
     IMPORT_PROCESSED: z.string().default("./data/imports/processed"),
     IMPORT_FAILED: z.string().default("./data/imports/failed"),
+    COMPONENT_RELEASE_DIR: z.string().default(defaultComponentReleaseDirectory()),
     TZ: z.string().default("Asia/Shanghai"),
     LOG_LEVEL: z.string().default("info"),
     WEB_DIST: z.string().default("../web/dist"),
   })
   .superRefine((value, context) => {
     const origin = new URL(value.APP_ORIGIN);
+    if (
+      origin.pathname !== "/" ||
+      origin.search ||
+      origin.hash ||
+      origin.username ||
+      origin.password
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["APP_ORIGIN"],
+        message: "APP_ORIGIN must contain only a scheme, host, and optional port",
+      });
+    }
     if (
       value.NODE_ENV === "production" &&
       origin.protocol !== "https:" &&
@@ -51,6 +80,30 @@ const EnvSchema = z
   });
 
 const env = EnvSchema.parse(process.env);
+
+function parseTrustProxy(value: string): boolean | number | string {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || normalized === "false") return false;
+  if (normalized === "true") return true;
+  if (/^[1-9]\d*$/.test(normalized)) return Number(normalized);
+  return value.trim();
+}
+
+function extensionOrigins(value: string): Set<string> {
+  return new Set(
+    value
+      .split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean)
+      .map((origin) => {
+        const match = origin.match(/^chrome-extension:\/\/([a-p]{32})\/?$/i);
+        if (!match?.[1]) {
+          throw new Error("EXTENSION_ORIGINS may contain only chrome-extension:// origins");
+        }
+        return `chrome-extension://${match[1].toLowerCase()}`;
+      }),
+  );
+}
 
 function resolveMasterKey(): Buffer {
   if (env.APP_MASTER_KEY) {
@@ -68,6 +121,9 @@ function resolveMasterKey(): Buffer {
 
 export const config = {
   ...env,
+  appOrigin: new URL(env.APP_ORIGIN).origin,
+  trustProxy: parseTrustProxy(env.TRUST_PROXY),
+  extensionOrigins: extensionOrigins(env.EXTENSION_ORIGINS),
   masterKey: resolveMasterKey(),
   cookieSecure: env.COOKIE_SECURE || env.NODE_ENV === "production",
 };

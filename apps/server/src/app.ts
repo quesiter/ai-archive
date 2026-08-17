@@ -24,11 +24,19 @@ import { reportRoutes } from "./routes/reports.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { APP_VERSION } from "./version.js";
 
+const JSON_BODY_LIMIT = 50 * 1024 * 1024;
+
+function payloadTooLargeError(): Error & { statusCode: number } {
+  return Object.assign(new Error("Decompressed request body is too large"), {
+    statusCode: 413,
+  });
+}
+
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
     logger: { level: config.LOG_LEVEL },
-    bodyLimit: 50 * 1024 * 1024,
-    trustProxy: true,
+    bodyLimit: JSON_BODY_LIMIT,
+    trustProxy: config.trustProxy,
   });
 
   await app.register(cookie);
@@ -37,8 +45,8 @@ export async function buildApp(): Promise<FastifyInstance> {
     origin(origin, callback) {
       if (
         !origin ||
-        origin === config.APP_ORIGIN ||
-        origin.startsWith("chrome-extension://") ||
+        origin === config.appOrigin ||
+        config.extensionOrigins.has(origin) ||
         (config.NODE_ENV !== "production" && origin.startsWith("http://localhost:"))
       ) {
         callback(null, true);
@@ -51,6 +59,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     max: 300,
     timeWindow: "1 minute",
     ban: 3,
+    skipOnError: false,
   });
   await app.register(multipart, {
     limits: { fileSize: 2 * 1024 * 1024 * 1024, files: 1 },
@@ -68,10 +77,22 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   app.addHook("preParsing", async (request, _reply, payload) => {
-    if (request.headers["content-encoding"] !== "gzip") return payload;
+    const encoding = request.headers["content-encoding"]?.toLowerCase().trim();
+    if (!encoding || encoding === "identity") return payload;
+    if (encoding !== "gzip") {
+      throw Object.assign(new Error("Unsupported Content-Encoding"), {
+        statusCode: 415,
+      });
+    }
     delete request.headers["content-encoding"];
     delete request.headers["content-length"];
-    return payload.pipe(createGunzip());
+    const gunzip = createGunzip();
+    let decodedBytes = 0;
+    gunzip.on("data", (chunk: Buffer) => {
+      decodedBytes += chunk.length;
+      if (decodedBytes > JSON_BODY_LIMIT) gunzip.destroy(payloadTooLargeError());
+    });
+    return payload.pipe(gunzip);
   });
 
   app.get("/healthz", async (_request, reply) => {
@@ -85,6 +106,54 @@ export async function buildApp(): Promise<FastifyInstance> {
         time: new Date().toISOString(),
       });
     }
+  });
+
+  // Fastify captures the active error handler when a route is registered.
+  // Install this before registering route modules so request-schema errors from
+  // every route are consistently returned as 400 responses.
+  app.setErrorHandler((error, request, reply) => {
+    const unknownError = error as {
+      name?: unknown;
+      issues?: unknown;
+      message?: unknown;
+      constructor?: { name?: unknown };
+    };
+    const zodLike =
+      error instanceof ZodError ||
+      unknownError.name === "ZodError" ||
+      unknownError.constructor?.name === "ZodError" ||
+      (typeof unknownError.message === "string" &&
+        unknownError.message.trimStart().startsWith("[") &&
+        unknownError.message.includes('"code"'));
+    const zodIssues = Array.isArray(unknownError.issues)
+      ? unknownError.issues
+      : zodLike
+        ? [{ message: String(unknownError.message ?? "Request validation failed") }]
+        : null;
+    if (zodLike && zodIssues) {
+      return reply.code(400).send({
+        error: "Request validation failed",
+        issues: zodIssues,
+      });
+    }
+    request.log.error(
+      {
+        errorName: error instanceof Error ? error.name : "UnknownError",
+        statusCode: (error as { statusCode?: number }).statusCode ?? 500,
+      },
+      "request failed",
+    );
+    const candidate = error as { statusCode?: number; message?: string };
+    const statusCode =
+      candidate.statusCode && candidate.statusCode < 500
+        ? candidate.statusCode
+        : 500;
+    return reply.code(statusCode).send({
+      error:
+        statusCode === 500
+          ? "Internal server error"
+          : candidate.message ?? "Request failed",
+    });
   });
 
   await authRoutes(app);
@@ -114,45 +183,6 @@ export async function buildApp(): Promise<FastifyInstance> {
       return reply.sendFile("index.html");
     });
   }
-
-  app.setErrorHandler((error, request, reply) => {
-    const unknownError = error as {
-      name?: unknown;
-      issues?: unknown;
-      message?: unknown;
-      constructor?: { name?: unknown };
-    };
-    const zodLike =
-      error instanceof ZodError ||
-      unknownError.name === "ZodError" ||
-      unknownError.constructor?.name === "ZodError" ||
-      (typeof unknownError.message === "string" &&
-        unknownError.message.trimStart().startsWith("[") &&
-        unknownError.message.includes('"code"'));
-    const zodIssues = Array.isArray(unknownError.issues)
-      ? unknownError.issues
-      : zodLike
-        ? [{ message: String(unknownError.message ?? "Request validation failed") }]
-        : null;
-    if (zodLike && zodIssues) {
-      return reply.code(400).send({
-        error: "Request validation failed",
-        issues: zodIssues,
-      });
-    }
-    request.log.error({ error }, "request failed");
-    const candidate = error as { statusCode?: number; message?: string };
-    const statusCode =
-      candidate.statusCode && candidate.statusCode < 500
-        ? candidate.statusCode
-        : 500;
-    return reply.code(statusCode).send({
-      error:
-        statusCode === 500
-          ? "Internal server error"
-          : candidate.message ?? "Request failed",
-    });
-  });
 
   return app;
 }

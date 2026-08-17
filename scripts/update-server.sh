@@ -7,7 +7,7 @@ AI Conversation Archive server update
 
 Usage:
   sh scripts/update-server.sh
-  sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
+  sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
 
 Environment:
   APP_ROOT=/volume1/docker/ai-conversation-archive
@@ -109,6 +109,19 @@ package_version() {
   sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n 1
 }
 
+expected_app_version() {
+  source_dir=$1
+  version_file="$source_dir/apps/server/src/version.ts"
+  if [ -f "$version_file" ]; then
+    version=$(sed -n 's/^export const APP_VERSION = "\([^"]*\)".*/\1/p' "$version_file" | head -n 1)
+    if [ -n "$version" ]; then
+      printf '%s\n' "$version"
+      return
+    fi
+  fi
+  package_version "$source_dir/package.json" || true
+}
+
 build_app_image() {
   env_file=$1
   compose_file=$2
@@ -131,6 +144,10 @@ ensure_data_dirs() {
     "$data_dir/imports/inbox" \
     "$data_dir/imports/processed" \
     "$data_dir/imports/failed"
+  if ! chown -R 1000:1000 "$data_dir/imports" 2>/dev/null; then
+    die "Cannot grant the non-root app user access to $data_dir/imports. Run this update as an account allowed to chown that directory."
+  fi
+  chmod -R u+rwX,go-rwx "$data_dir/imports"
   log "Ensured data directories under $data_dir"
 }
 
@@ -233,7 +250,7 @@ if [ -n "$PACKAGE" ]; then
   mv "$STAGING_DIR" "$SOURCE_DIR"
   ENV_FILE="$SOURCE_DIR/deploy/.env"
   COMPOSE_FILE="$SOURCE_DIR/deploy/docker-compose.yml"
-  EXPECTED_VERSION=$(package_version "$SOURCE_DIR/package.json" || true)
+  EXPECTED_VERSION=$(expected_app_version "$SOURCE_DIR")
 else
   ENV_FILE="$SOURCE_DIR/deploy/.env"
   COMPOSE_FILE="$SOURCE_DIR/deploy/docker-compose.yml"
@@ -243,7 +260,7 @@ else
   run_backup "$SOURCE_DIR" "$ENV_FILE" "$COMPOSE_FILE"
   ensure_data_dirs "$ENV_FILE" "$APP_ROOT"
   build_app_image "$ENV_FILE" "$COMPOSE_FILE"
-  EXPECTED_VERSION=$(package_version "$SOURCE_DIR/package.json" || true)
+  EXPECTED_VERSION=$(expected_app_version "$SOURCE_DIR")
 fi
 
 log "Starting services with forced app/worker recreation..."

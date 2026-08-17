@@ -2,6 +2,34 @@
 
 本文件合并原 `docs/UPDATE-*.md` 的版本说明。具体部署、升级、备份和排错步骤统一查看 [运维手册](OPERATIONS.md)。
 
+## 2026-08-17 V20260817：会话导出、项目合并、设备下载与安全加固
+
+- 会话详情自动折叠 Codex 工具链、推理过程等内部信息，并隐藏 `<recommended_plugins>`；CSV、Markdown、XLSX 导出同样排除这些内部记录。
+- 管理员可按单个会话或单个项目导出全部可见对话，用户可将源项目合并到目标项目。
+- Devices 页面集中提供 Windows、macOS 和 Chrome 组件下载，并统一客户端版本标识。
+- 增强请求同源校验、认证限流、Token 处理、初始化及配对并发安全、SSRF/DNS 重绑定防护、解压限制、日志脱敏、正则安全和链接协议校验。
+- 容器服务使用非 root 用户并移除 Linux capabilities；修复非法 UUID 返回 500、分类规则误判和若干同步稳定性问题。
+- 更新全部生产及开发依赖，依赖审计无已知漏洞。
+
+发布包：`release/ai-conversation-archive-nas-V20260817-clean-install.tar.gz`、`release/ai-archiveextension-V20260817-chrome.zip`、`release/ai-conversation-archive-windows-sync-V20260817.zip`、`release/ai-conversation-archive-macos-sync-V20260817.tar.gz`。
+
+## 2026-07-28 v45：0.2.22 Chat Memo 多平台导入
+
+- 历史导入支持 Chat Memo 导出的文本 ZIP，自动识别 ChatGPT、Gemini、腾讯元宝、DeepSeek、千问和豆包。
+- 从 URL 提取真实平台 Session ID，保留标题、原始链接、消息角色和消息时间；相同 Session 与内容通过现有快照哈希幂等去重，不同分支保存为 Revision。
+- 混合平台导入任务在导入记录中保存 `providers` 列表；导入页显示实际平台，豆包加入会话平台筛选。
+- Chat Memo 导入快照仅在导出消息数量与消息标记一致时标记为完整，否则保留为部分记录。
+
+## 2026-07-28 v44：Chrome 插件 0.4.1 防止 ChatGPT 重复扫描
+
+- 为采集评估增加同步重入锁，避免多个异步轻量检查同时启动完整采集。
+- 完整/增量扫描期间暂时断开 MutationObserver，忽略自动滚动和虚拟列表重挂载产生的 DOM 变化。
+- 合并待处理触发原因并设置最早执行时间，连续 DOM 变化不会不断延长或重复排队扫描。
+- 识别虚拟列表视口缩小，已完成会话不再因可见消息变少而反复做完整扫描；真实生成结束、分支变化和手动重试仍会触发采集。
+- 修正本地基线消息数使用完整 payload，而不是轻量可见窗口消息数。
+
+发布包：`release/ai-archiveextension-0.4.1-chrome.zip`。
+
 ## 2026-07-27 v43：0.2.21 智能归类增量候选优化
 
 - 手动智能归类默认改为 `scope=incremental`，只处理新会话、未归类、低置信度和最新修订晚于上次归类的候选会话，避免 1200+ 会话每次都重新扫描正文。

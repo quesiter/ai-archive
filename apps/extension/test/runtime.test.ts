@@ -336,4 +336,32 @@ describe("segment and virtual-list behavior", () => {
       "a2",
     ]);
   });
+
+  it("creates an append delta from a visible virtualized tail", async () => {
+    document.body.innerHTML = `
+      <main data-conversation-id="chatgpt-append-session">
+        <article data-message-author-role="assistant" data-message-id="a11">Earlier visible answer</article>
+        <article data-message-author-role="assistant" data-message-id="a12">Archived tail</article>
+        <article data-message-author-role="user" data-message-id="u13">Follow up</article>
+        <article data-message-author-role="assistant" data-message-id="a13">Fresh answer</article>
+      </main>`;
+    const definition = adapterDefinitions.find((item) => item.provider === "chatgpt")!;
+    const runtime = createAdapterRuntime(definition);
+    const baseLast = runtime.extractVisibleMessages()[1]!;
+    const delta = await scanAppendedMessages(runtime, {
+      revisionId: "11111111-1111-1111-1111-111111111111",
+      messageCount: 24,
+      branchFingerprint: "branch-fingerprint-chatgpt",
+      lastMessageId: "a12",
+      lastMessageTextHash: await messageTextFingerprint(baseLast),
+    });
+
+    expect(delta?.captureMode).toBe("append");
+    expect(delta?.baseMessageCount).toBe(24);
+    expect(delta?.appendedMessages.map((message) => message.ordinal)).toEqual([24, 25]);
+    expect(delta?.appendedMessages.map((message) => message.externalMessageId)).toEqual([
+      "u13",
+      "a13",
+    ]);
+  });
 });

@@ -64,6 +64,13 @@
       "when": 1785088800000,
       "tag": "0008_bounded_revision_search_text",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786939200000,
+      "tag": "0009_security_hardening",
+      "breakpoints": true
     }
   ]
 }

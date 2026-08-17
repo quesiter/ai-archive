@@ -3,9 +3,38 @@ import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { parse as parseHtml } from "node-html-parser";
 import { unzipSync } from "fflate";
-import type { CaptureMessage, CaptureSnapshotV1 } from "@ai-archive/contracts";
+import type { CaptureMessage, CaptureSnapshotV1, Provider } from "@ai-archive/contracts";
 
 type ZipFiles = Record<string, Uint8Array>;
+
+export const MAX_ARCHIVE_COMPRESSED_BYTES = 512 * 1024 * 1024;
+export const MAX_ARCHIVE_ENTRIES = 10_000;
+export const MAX_ARCHIVE_ENTRY_BYTES = 128 * 1024 * 1024;
+export const MAX_ARCHIVE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024;
+
+function unzipArchive(buffer: Buffer): ZipFiles {
+  if (buffer.length > MAX_ARCHIVE_COMPRESSED_BYTES) {
+    throw new Error("Archive exceeds the compressed size limit");
+  }
+  let entries = 0;
+  let uncompressedBytes = 0;
+  return unzipSync(new Uint8Array(buffer), {
+    filter(file) {
+      entries += 1;
+      uncompressedBytes += file.originalSize;
+      if (entries > MAX_ARCHIVE_ENTRIES) {
+        throw new Error("Archive contains too many entries");
+      }
+      if (file.originalSize > MAX_ARCHIVE_ENTRY_BYTES) {
+        throw new Error(`Archive entry is too large: ${file.name}`);
+      }
+      if (uncompressedBytes > MAX_ARCHIVE_UNCOMPRESSED_BYTES) {
+        throw new Error("Archive expands beyond the allowed size");
+      }
+      return /(?:\.json|\.html?|\.txt)$/i.test(file.name);
+    },
+  });
+}
 
 function decode(bytes: Uint8Array): string {
   return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
@@ -251,18 +280,178 @@ function parseGeminiHtml(files: ZipFiles): CaptureSnapshotV1[] {
   return snapshots;
 }
 
+const CHAT_MEMO_MESSAGE_MARKER = /^(User|AI)\s*:\s*\[([^\]\r\n]+)\]\s*\r?$/gm;
+
+function chatMemoProvider(value: string | undefined): Provider | undefined {
+  const normalized = (value ?? "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+  if (normalized === "chatgpt" || normalized === "openai") return "chatgpt";
+  if (normalized === "gemini" || normalized === "googlegemini") return "gemini";
+  if (normalized === "腾讯元宝" || normalized === "元宝" || normalized === "tencentyuanbao") {
+    return "yuanbao";
+  }
+  if (normalized === "豆包" || normalized === "doubao") return "doubao";
+  if (normalized === "deepseek") return "deepseek";
+  if (normalized === "千问" || normalized === "通义千问" || normalized === "qwen") {
+    return "qianwen";
+  }
+  if (normalized === "kimi") return "kimi";
+  if (normalized === "grok") return "grok";
+  if (normalized === "minimax" || normalized === "minimaxagent") return "minimax_agent";
+  if (normalized === "openclaw") return "openclaw";
+  return undefined;
+}
+
+function chatMemoDate(value: string | undefined): string | undefined {
+  const source = value?.trim();
+  if (!source) return undefined;
+  const candidates = [source, source.replace(" ", "T")];
+  for (const candidate of candidates) {
+    const withZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(candidate)
+      ? candidate
+      : `${candidate}+08:00`;
+    const date = new Date(withZone);
+    if (!Number.isNaN(date.valueOf())) return date.toISOString();
+  }
+  return undefined;
+}
+
+function chatMemoHeader(text: string, key: string): string | undefined {
+  const match = text.match(new RegExp(`^${key}:\\s*(.*?)\\s*$`, "mi"));
+  const value = match?.[1]?.trim();
+  return value || undefined;
+}
+
+function chatMemoFilenameTitle(name: string): string | undefined {
+  const base = basename(name).replace(/\.txt$/i, "");
+  const title = base
+    .replace(/^[^_]+_\d{14}_?/i, "")
+    .replace(/_/g, " ")
+    .trim();
+  return title || undefined;
+}
+
+function chatMemoSessionId(
+  canonicalUrl: string | undefined,
+  provider: Provider,
+  fallback: string,
+): string {
+  if (canonicalUrl) {
+    try {
+      const url = new URL(canonicalUrl);
+      const segments = url.pathname.split("/").filter(Boolean);
+      const marker = provider === "chatgpt" ? "c" : provider === "gemini" ? "app" : undefined;
+      const markerIndex = marker
+        ? segments.findIndex((segment) => segment.toLowerCase() === marker)
+        : -1;
+      // Several Chinese platforms use /chat/<account>/<session>, so their
+      // stable session ID is the final path component rather than the value
+      // immediately after /chat.
+      const marked = markerIndex >= 0 ? segments[markerIndex + 1] : undefined;
+      const candidate = marked || segments.at(-1);
+      if (candidate && !["chat", "app", "conversation"].includes(candidate.toLowerCase())) {
+        return decodeURIComponent(candidate).slice(0, 1_024);
+      }
+    } catch {
+      // Fall back to a stable local ID when Chat Memo contains a malformed URL.
+    }
+  }
+  return `chat-memo:${provider}:${hash(fallback).slice(0, 40)}`;
+}
+
+function chatMemoTitle(
+  headerTitle: string | undefined,
+  filenameTitle: string | undefined,
+  firstUserText: string | undefined,
+): string | undefined {
+  const normalizedHeader = headerTitle?.replace(/\s+/g, " ").trim();
+  const generic = !normalizedHeader || /^(新对话|你说|网页搜索|new chat|untitled)$/i.test(normalizedHeader);
+  const candidate = generic ? filenameTitle || firstUserText : normalizedHeader;
+  const normalized = candidate?.replace(/\s+/g, " ").trim();
+  return normalized ? normalized.slice(0, 2_048) : undefined;
+}
+
+function parseChatMemoEntry(name: string, text: string): CaptureSnapshotV1 | null {
+  const firstMarker = text.search(/^(User|AI)\s*:\s*\[/m);
+  const headerText = firstMarker >= 0 ? text.slice(0, firstMarker) : text;
+  const provider = chatMemoProvider(chatMemoHeader(headerText, "Platform"));
+  if (!provider) return null;
+
+  const canonicalUrl = chatMemoHeader(headerText, "URL");
+  const createdAt = chatMemoDate(chatMemoHeader(headerText, "Created"));
+  const declaredMessages = Number(chatMemoHeader(headerText, "Messages"));
+  const markers = [...text.matchAll(CHAT_MEMO_MESSAGE_MARKER)];
+  const messages: CaptureMessage[] = [];
+  for (const [ordinal, marker] of markers.entries()) {
+    const role = marker[1] === "User" ? "user" : "assistant";
+    const bodyStart = (marker.index ?? 0) + marker[0].length;
+    const bodyEnd = markers[ordinal + 1]?.index ?? text.length;
+    const content = text.slice(bodyStart, bodyEnd).replace(/^\r?\n/, "").trim();
+    if (!content) continue;
+    const timestamp = chatMemoDate(marker[2]);
+    messages.push({
+      ordinal: messages.length,
+      role,
+      ...(timestamp ? { createdAt: timestamp } : {}),
+      segments: [{ type: "text", content }],
+    });
+  }
+  if (!messages.length) return null;
+
+  const filenameTitle = chatMemoFilenameTitle(name);
+  const title = chatMemoTitle(
+    chatMemoHeader(headerText, "Title"),
+    filenameTitle,
+    messages.find((message) => message.role === "user")?.segments[0]?.content,
+  );
+  const sessionId = chatMemoSessionId(canonicalUrl, provider, `${name}:${messages[0]?.segments[0]?.content ?? ""}`);
+  const branchFingerprint = hash(
+    JSON.stringify(
+      messages.map((message) => ({
+        ordinal: message.ordinal,
+        role: message.role,
+        segments: message.segments,
+      })),
+    ),
+  );
+  const complete = Number.isInteger(declaredMessages) && declaredMessages > 0 && declaredMessages === markers.length && markers.length === messages.length;
+  return {
+    schemaVersion: 1,
+    provider,
+    sessionId,
+    branchFingerprint,
+    ...(title ? { title } : {}),
+    ...(canonicalUrl && /^https?:\/\//i.test(canonicalUrl) ? { canonicalUrl } : {}),
+    adapterVersion: "chat-memo-text-v1",
+    capturedAt: createdAt ?? messages.at(-1)?.createdAt ?? new Date().toISOString(),
+    captureMode: "import",
+    triggerReason: "historical_import",
+    completeness: complete
+      ? { status: "complete", topReached: true, bottomReached: true, stable: true }
+      : {
+          status: "partial",
+          topReached: markers.length > 0,
+          bottomReached: markers.length > 0,
+          stable: true,
+          reason: "Chat Memo export message count or message markers are incomplete",
+        },
+    messages,
+  };
+}
+
 export async function parseArchive(path: string): Promise<{
-  provider: "chatgpt" | "gemini";
+  provider: Provider | undefined;
+  providers: Provider[];
   fileHash: string;
   filename: string;
   snapshots: CaptureSnapshotV1[];
 }> {
   const buffer = await readFile(path);
-  const files = unzipSync(new Uint8Array(buffer));
+  const files = unzipArchive(buffer);
   const chatGpt = parseChatGpt(files);
   if (chatGpt.length) {
     return {
       provider: "chatgpt",
+      providers: ["chatgpt"],
       fileHash: hash(buffer.toString("base64")),
       filename: basename(path),
       snapshots: chatGpt,
@@ -272,10 +461,25 @@ export async function parseArchive(path: string): Promise<{
   if (gemini.length) {
     return {
       provider: "gemini",
+      providers: ["gemini"],
       fileHash: hash(buffer.toString("base64")),
       filename: basename(path),
       snapshots: gemini,
     };
   }
-  throw new Error("Archive is not a recognized ChatGPT or Gemini export");
+  const chatMemo = Object.entries(files)
+    .filter(([name]) => /\.txt$/i.test(name))
+    .map(([name, bytes]) => parseChatMemoEntry(name, decode(bytes)))
+    .filter((snapshot): snapshot is CaptureSnapshotV1 => Boolean(snapshot));
+  if (chatMemo.length) {
+    const providers = [...new Set(chatMemo.map((snapshot) => snapshot.provider))];
+    return {
+      provider: providers.length === 1 ? providers[0] : undefined,
+      providers,
+      fileHash: hash(buffer.toString("base64")),
+      filename: basename(path),
+      snapshots: chatMemo,
+    };
+  }
+  throw new Error("Archive is not a recognized ChatGPT, Gemini, or Chat Memo export");
 }

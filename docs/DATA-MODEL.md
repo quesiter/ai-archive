@@ -93,7 +93,7 @@ Web 后台登录会话表。
 | 字段 | 说明 |
 | --- | --- |
 | `id` | UUID 主键。 |
-| `provider` | 平台：`chatgpt`、`gemini`、`grok`、`yuanbao`、`minimax_agent`、`deepseek`、`qianwen`、`kimi`、`openclaw`、`codex`、`claude_code`。 |
+| `provider` | 平台：`chatgpt`、`gemini`、`grok`、`yuanbao`、`doubao`、`minimax_agent`、`deepseek`、`qianwen`、`kimi`、`openclaw`、`codex`、`claude_code`。 |
 | `externalSessionId` | 平台侧会话 ID。 |
 | `title` | 会话标题。 |
 | `canonicalUrl` | 规范化 URL。 |

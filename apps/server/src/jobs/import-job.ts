@@ -8,7 +8,7 @@ import { db, sqlClient } from "../db.js";
 import { parseArchive } from "../importers/archive.js";
 import { importJobs } from "../schema.js";
 import { ingestCapture } from "../services/capture.js";
-import { writeOperationLog } from "../services/operation-log.js";
+import { safeStoredError, writeOperationLog } from "../services/operation-log.js";
 import { enqueueImport, queueNames } from "../services/queue.js";
 
 const IMPORT_PROCESSING_STALE_MS = 2 * 60 * 60 * 1000;
@@ -240,18 +240,22 @@ export async function processArchive(
   });
   try {
     const parsed = await parseArchive(path);
+    const providers = parsed.providers;
+    const singleProvider = parsed.provider;
+    const providerLabel = providers.join(", ");
     let imported = 0;
     let unchanged = 0;
     let lastProgressAt = Date.now();
     await db
       .update(importJobs)
       .set({
-        provider: parsed.provider,
+        ...(singleProvider ? { provider: singleProvider } : {}),
         stats: {
           stage: "importing",
           imported,
           unchanged,
           snapshots: parsed.snapshots.length,
+          providers,
         },
         updatedAt: new Date(),
       })
@@ -263,7 +267,7 @@ export async function processArchive(
       entityType: "import_job",
       entityId: job.id,
       metadata: {
-        provider: parsed.provider,
+        provider: providerLabel,
         stage: "importing",
         snapshots: parsed.snapshots.length,
       },
@@ -280,6 +284,7 @@ export async function processArchive(
               imported,
               unchanged,
               snapshots: parsed.snapshots.length,
+              providers,
             },
             updatedAt: new Date(),
           })
@@ -291,7 +296,7 @@ export async function processArchive(
           entityType: "import_job",
           entityId: job.id,
           metadata: {
-            provider: parsed.provider,
+            provider: providerLabel,
             imported,
             unchanged,
             snapshots: parsed.snapshots.length,
@@ -304,13 +309,14 @@ export async function processArchive(
     await db
       .update(importJobs)
       .set({
-        provider: parsed.provider,
+        ...(singleProvider ? { provider: singleProvider } : {}),
         status: "completed",
         stats: {
           stage: "completed",
           imported,
           unchanged,
           snapshots: parsed.snapshots.length,
+          providers,
         },
         completedAt,
         updatedAt: completedAt,
@@ -322,11 +328,11 @@ export async function processArchive(
       status: "completed",
       entityType: "import_job",
       entityId: job.id,
-      metadata: { provider: parsed.provider, imported, unchanged, snapshots: parsed.snapshots.length },
+      metadata: { providers, imported, unchanged, snapshots: parsed.snapshots.length },
     });
   } catch (error) {
     const completedAt = options.finalAttempt ? new Date() : null;
-    const message = error instanceof Error ? error.message : "Unknown import error";
+    const message = safeStoredError(error);
     await db
       .update(importJobs)
       .set({

@@ -253,7 +253,7 @@ describe("isRecoverableClassificationAiError", () => {
   it("treats malformed model JSON as recoverable for classification", () => {
     expect(
       isRecoverableClassificationAiError(
-        new Error("Model did not return valid JSON; response excerpt: <think>..."),
+        new Error("Model did not return valid JSON"),
       ),
     ).toBe(true);
   });

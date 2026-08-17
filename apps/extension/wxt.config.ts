@@ -40,9 +40,11 @@ const aiOrigins = [
 export default defineConfig({
   modules: ["@wxt-dev/module-react"],
   manifest: {
+    key: "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqVzNtkfScpEbGTjXMN5K/kttoKDDckV2iTBHhrCw3MvL7bmghrmlsblIJGZTV/mV6+K9DBXE6KL0zXrwjTXcmaYKQ7oD/yzfSxpjD7ZApQpMU8KdvdNfE0DFrUjXC5KvfYQFfKdz0RcEbotzKtY4yYvcs9umkDddpOlm3xpTvr638oSFWQ/SNTWSyesEtSYeOF74CUD3+LLWk+42C8Um31GF+e8tImlW5c5efdAKEkwaE6PcXvLmy7DBtUSswtkvjWXVRdiQekWst6ORbxll06lDBb4n3eRsNx/dbZdrGoESwHxEl6VtUSJo8QXYmkhijq4wxdlbFtMRe8UclbXghwIDAQAB",
     name: "AI 会话归档",
     description: "自动归档当前打开的完整 AI 会话可见分支。",
-    version: "0.4.0",
+    version: "2026.8.17",
+    version_name: "V20260817",
     incognito: "split",
     permissions: ["storage", "alarms", "tabs"],
     optional_host_permissions: [

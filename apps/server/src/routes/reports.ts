@@ -85,10 +85,11 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/reports/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
       const [report] = await db
         .select()
         .from(reports)
-        .where(eq(reports.id, request.params.id))
+        .where(eq(reports.id, params.id))
         .limit(1);
       if (!report) return reply.code(404).send({ error: "Report not found" });
       return report;

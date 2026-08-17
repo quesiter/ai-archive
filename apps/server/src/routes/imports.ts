@@ -13,6 +13,8 @@ import { importJobs } from "../schema.js";
 import { writeOperationLog } from "../services/operation-log.js";
 import { enqueueImport } from "../services/queue.js";
 
+const MAX_IMPORT_ARCHIVE_BYTES = 512 * 1024 * 1024;
+
 async function fileSha256(path: string): Promise<string> {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
@@ -28,7 +30,7 @@ export async function importRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/api/v1/imports", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
-    const part = await request.file({ limits: { fileSize: 2 * 1024 * 1024 * 1024 } });
+    const part = await request.file({ limits: { fileSize: MAX_IMPORT_ARCHIVE_BYTES } });
     if (!part) return reply.code(400).send({ error: "ZIP file is required" });
     if (extname(part.filename).toLowerCase() !== ".zip") {
       return reply.code(400).send({ error: "Only ZIP archives are accepted" });

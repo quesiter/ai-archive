@@ -1,9 +1,11 @@
 import nodemailer from "nodemailer";
+import { isIP } from "node:net";
 import { eq } from "drizzle-orm";
 import { config } from "../config.js";
 import { db } from "../db.js";
 import { reports } from "../schema.js";
 import { getSetting } from "./settings.js";
+import { resolveSafeNetworkHost } from "./network-target.js";
 
 type ReportRow = typeof reports.$inferSelect;
 
@@ -27,10 +29,21 @@ export async function sendReportEmail(report: ReportRow): Promise<void> {
     getSetting("smtp.to"),
   ]);
   if (!host || !port || !from || !to) return;
+  const numericPort = Number(port);
+  if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65_535) {
+    throw new Error("SMTP port must be an integer between 1 and 65535");
+  }
+  const resolved = await resolveSafeNetworkHost(host);
+  const selectedAddress = resolved.addresses[0]!;
   const transporter = nodemailer.createTransport({
-    host,
-    port: Number(port),
+    // Connect to the exact address that passed the SSRF check. Keeping the
+    // original hostname as TLS servername preserves certificate validation.
+    host: selectedAddress.address,
+    port: numericPort,
     secure: secure === "true",
+    tls: isIP(host.replace(/^\[|\]$/g, "")) ? undefined : { servername: host },
+    disableFileAccess: true,
+    disableUrlAccess: true,
     auth: username ? { user: username, pass: password ?? "" } : undefined,
   });
   const reportUrl = `${config.APP_ORIGIN}/reports/${report.id}`;
@@ -40,6 +53,8 @@ export async function sendReportEmail(report: ReportRow): Promise<void> {
     subject: report.title,
     text: `${report.summary}\n\n查看完整报告：${reportUrl}`,
     html: `<p>${escapeHtml(report.summary)}</p><p><a href="${escapeHtml(reportUrl)}">查看完整报告</a></p>`,
+    disableFileAccess: true,
+    disableUrlAccess: true,
   });
 }
 

@@ -1,5 +1,9 @@
 import { defineContentScript } from "wxt/utils/define-content-script";
 import { adapterForLocation } from "../lib/adapters/runtime";
+import {
+  remainingIdleDelay,
+  shouldDeferAutoCapture,
+} from "../lib/auto-capture";
 import { decideCaptureAction } from "../lib/capture-decision";
 import type { CaptureUiState, ExtensionMessage, ExtensionSettings } from "../lib/messages";
 import {
@@ -56,8 +60,9 @@ const providerLabels: Record<string, string> = {
 
 const EFFECTIVE_CHANGE_DEBOUNCE_MS = 4_000;
 const STREAMING_RECHECK_MS = 2_000;
-const SESSION_POLL_MS = 1_000;
+const SESSION_POLL_MS = 3_000;
 const SKIPPED_STATUS_MS = 1_400;
+const AUTO_CAPTURE_DEFERRED_MESSAGE = "检测到你正在操作页面，自动采集已暂缓";
 
 interface LocalConversationState extends LightweightConversationFingerprint {
   branchFingerprint: string;
@@ -88,6 +93,7 @@ function lightSignature(fingerprint: LightweightConversationFingerprint): string
     fingerprint.lastMessageRole ?? "",
     fingerprint.lastMessageTextHash ?? "",
     fingerprint.streaming ? "streaming" : "stable",
+    fingerprint.virtualized ? "virtualized" : "static",
     fingerprint.adapterVersion,
   ].join("|");
 }
@@ -249,7 +255,12 @@ export default defineContentScript({
   runAt: "document_idle",
   main(ctx) {
     let scanning = false;
+    // `evaluate` performs several asynchronous storage/DOM checks before it
+    // reaches the actual scan. MutationObserver callbacks can arrive during
+    // those awaits, so `scanning` alone is too late to prevent re-entry.
+    let evaluationInFlight = false;
     let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+    let scheduledDueAt = 0;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let lastUrl = location.href;
     let lastSessionKey = "";
@@ -259,7 +270,83 @@ export default defineContentScript({
     let observedRoot: HTMLElement | null = null;
     let previousLightSignature = "";
     let previousStreaming = false;
-    let queuedForceFullReason: CaptureTriggerReason | null = null;
+    let pendingReason: CaptureTriggerReason | null = null;
+    let pendingDelay: number | undefined;
+    let pendingForceFull = false;
+    let lastUserActivityAt = 0;
+    let autoCaptureDeferred = false;
+    let suppressObserverMutations = false;
+    let invalidated = false;
+    let completedCaptureBaseline: {
+      sessionKey: string;
+      messageCount: number;
+      capturedAt: number;
+    } | null = null;
+
+    const reasonPriority: Record<CaptureTriggerReason, number> = {
+      manual_retry: 100,
+      new_session: 95,
+      branch_changed: 94,
+      adapter_upgraded: 93,
+      incremental_base_mismatch: 92,
+      stream_finished: 80,
+      new_messages: 70,
+      historical_import: 60,
+      local_file_rewritten: 60,
+      local_file_appended: 60,
+    };
+
+    function mergeReason(
+      left: CaptureTriggerReason | null,
+      right: CaptureTriggerReason,
+    ): CaptureTriggerReason {
+      if (!left || reasonPriority[right] >= reasonPriority[left]) return right;
+      return left;
+    }
+
+    function queuePending(
+      reason: CaptureTriggerReason,
+      delay: number,
+      forceFull: boolean,
+    ): void {
+      pendingReason = mergeReason(pendingReason, reason);
+      pendingDelay = pendingDelay === undefined
+        ? delay
+        : Math.min(pendingDelay, delay);
+      pendingForceFull ||= forceFull;
+    }
+
+    function consumePending(): {
+      reason: CaptureTriggerReason | null;
+      delay: number;
+      forceFull: boolean;
+    } {
+      const next = {
+        reason: pendingReason,
+        delay: pendingDelay ?? EFFECTIVE_CHANGE_DEBOUNCE_MS,
+        forceFull: pendingForceFull,
+      };
+      pendingReason = null;
+      pendingDelay = undefined;
+      pendingForceFull = false;
+      return next;
+    }
+
+    function captureSessionKey(provider: string, sessionId: string): string {
+      return `${provider}:${sessionId}`;
+    }
+
+    function rememberCompletedCapture(
+      provider: string,
+      sessionId: string,
+      messageCount: number,
+    ): void {
+      completedCaptureBaseline = {
+        sessionKey: captureSessionKey(provider, sessionId),
+        messageCount,
+        capturedAt: Date.now(),
+      };
+    }
 
     async function isPaused(): Promise<boolean> {
       const settings = (await browser.storage.local.get("pausedHosts")) as ExtensionSettings;
@@ -285,7 +372,7 @@ export default defineContentScript({
       if (await shouldShowFloatingIndicator()) {
         if (!indicator) {
           indicator = createFloatingIndicator({
-            onRetry: () => void evaluate("manual_retry", { forceFull: true }),
+            onRetry: () => schedule("manual_retry", 0, { forceFull: true }),
             onPause: togglePaused,
           });
         }
@@ -297,6 +384,15 @@ export default defineContentScript({
       indicator = undefined;
     }
 
+    function recordUserActivity(): void {
+      lastUserActivityAt = Date.now();
+      autoCaptureDeferred = false;
+    }
+
+    function autoCaptureIdleDelay(): number {
+      return remainingIdleDelay(lastUserActivityAt);
+    }
+
     async function publishState(state: Omit<CaptureUiState, "updatedAt">): Promise<void> {
       const fullState = { ...state, updatedAt: new Date().toISOString() };
       lastPublishedState = fullState;
@@ -305,13 +401,27 @@ export default defineContentScript({
       await browser.runtime.sendMessage(message).catch(() => undefined);
     }
 
+    function detachObserver(): void {
+      observer?.disconnect();
+      observer = undefined;
+      observedRoot = null;
+    }
+
     function attachObserver(): void {
+      if (suppressObserverMutations || invalidated) return;
       const adapter = adapterForLocation();
       const root = adapter?.getConversationRoot() ?? document.body;
       if (root === observedRoot && observer) return;
-      observer?.disconnect();
+      detachObserver();
       observedRoot = root;
-      observer = new MutationObserver((mutations) => {
+      const nextObserver = new MutationObserver((mutations) => {
+        // Full capture scrolls through virtualized lists. Those DOM changes
+        // are implementation details of this scan, not new user messages.
+        if (
+          suppressObserverMutations ||
+          invalidated ||
+          observer !== nextObserver
+        ) return;
         const meaningful = mutations.some((mutation) => {
           const target =
             mutation.target instanceof HTMLElement
@@ -324,12 +434,53 @@ export default defineContentScript({
         });
         if (meaningful) schedule("new_messages");
       });
-      observer.observe(root, { childList: true, subtree: true, characterData: true });
+      observer = nextObserver;
+      nextObserver.observe(root, { childList: true, subtree: true, characterData: true });
     }
 
-    function schedule(reason: CaptureTriggerReason, delay = EFFECTIVE_CHANGE_DEBOUNCE_MS): void {
+    const activityListener = () => {
+      recordUserActivity();
+    };
+    const activityEvents: Array<keyof WindowEventMap> = [
+      "pointerdown",
+      "keydown",
+      "wheel",
+      "touchstart",
+      "focusin",
+      "input",
+    ];
+    for (const eventName of activityEvents) {
+      window.addEventListener(eventName, activityListener, { capture: true });
+    }
+
+    function schedule(
+      reason: CaptureTriggerReason,
+      delay = EFFECTIVE_CHANGE_DEBOUNCE_MS,
+      options: { forceFull?: boolean } = {},
+    ): void {
+      if (invalidated) return;
+      queuePending(reason, delay, Boolean(options.forceFull));
+      // Do not start another timer while an asynchronous evaluation/scan is
+      // active. Its finally block will schedule the coalesced pending reason.
+      if (evaluationInFlight) return;
+
+      const dueAt = Date.now() + Math.max(0, delay);
+      // Keep a trailing debounce, but never keep extending it indefinitely
+      // while a provider continuously remounts a virtualized message list.
+      if (debounceTimer && dueAt >= scheduledDueAt) return;
       if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => void evaluate(reason), delay);
+      scheduledDueAt = dueAt;
+      debounceTimer = setTimeout(() => {
+        debounceTimer = undefined;
+        scheduledDueAt = 0;
+        const next = consumePending();
+        if (!next.reason) return;
+        if (evaluationInFlight) {
+          queuePending(next.reason, next.delay, next.forceFull);
+          return;
+        }
+        void evaluate(next.reason, { forceFull: next.forceFull });
+      }, Math.max(0, dueAt - Date.now()));
     }
 
     function publishSkipped(light: LightweightConversationFingerprint): void {
@@ -375,6 +526,12 @@ export default defineContentScript({
       light: LightweightConversationFingerprint,
       result?: { revisionId?: string; messageCount?: number; completeness?: "complete" | "partial" },
     ): Promise<void> {
+      const payloadMessageCount = isDeltaPayload(payload)
+        ? payload.baseMessageCount + payload.appendedMessages.length
+        : payload.messages.length;
+      const completeness =
+        result?.completeness ??
+        (isDeltaPayload(payload) ? "complete" : payload.completeness.status);
       const lastMessage =
         isDeltaPayload(payload)
           ? payload.appendedMessages.at(-1)
@@ -384,21 +541,38 @@ export default defineContentScript({
         sessionId: payload.sessionId,
         branchFingerprint: payload.branchFingerprint,
         adapterVersion: payload.adapterVersion,
-        messageCount: result?.messageCount ?? light.messageCount,
+        // The lightweight pass only sees the currently mounted viewport. Use
+        // the payload count as the local baseline, otherwise a virtualized
+        // ChatGPT window looks like a shortened branch on the next check.
+        messageCount: result?.messageCount ?? payloadMessageCount,
         ...(result?.revisionId ? { revisionId: result.revisionId } : {}),
         ...(lastMessage?.externalMessageId ? { lastMessageId: lastMessage.externalMessageId } : {}),
         ...(lastMessage ? { lastMessageRole: lastMessage.role } : {}),
         ...(lastMessage ? { lastMessageTextHash: await messageTextFingerprint(lastMessage) } : {}),
         streaming: false,
+        ...(light.virtualized !== undefined ? { virtualized: light.virtualized } : {}),
         lastSuccessfulCaptureAt: new Date().toISOString(),
         ...(!isDeltaPayload(payload) && payload.captureMode === "full"
           ? { lastFullScanAt: new Date().toISOString() }
           : {}),
         lastChangeDetectedAt: new Date().toISOString(),
-        completeness:
-          result?.completeness ??
-          (isDeltaPayload(payload) ? "complete" : payload.completeness.status),
+        completeness,
       });
+      if (completeness === "complete") {
+        rememberCompletedCapture(payload.provider, payload.sessionId, payloadMessageCount);
+      }
+    }
+
+    async function withObserverSuppressed<T>(operation: () => Promise<T>): Promise<T> {
+      const wasSuppressed = suppressObserverMutations;
+      suppressObserverMutations = true;
+      detachObserver();
+      try {
+        return await operation();
+      } finally {
+        suppressObserverMutations = wasSuppressed;
+        if (!suppressObserverMutations && !invalidated) attachObserver();
+      }
     }
 
     async function runFullCapture(
@@ -463,8 +637,7 @@ export default defineContentScript({
       });
       const result = await enqueuePayload(delta);
       if (result?.requiresFullCapture) {
-        queuedForceFullReason = "incremental_base_mismatch";
-        schedule("incremental_base_mismatch", 200);
+        schedule("incremental_base_mismatch", 200, { forceFull: true });
         return true;
       }
       await updateStateFromPayload(delta, {
@@ -492,19 +665,73 @@ export default defineContentScript({
       reason: CaptureTriggerReason,
       options: { forceFull?: boolean } = {},
     ): Promise<void> {
-      if (scanning) return;
-      if (await isPaused()) return;
-      const adapter = adapterForLocation();
-      if (!adapter) return;
-      attachObserver();
-      const light = await lightweightConversationFingerprint(adapter);
-      if (!light) return;
-      const signature = lightSignature(light);
-      const state = await loadConversationState(light.provider, light.sessionId);
-      previousStreaming = previousStreaming || Boolean(state?.streaming);
+      if (evaluationInFlight) {
+        queuePending(reason, 0, Boolean(options.forceFull));
+        return;
+      }
+
+      // Set the lock before the first await. Storage reads and fingerprint
+      // hashing can yield to several MutationObserver callbacks.
+      evaluationInFlight = true;
+      scanning = true;
+      let activeLight: LightweightConversationFingerprint | null = null;
+      let preserveStreaming = false;
+      let discardPending = false;
+
+      try {
+        if (await isPaused()) {
+          discardPending = true;
+          return;
+        }
+        const adapter = adapterForLocation();
+        if (!adapter) {
+          discardPending = true;
+          return;
+        }
+        attachObserver();
+        const light = await lightweightConversationFingerprint(adapter);
+        if (!light) {
+          discardPending = true;
+          return;
+        }
+        activeLight = light;
+        const signature = lightSignature(light);
+        const state = await loadConversationState(light.provider, light.sessionId);
+        previousStreaming = previousStreaming || Boolean(state?.streaming);
+
+        const idleDelay = autoCaptureIdleDelay();
+        if (
+          shouldDeferAutoCapture({
+            reason,
+            forceFull: options.forceFull,
+            lastUserActivityAt,
+          }) &&
+          idleDelay > 0
+        ) {
+          if (!autoCaptureDeferred) {
+            autoCaptureDeferred = true;
+            await publishState({
+              status: "idle",
+              provider: light.provider,
+              sessionId: light.sessionId,
+              triggerReason: reason,
+              captureMode: state?.completeness === "complete" ? "append" : "full",
+              messageCount: light.messageCount,
+              message: AUTO_CAPTURE_DEFERRED_MESSAGE,
+            });
+          }
+          schedule(
+            reason,
+            Math.max(idleDelay, 1_000),
+            options.forceFull ? { forceFull: true } : {},
+          );
+          return;
+        }
+        autoCaptureDeferred = false;
 
       if (light.streaming) {
         previousStreaming = true;
+        preserveStreaming = true;
         await publishState({
           status: "waiting",
           provider: light.provider,
@@ -517,13 +744,31 @@ export default defineContentScript({
         return;
       }
 
-      const forceFullReason = queuedForceFullReason ?? (options.forceFull ? reason : null);
-      queuedForceFullReason = null;
+      const baseline = completedCaptureBaseline;
+      const sameCapture = baseline?.sessionKey === captureSessionKey(
+        light.provider,
+        light.sessionId,
+      );
+      const recentViewportRemount =
+        !options.forceFull &&
+        !previousStreaming &&
+        reason === "new_messages" &&
+        state?.completeness === "complete" &&
+        sameCapture &&
+        baseline !== null &&
+        light.messageCount < baseline.messageCount &&
+        (light.virtualized === true || Date.now() - baseline.capturedAt < 20_000);
+      if (recentViewportRemount) {
+        previousLightSignature = signature;
+        publishSkipped(light);
+        return;
+      }
+
       const decision = decideCaptureAction({
         light,
         state,
         requestedReason: reason,
-        forceFullReason,
+        forceFullReason: options.forceFull ? reason : null,
         previousStreaming,
       });
 
@@ -532,19 +777,27 @@ export default defineContentScript({
         (!state && previousLightSignature === signature && reason !== "new_session")
       ) {
         previousLightSignature = signature;
-        previousStreaming = false;
         publishSkipped(light);
         return;
       }
 
-      scanning = true;
       previousLightSignature = signature;
-      try {
-        if (decision.action === "full") {
+      if (decision.action === "full") {
+        await withObserverSuppressed(async () => {
           await runFullCapture(adapter, light, decision.triggerReason);
-          return;
-        }
-        if (decision.action === "append" && state) {
+          const settled = await lightweightConversationFingerprint(adapter);
+          if (settled && !settled.streaming) {
+            previousLightSignature = lightSignature(settled);
+          }
+          // One delayed lightweight check catches a message that finished
+          // mounting while the full scan was running, without immediately
+          // launching another full DOM walk.
+          schedule("new_messages", 1_000);
+        });
+        return;
+      }
+      if (decision.action === "append" && state) {
+        await withObserverSuppressed(async () => {
           const appendOk = await runAppendCapture(
             adapter,
             state,
@@ -552,23 +805,50 @@ export default defineContentScript({
             decision.triggerReason,
           );
           if (!appendOk) {
+            if (
+              light.virtualized === true &&
+              state.completeness === "complete" &&
+              decision.triggerReason !== "branch_changed"
+            ) {
+              publishSkipped(light);
+              return;
+            }
             await runFullCapture(adapter, light, "branch_changed");
           }
-          return;
-        }
-        publishSkipped(light);
+          const settled = await lightweightConversationFingerprint(adapter);
+          if (settled && !settled.streaming) {
+            previousLightSignature = lightSignature(settled);
+          }
+          schedule("new_messages", 1_000);
+        });
+        return;
+      }
+      publishSkipped(light);
       } catch (error) {
         await publishState({
           status: "failed",
-          provider: light.provider,
-          sessionId: light.sessionId,
+          ...(activeLight
+            ? {
+                provider: activeLight.provider,
+                sessionId: activeLight.sessionId,
+                messageCount: activeLight.messageCount,
+              }
+            : {}),
           triggerReason: reason,
-          messageCount: light.messageCount,
           message: error instanceof Error ? error.message : String(error),
         });
       } finally {
-        previousStreaming = false;
+        if (!preserveStreaming) previousStreaming = false;
         scanning = false;
+        evaluationInFlight = false;
+        if (discardPending) {
+          consumePending();
+        } else if (!invalidated) {
+          const next = consumePending();
+          if (next.reason) {
+            schedule(next.reason, next.delay, { forceFull: next.forceFull });
+          }
+        }
       }
     }
 
@@ -587,7 +867,7 @@ export default defineContentScript({
       if (location.href !== lastUrl) {
         lastUrl = location.href;
         attachObserver();
-        schedule("new_session", 750);
+        schedule("new_session", 3_000);
       }
     }, SESSION_POLL_MS);
 
@@ -599,7 +879,7 @@ export default defineContentScript({
       }
       if (sessionKey !== lastSessionKey) {
         lastSessionKey = sessionKey;
-        schedule("new_session", 750);
+        schedule("new_session", 3_000);
       }
     }, SESSION_POLL_MS);
 
@@ -619,11 +899,11 @@ export default defineContentScript({
     browser.runtime.onMessage.addListener((raw: unknown) => {
       const message = raw as ExtensionMessage;
       if (message.type === "manualCapture") {
-        void evaluate("manual_retry", { forceFull: true });
+        schedule("manual_retry", 0, { forceFull: true });
         return Promise.resolve({ ok: true });
       }
       if (message.type === "forceFullCapture") {
-        void evaluate("incremental_base_mismatch", { forceFull: true });
+        schedule("incremental_base_mismatch", 0, { forceFull: true });
         return Promise.resolve({ ok: true });
       }
       if (message.type === "getContentState") {
@@ -640,10 +920,16 @@ export default defineContentScript({
     });
 
     ctx.onInvalidated(() => {
-      observer?.disconnect();
+      invalidated = true;
+      detachObserver();
+      for (const eventName of activityEvents) {
+        window.removeEventListener(eventName, activityListener, { capture: true } as AddEventListenerOptions);
+      }
       clearInterval(routeTimer);
       clearInterval(sessionTimer);
       if (debounceTimer) clearTimeout(debounceTimer);
+      scheduledDueAt = 0;
+      consumePending();
       if (idleTimer) clearTimeout(idleTimer);
       browser.storage.onChanged.removeListener(storageListener);
       indicator?.destroy();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractJson } from "../src/services/llm.js";
+import { extractJson, isRetryableRateLimitError } from "../src/services/llm.js";
 
 describe("extractJson", () => {
   it("parses fenced JSON responses", () => {
@@ -7,7 +7,7 @@ describe("extractJson", () => {
   });
 
   it("parses the first balanced JSON value from explanatory text", () => {
-    expect(extractJson("结果如下：{\"suggestion\":{\"confidence\":\"80%\"}}，请查收")).toEqual({
+    expect(extractJson('result: {"suggestion":{"confidence":"80%"}}. please review')).toEqual({
       suggestion: { confidence: "80%" },
     });
   });
@@ -34,8 +34,16 @@ describe("extractJson", () => {
   });
 
   it("reports a useful excerpt when JSON is missing", () => {
-    expect(() => extractJson("我认为应该归类到项目 A")).toThrow(
-      /Model did not return valid JSON; response excerpt:/,
+    expect(() => extractJson("I think this should belong to project A")).toThrow(
+      /Model did not return valid JSON/,
     );
+  });
+  it("treats Token Plan rate limits as retryable", () => {
+    expect(
+      isRetryableRateLimitError(
+        new Error("Token Plan 速率限制: 请升级 Token Plan 套餐或切换为按量付费 API 使用. (2062)"),
+      ),
+    ).toBe(true);
+    expect(isRetryableRateLimitError(new Error("model output is malformed"))).toBe(false);
   });
 });

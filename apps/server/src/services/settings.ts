@@ -2,13 +2,50 @@ import { eq } from "drizzle-orm";
 import { db } from "../db.js";
 import { settings } from "../schema.js";
 import { decryptSecret, encryptSecret } from "./crypto.js";
+import { validateNetworkUrl } from "./network-target.js";
 
 export const SECRET_SETTING_KEYS = new Set([
   "llm.apiKey",
   "smtp.password",
 ]);
 
+const SETTING_LIMITS = {
+  "llm.baseUrl": 2_000,
+  "llm.apiKey": 20_000,
+  "llm.model": 300,
+  "smtp.host": 253,
+  "smtp.port": 5,
+  "smtp.secure": 5,
+  "smtp.username": 1_000,
+  "smtp.password": 20_000,
+  "smtp.from": 1_000,
+  "smtp.to": 5_000,
+} as const;
+
+export function validateSettingValue(key: string, rawValue: string): string {
+  const value = rawValue.trim();
+  const limit = SETTING_LIMITS[key as keyof typeof SETTING_LIMITS] ?? 20_000;
+  if (rawValue.length > limit) throw new Error(`${key} is too long`);
+  if (key === "llm.baseUrl" && value) validateNetworkUrl(value);
+  if (key === "smtp.host" && value) {
+    if (value.includes("://") || !/^[A-Za-z0-9._:[\]-]+$/.test(value)) {
+      throw new Error("SMTP host must be a hostname or IP address without a URL scheme");
+    }
+  }
+  if (key === "smtp.port" && value) {
+    const port = Number(value);
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+      throw new Error("SMTP port must be an integer between 1 and 65535");
+    }
+  }
+  if (key === "smtp.secure" && value && !["true", "false"].includes(value)) {
+    throw new Error("smtp.secure must be true or false");
+  }
+  return value;
+}
+
 export async function setSetting(key: string, value: string): Promise<void> {
+  value = validateSettingValue(key, value);
   const encrypted = SECRET_SETTING_KEYS.has(key);
   const persistedValue = encrypted && value ? encryptSecret(value) : value;
   await db
@@ -18,6 +55,35 @@ export async function setSetting(key: string, value: string): Promise<void> {
       target: settings.key,
       set: { value: persistedValue, encrypted, updatedAt: new Date() },
     });
+}
+
+export async function setSettings(
+  values: ReadonlyArray<readonly [string, string]>,
+): Promise<void> {
+  const prepared = values.map(([key, value]) => {
+    const validated = validateSettingValue(key, value);
+    const encrypted = SECRET_SETTING_KEYS.has(key);
+    return {
+      key,
+      value: encrypted && validated ? encryptSecret(validated) : validated,
+      encrypted,
+    };
+  });
+  await db.transaction(async (tx) => {
+    for (const setting of prepared) {
+      await tx
+        .insert(settings)
+        .values({ ...setting, updatedAt: new Date() })
+        .onConflictDoUpdate({
+          target: settings.key,
+          set: {
+            value: setting.value,
+            encrypted: setting.encrypted,
+            updatedAt: new Date(),
+          },
+        });
+    }
+  });
 }
 
 export async function getSetting(key: string): Promise<string | null> {

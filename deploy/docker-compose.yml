@@ -21,6 +21,8 @@ services:
     mem_limit: 768m
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
 
   app:
     image: ${ARCHIVE_IMAGE:-ai-conversation-archive:latest}
@@ -36,9 +38,13 @@ services:
       APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN}
       APP_MASTER_KEY: ${APP_MASTER_KEY:?Set APP_MASTER_KEY}
       COOKIE_SECURE: "true"
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      EXTENSION_ORIGINS: ${EXTENSION_ORIGINS:-chrome-extension://daolmhnfgimkgnnadojnmhkkjdolplfi}
+      ALLOW_PRIVATE_NETWORK_TARGETS: ${ALLOW_PRIVATE_NETWORK_TARGETS:-false}
       IMPORT_INBOX: /data/imports/inbox
       IMPORT_PROCESSED: /data/imports/processed
       IMPORT_FAILED: /data/imports/failed
+      COMPONENT_RELEASE_DIR: /app/release
       TZ: Asia/Shanghai
       LOG_LEVEL: ${LOG_LEVEL:-info}
       WEB_DIST: /app/apps/web/dist
@@ -57,6 +63,8 @@ services:
     mem_limit: 512m
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
 
   worker:
     image: ${ARCHIVE_IMAGE:-ai-conversation-archive:latest}
@@ -80,3 +88,5 @@ services:
     mem_limit: 512m
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL

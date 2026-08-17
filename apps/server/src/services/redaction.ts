@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db } from "../db.js";
 import { redactionRules } from "../schema.js";
+import safeRegex from "safe-regex2";
 
 const builtinPatterns: Array<[RegExp, string]> = [
   [/(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)/g, "[PHONE]"],
@@ -41,6 +42,7 @@ export async function redactForCloud(input: string): Promise<{
   for (const rule of customRules) {
     let pattern: RegExp;
     try {
+      if (!safeRegex(rule.pattern)) continue;
       pattern = new RegExp(rule.pattern, "gu");
     } catch {
       continue;

@@ -29,6 +29,11 @@ import {
   latestRevisionId,
   hardDeleteConversation,
 } from "../services/capture.js";
+import {
+  loadConversationExportData,
+  renderConversationExport,
+  type ConversationExportFormat,
+} from "../services/conversation-export.js";
 
 const ListQuerySchema = z.object({
   q: z.string().max(500).optional(),
@@ -47,6 +52,7 @@ const webProviders = [
   "gemini",
   "grok",
   "yuanbao",
+  "doubao",
   "minimax_agent",
   "deepseek",
   "qianwen",
@@ -59,6 +65,26 @@ function searchExcerpt(content: string, q: string): string {
   const start = Math.max(0, index - 54);
   const end = Math.min(content.length, index + q.length + 90);
   return `${start > 0 ? "…" : ""}${content.slice(start, end)}${end < content.length ? "…" : ""}`;
+}
+
+const ExportQuerySchema = z.object({
+  format: z.enum(["csv", "md", "xlsx"]),
+});
+
+function safeExportFilename(value: string): string {
+  const normalized = value
+    .normalize("NFKC")
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+  return normalized || "conversation";
+}
+
+function exportMimeType(format: ConversationExportFormat): string {
+  if (format === "csv") return "text/csv; charset=utf-8";
+  if (format === "md") return "text/markdown; charset=utf-8";
+  return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 }
 
 export async function conversationRoutes(app: FastifyInstance): Promise<void> {
@@ -222,12 +248,16 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/conversations/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const query = z
+        .object({ revisionId: z.string().uuid().optional() })
+        .parse(request.query);
       const [conversation] = await db
         .select()
         .from(conversations)
         .where(
           and(
-            eq(conversations.id, request.params.id),
+            eq(conversations.id, params.id),
             isNull(conversations.deletedAt),
           ),
         )
@@ -266,7 +296,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         .where(eq(conversationProjects.conversationId, conversation.id))
         .limit(1);
       const selectedRevisionId =
-        request.query.revisionId ?? (await latestRevisionId(conversation.id));
+        query.revisionId ?? (await latestRevisionId(conversation.id));
       const selectedRevision = revisions.find(
         (revision) => revision.id === selectedRevisionId,
       );
@@ -307,11 +337,35 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  app.get<{ Params: { id: string }; Querystring: { format?: string } }>(
+    "/api/v1/conversations/:id/export",
+    async (request, reply) => {
+      if (!(await requireWebUser(request, reply))) return;
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const { format } = ExportQuerySchema.parse(request.query);
+      const data = await loadConversationExportData({
+        conversationId: params.id,
+      });
+      if (!data) return reply.code(404).send({ error: "Conversation not found" });
+      const content = await renderConversationExport(format, data);
+      const filename = `${safeExportFilename(data.scopeName)}.${format}`;
+      reply
+        .header("Content-Type", exportMimeType(format))
+        .header(
+          "Content-Disposition",
+          `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+        )
+        .header("Cache-Control", "no-store");
+      return reply.send(content);
+    },
+  );
+
   app.delete<{ Params: { id: string } }>(
     "/api/v1/conversations/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      if (!(await hardDeleteConversation(request.params.id))) {
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      if (!(await hardDeleteConversation(params.id))) {
         return reply.code(404).send({ error: "Conversation not found" });
       }
       return reply.code(204).send();

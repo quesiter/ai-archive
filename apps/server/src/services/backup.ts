@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import { createGzip, gunzip, gzip } from "node:zlib";
+import { sql } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
 import { getTableName } from "drizzle-orm/table";
 import { getTableColumns } from "drizzle-orm/utils";
@@ -26,6 +27,7 @@ import {
   reports,
   settings,
 } from "../schema.js";
+import { APP_VERSION } from "../version.js";
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -34,6 +36,9 @@ export const BACKUP_FORMAT = "ai-conversation-archive.backup.v1";
 const BACKUP_SCHEMA_VERSION = 1;
 const EXPORT_CURSOR_BATCH_SIZE = 100;
 const INSERT_BATCH_SIZE = 300;
+export const MAX_BACKUP_COMPRESSED_BYTES = 512 * 1024 * 1024;
+export const MAX_BACKUP_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024;
+const MAX_BACKUP_ROWS_PER_TABLE = 2_000_000;
 
 type BackupRow = Record<string, unknown>;
 type BackupTables = Record<string, BackupRow[]>;
@@ -73,7 +78,18 @@ const BackupEnvelopeSchema = z.object({
     appVersion: z.string().optional(),
     masterKeyFingerprint: z.string().optional(),
   }).default({}),
-  tables: z.record(z.array(z.record(z.unknown()))),
+  tables: z.record(z.array(z.record(z.unknown())).max(MAX_BACKUP_ROWS_PER_TABLE)),
+}).superRefine((value, context) => {
+  const allowedTables = new Set(tableSpecs.map((spec) => spec.key));
+  for (const key of Object.keys(value.tables)) {
+    if (!allowedTables.has(key)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["tables", key],
+        message: "Unknown backup table",
+      });
+    }
+  }
 });
 
 export type BackupImportResult = {
@@ -84,7 +100,7 @@ export type BackupImportResult = {
 };
 
 function appVersion(): string {
-  return process.env.npm_package_version ?? "0.2.18";
+  return APP_VERSION;
 }
 
 function masterKeyFingerprint(): string {
@@ -232,7 +248,15 @@ export async function parseBackupArchive(
   filename: string,
   buffer: Buffer,
 ): Promise<z.infer<typeof BackupEnvelopeSchema>> {
-  const payload = isGzip(buffer, filename) ? await gunzipAsync(buffer) : buffer;
+  if (buffer.length > MAX_BACKUP_COMPRESSED_BYTES) {
+    throw new Error("Backup exceeds the compressed size limit");
+  }
+  const payload = isGzip(buffer, filename)
+    ? await gunzipAsync(buffer, { maxOutputLength: MAX_BACKUP_UNCOMPRESSED_BYTES })
+    : buffer;
+  if (payload.length > MAX_BACKUP_UNCOMPRESSED_BYTES) {
+    throw new Error("Backup expands beyond the allowed size");
+  }
   const parsed = JSON.parse(payload.toString("utf8").replace(/^\uFEFF/, ""));
   return BackupEnvelopeSchema.parse(parsed);
 }
@@ -244,6 +268,13 @@ export async function restoreBackupArchive(
   const backup = await parseBackupArchive(filename, buffer);
   const warnings: string[] = [];
   const tables: BackupTables = { ...backup.tables };
+  const requiredTables = ["conversations", "conversationRevisions", "messages", "messageSegments"];
+  const missingRequiredTables = requiredTables.filter(
+    (key) => !Object.prototype.hasOwnProperty.call(tables, key),
+  );
+  if (missingRequiredTables.length) {
+    throw new Error(`Backup is incomplete; missing tables: ${missingRequiredTables.join(", ")}`);
+  }
   const backupMasterKey = backup.metadata.masterKeyFingerprint;
   if (backupMasterKey && backupMasterKey !== masterKeyFingerprint()) {
     const originalSettings = tables.settings ?? [];
@@ -261,6 +292,7 @@ export async function restoreBackupArchive(
 
   const counts: Record<string, number> = {};
   await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(193481962)`);
     for (const spec of deleteSpecs) {
       await tx.delete(spec.table);
     }

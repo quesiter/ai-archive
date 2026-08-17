@@ -18,14 +18,42 @@ import {
 } from "../services/background-tasks.js";
 import {
   enqueueConversationClassification,
+  enqueueKnowledgeRebuild,
   enqueueUnlockedReclassification,
 } from "../services/queue.js";
 import { getBooleanSetting, getSetting } from "../services/settings.js";
+import {
+  loadConversationExportData,
+  renderConversationExport,
+  type ConversationExportFormat,
+} from "../services/conversation-export.js";
+import { mergeProjectIntoProject } from "../services/project-merge.js";
+import { writeOperationLog } from "../services/operation-log.js";
 
 const ProjectInputSchema = z.object({
   name: z.string().min(1).max(200),
   description: z.string().max(5_000).default(""),
 });
+
+const ProjectExportQuerySchema = z.object({
+  format: z.enum(["csv", "md", "xlsx"]),
+});
+
+function safeProjectExportFilename(value: string): string {
+  const normalized = value
+    .normalize("NFKC")
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+  return normalized || "project";
+}
+
+function projectExportMimeType(format: ConversationExportFormat): string {
+  if (format === "csv") return "text/csv; charset=utf-8";
+  if (format === "md") return "text/markdown; charset=utf-8";
+  return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+}
 
 async function enqueueAutoReclassification(
   log: Pick<FastifyInstance["log"], "warn">,
@@ -185,13 +213,14 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/projects/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
       const input = ProjectInputSchema.partial().extend({
         archived: z.boolean().optional(),
       }).parse(request.body);
       const [project] = await db
         .update(projects)
         .set({ ...input, updatedAt: new Date() })
-        .where(eq(projects.id, request.params.id))
+        .where(eq(projects.id, params.id))
         .returning();
       if (!project) return reply.code(404).send({ error: "Project not found" });
       await enqueueAutoReclassification(request.log);
@@ -199,10 +228,63 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  app.get<{ Params: { id: string }; Querystring: { format?: string } }>(
+    "/api/v1/projects/:id/export",
+    async (request, reply) => {
+      if (!(await requireWebUser(request, reply))) return;
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const { format } = ProjectExportQuerySchema.parse(request.query);
+      const data = await loadConversationExportData({ projectId: params.id });
+      if (!data) return reply.code(404).send({ error: "Project not found" });
+      const content = await renderConversationExport(format, data);
+      const filename = `${safeProjectExportFilename(data.scopeName)}.${format}`;
+      reply
+        .header("Content-Type", projectExportMimeType(format))
+        .header(
+          "Content-Disposition",
+          `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+        )
+        .header("Cache-Control", "no-store");
+      return reply.send(content);
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/v1/projects/:id/merge",
+    async (request, reply) => {
+      const user = await requireWebUser(request, reply);
+      if (!user) return;
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const input = z.object({ targetProjectId: z.string().uuid() }).parse(request.body);
+      if (input.targetProjectId === params.id) {
+        return reply.code(400).send({
+          error: "Source and target projects must be different",
+        });
+      }
+      const result = await mergeProjectIntoProject({
+        sourceProjectId: params.id,
+        targetProjectId: input.targetProjectId,
+      });
+      if (!result) {
+        return reply.code(404).send({ error: "Source or target project not found" });
+      }
+      await writeOperationLog({
+        scope: "classification",
+        message: `项目“${result.sourceProjectName}”已合并到“${result.targetProjectName}”`,
+        status: "completed",
+        entityType: "project",
+        entityId: result.targetProjectId,
+        metadata: { ...result, userId: user.id },
+      });
+      return result;
+    },
+  );
+
   app.put<{ Params: { id: string } }>(
     "/api/v1/conversations/:id/project",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
       const input = z
         .object({
           projectId: z.string().uuid().nullable(),
@@ -212,7 +294,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       const [conversation] = await db
         .select({ id: conversations.id })
         .from(conversations)
-        .where(eq(conversations.id, request.params.id))
+        .where(eq(conversations.id, params.id))
         .limit(1);
       if (!conversation) {
         return reply.code(404).send({ error: "Conversation not found" });
@@ -353,9 +435,53 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     return rows.filter(
       (row) =>
         (!query.projectId || row.projectId === query.projectId) &&
-        (!query.status || row.status === query.status),
+      (!query.status || row.status === query.status),
     );
   });
+
+  app.post("/api/v1/knowledge/rebuild", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    await failStaleBackgroundTasks("knowledge_rebuild");
+    const activeTask = await getLatestBackgroundTask("knowledge_rebuild", ["queued", "running"]);
+    if (activeTask) {
+      return reply.code(202).send({ jobId: null, task: activeTask, reused: true });
+    }
+    const task = await createBackgroundTask(
+      "knowledge_rebuild",
+      "正在加入队列，等待 Worker 重建项目知识",
+    );
+    const jobId = await enqueueKnowledgeRebuild({ taskId: task.id });
+    if (!jobId) {
+      await updateBackgroundTask(task.id, {
+        status: "failed",
+        error: "项目知识重建任务没有成功进入队列",
+        message: "任务入队失败",
+        completedAt: new Date(),
+      });
+      return reply.code(409).send({ error: "Failed to queue knowledge rebuild task" });
+    }
+    return reply.code(202).send({ jobId, task });
+  });
+
+  app.get("/api/v1/knowledge/rebuild/latest", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    await failStaleBackgroundTasks("knowledge_rebuild");
+    return {
+      task: await getLatestBackgroundTask("knowledge_rebuild"),
+    };
+  });
+
+  app.get<{ Params: { id: string } }>(
+    "/api/v1/knowledge/rebuild/:id",
+    async (request, reply) => {
+      if (!(await requireWebUser(request, reply))) return;
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      await failStaleBackgroundTasks("knowledge_rebuild");
+      const task = await getBackgroundTask(params.id);
+      if (!task) return reply.code(404).send({ error: "Task not found" });
+      return task;
+    },
+  );
 
   app.get("/api/v1/unclassified", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;

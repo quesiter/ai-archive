@@ -66,6 +66,41 @@ export function decideCaptureAction(input: {
     };
   }
   if (input.state.messageCount > input.light.messageCount) {
+    // A virtualized conversation can expose fewer messages while the user is
+    // scrolling, or immediately after a full scan restores the original
+    // viewport. That is not evidence that the branch changed. Require
+    // stronger evidence before starting another expensive full scan.
+    const branchEvidence =
+      input.previousStreaming ||
+      input.requestedReason === "new_session" ||
+      input.requestedReason === "branch_changed" ||
+      input.requestedReason === "manual_retry" ||
+      input.requestedReason === "incremental_base_mismatch";
+    const likelyVirtualizedViewport =
+      input.light.virtualized === true ||
+      input.state.messageCount >= 8 &&
+      input.light.messageCount <= input.state.messageCount - 2;
+    if (
+      !branchEvidence &&
+      likelyVirtualizedViewport &&
+      input.state.completeness === "complete"
+    ) {
+      const tailChanged =
+        input.state.lastMessageId !== input.light.lastMessageId ||
+        input.state.lastMessageTextHash !== input.light.lastMessageTextHash;
+      if (tailChanged) {
+        return {
+          action: "append",
+          triggerReason: input.requestedReason,
+          message: "Virtualized tail changed; try appending after the archived baseline",
+        };
+      }
+      return {
+        action: "skip",
+        triggerReason: input.requestedReason,
+        message: "检测到的是虚拟列表视口变化，已跳过",
+      };
+    }
     return {
       action: "full",
       triggerReason: "branch_changed",

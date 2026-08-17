@@ -168,6 +168,20 @@ export interface LightweightConversationFingerprint {
   lastMessageRole?: MessageRole | undefined;
   lastMessageTextHash?: string | undefined;
   streaming: boolean;
+  /** True when the current message container is scrollable/likely virtualized. */
+  virtualized?: boolean | undefined;
+}
+
+function likelyVirtualizedViewport(
+  adapter: AdapterRuntime,
+  messages: ExtractedMessage[],
+): boolean {
+  const first = messages[0];
+  if (!first) return false;
+  const root = adapter.getConversationRoot();
+  if (!root || !root.contains(first.element)) return false;
+  const container = elementScrollContainer(first.element);
+  return container.scrollHeight > container.clientHeight + 80;
 }
 
 export async function lightweightConversationFingerprint(
@@ -186,6 +200,7 @@ export async function lightweightConversationFingerprint(
     ...(last ? { lastMessageRole: last.role } : {}),
     ...(last ? { lastMessageTextHash: await messageTextFingerprint(last) } : {}),
     streaming: adapter.isStreaming(),
+    virtualized: likelyVirtualizedViewport(adapter, messages),
   };
 }
 
@@ -293,7 +308,6 @@ export async function scanAppendedMessages(
   if (!sessionId) throw new Error("当前页面还没有稳定的对话 Session ID");
   if (adapter.isStreaming()) return null;
   const visible = adapter.extractVisibleMessages();
-  if (visible.length <= base.messageCount) return null;
   let baseIndex = -1;
   for (const [index, message] of visible.entries()) {
     if (base.lastMessageId && message.externalMessageId === base.lastMessageId) {

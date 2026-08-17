@@ -6,6 +6,7 @@ export const queueNames = {
   monthly: "analysis-monthly",
   classifyConversation: "classify-conversation",
   reclassifyUnlocked: "reclassify-unlocked",
+  rebuildKnowledge: "rebuild-knowledge",
   importArchive: "import-archive",
   emailReport: "email-report",
 } as const;
@@ -16,6 +17,10 @@ export interface ReclassificationJobData {
   scope?: "incremental" | "all";
   conversationIds?: string[];
   offset?: number;
+}
+
+export interface KnowledgeRebuildJobData {
+  taskId?: string;
 }
 
 let bossPromise: Promise<PgBoss> | null = null;
@@ -85,6 +90,27 @@ export async function enqueueUnlockedReclassification(
   return boss.send(
     queueNames.reclassifyUnlocked,
     { ...data, offset, requestedAt: new Date().toISOString() },
+    {
+      ...options,
+      expireInHours: 6,
+      retryLimit: 1,
+      retryDelay: 60,
+      retryBackoff: true,
+    },
+  );
+}
+
+export async function enqueueKnowledgeRebuild(
+  input?: string | KnowledgeRebuildJobData,
+): Promise<string | null> {
+  const boss = await getBoss();
+  const data = typeof input === "string" ? { taskId: input } : { ...(input ?? {}) };
+  const options = data.taskId
+    ? { singletonKey: data.taskId }
+    : { singletonKey: "all-knowledge", singletonSeconds: 300 };
+  return boss.send(
+    queueNames.rebuildKnowledge,
+    { ...data, requestedAt: new Date().toISOString() },
     {
       ...options,
       expireInHours: 6,

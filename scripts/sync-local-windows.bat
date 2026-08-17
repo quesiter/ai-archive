@@ -7,6 +7,12 @@ if /I "%~1"=="/?" goto :usage
 if /I "%~1"=="-h" goto :usage
 if /I "%~1"=="--help" goto :usage
 
+if /I "%~1"=="install-background" goto :install_background_source
+if /I "%~1"=="install" goto :install_background_source
+if /I "%~1"=="background" goto :install_background_source
+if /I "%~1"=="uninstall-background" goto :uninstall_background_source
+if /I "%~1"=="uninstall" goto :uninstall_background_source
+
 if /I not "%AI_ARCHIVE_ALLOW_HEAVY_SYNC%"=="YES_I_UNDERSTAND" (
   echo.
   echo Safety lock: this script can run a heavy full local history import.
@@ -19,6 +25,8 @@ if /I not "%AI_ARCHIVE_ALLOW_HEAVY_SYNC%"=="YES_I_UNDERSTAND" (
 )
 
 set "ROOT=%~dp0.."
+set "INSTALLER=%~dp0install-windows-sync-task.ps1"
+set "UNINSTALLER=%~dp0uninstall-windows-sync-task.ps1"
 pushd "%ROOT%" >nul 2>nul
 if errorlevel 1 (
   echo Failed to enter project root: %ROOT%
@@ -56,6 +64,7 @@ set "SAFE_DELAY_MS=%AI_ARCHIVE_SYNC_DELAY_MS%"
 if "%SAFE_DELAY_MS%"=="" set "SAFE_DELAY_MS=750"
 
 set "NODE_OPTIONS=--max-old-space-size=4096 %NODE_OPTIONS%"
+set "PAIRED_ON_THIS_RUN=0"
 
 echo.
 echo AI Conversation Archive - Windows local sync
@@ -115,6 +124,7 @@ if not exist "%CONFIG_PATH%" (
     call node apps/openclaw-sync/dist/index.cjs pair --server "%SERVER_URL%" --code "!PAIR_CODE!" --openclaw-root "%OPENCLAW_ROOT%" --codex-root "%CODEX_ROOT%"
   )
   if errorlevel 1 goto :failed
+  set "PAIRED_ON_THIS_RUN=1"
 ) else (
   echo Existing pairing config found; pairing step skipped.
 )
@@ -123,7 +133,11 @@ echo.
 if /I "%~1"=="full-rebuild" goto :full_rebuild
 if /I "%~1"=="rebuild-all" goto :full_rebuild
 if /I "%~1"=="watch-only" goto :watch_only
+if /I "%~1"=="rebuild-only" goto :safe_rebuild
+if /I "%~1"=="once" goto :safe_rebuild
+goto :install_background
 
+:safe_rebuild
 echo Importing recent local history in safe mode...
 call node apps/openclaw-sync/dist/index.cjs rebuild --recent-days "%SAFE_RECENT_DAYS%" --max-files "%SAFE_MAX_FILES%" --max-file-mb "%SAFE_MAX_FILE_MB%" --max-messages "%SAFE_MAX_MESSAGES%" --delay-ms "%SAFE_DELAY_MS%"
 if errorlevel 1 goto :failed
@@ -146,9 +160,35 @@ echo Close other heavy apps first. The command will reset sync state and import 
 call node apps/openclaw-sync/dist/index.cjs full-rebuild --delay-ms "%SAFE_DELAY_MS%"
 if errorlevel 1 goto :failed
 
+:install_background
+if not exist "%INSTALLER%" (
+  echo Missing installer: %INSTALLER%
+  goto :failed
+)
+echo.
+echo Installing background sync task...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%INSTALLER%"
+if errorlevel 1 goto :failed
+echo.
+echo Background sync is installed and running. You can close this window.
+goto :done
+
+:uninstall_background
+if not exist "%UNINSTALLER%" (
+  echo Missing uninstaller: %UNINSTALLER%
+  goto :failed
+)
+echo.
+echo Uninstalling background sync task...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%UNINSTALLER%"
+if errorlevel 1 goto :failed
+goto :done
+
 :done
 echo.
 echo Local sync finished.
+echo This window will close automatically in 8 seconds.
+timeout /t 8 /nobreak >nul 2>nul
 popd >nul 2>nul
 exit /b 0
 
@@ -163,11 +203,13 @@ exit /b 1
 echo AI Conversation Archive Windows local sync
 echo.
 echo Usage:
-echo   scripts\sync-local-windows.bat              Safe recent import, then watch future changes.
+echo   scripts\sync-local-windows.bat              Install or restart hidden background auto-sync.
 echo   scripts\sync-local-windows.bat rebuild-only Safe recent import once.
 echo   scripts\sync-local-windows.bat once         Same as rebuild-only.
 echo   scripts\sync-local-windows.bat watch-only   Watch future changes without an initial scan.
 echo   scripts\sync-local-windows.bat full-rebuild Explicit full import of all local history.
+echo   scripts\sync-local-windows.bat install      Install hidden background auto-sync.
+echo   scripts\sync-local-windows.bat uninstall    Uninstall hidden background auto-sync.
 echo.
 echo Environment overrides:
 echo   AI_ARCHIVE_SERVER=https://ai-archive.gyee.tech:18443
@@ -181,3 +223,11 @@ echo   AI_ARCHIVE_SAFE_MAX_FILE_MB=50
 echo   AI_ARCHIVE_SAFE_MAX_MESSAGES=12000
 echo   AI_ARCHIVE_SYNC_DELAY_MS=750
 exit /b 0
+
+:install_background_source
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install-windows-sync-task.ps1"
+exit /b %ERRORLEVEL%
+
+:uninstall_background_source
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall-windows-sync-task.ps1"
+exit /b %ERRORLEVEL%

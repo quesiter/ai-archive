@@ -2,12 +2,12 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
-import { gunzip, gzip } from "node:zlib";
+import { createGunzip, gzip } from "node:zlib";
 import chokidar from "chokidar";
 import fg from "fast-glob";
 import { z } from "zod";
@@ -27,7 +27,6 @@ import {
 
 const execFileAsync = promisify(execFile);
 const gzipAsync = promisify(gzip);
-const gunzipAsync = promisify(gunzip);
 const configPath =
   process.env.AI_ARCHIVE_SYNC_CONFIG ??
   join(homedir(), ".config", "ai-archive", "openclaw-sync.json");
@@ -42,7 +41,8 @@ const SAFE_MAX_FILE_MB = 50;
 const SAFE_MAX_MESSAGES = 12_000;
 const SAFE_DELAY_MS = 750;
 const BYTES_PER_MIB = 1024 * 1024;
-const SYNC_AGENT_VERSION = "0.2.20";
+const MAX_DECOMPRESSED_TRANSCRIPT_BYTES = 200 * BYTES_PER_MIB;
+const SYNC_AGENT_VERSION = "V20260817";
 const TRANSCRIPT_IGNORE_PATTERNS = [
   "**/*.bak",
   "**/*.deleted",
@@ -180,7 +180,7 @@ function positiveNumberOption(args: string[], name: string): number | undefined 
   const rawValue = optionValue(args, name);
   if (rawValue === undefined) return undefined;
   const value = Number(rawValue);
-  if (!Number.isFinite(value) || value < 0) {
+  if (!Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) {
     throw new Error(`--${name} must be a non-negative number`);
   }
   return value;
@@ -270,11 +270,28 @@ async function gzipJson(value: unknown): Promise<ArrayBuffer> {
 }
 
 async function readTranscript(path: string): Promise<string> {
-  const buffer = await readFile(path);
-  return (/\.gz$/i.test(path) ? await gunzipAsync(buffer) : buffer).toString("utf8");
+  if (!/\.gz$/i.test(path)) return readFile(path, "utf8");
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  const decompressor = createReadStream(path).pipe(createGunzip());
+  for await (const chunk of decompressor) {
+    const buffer = Buffer.from(chunk as Buffer);
+    totalBytes += buffer.length;
+    if (totalBytes > MAX_DECOMPRESSED_TRANSCRIPT_BYTES) {
+      decompressor.destroy();
+      throw new Error(
+        `Decompressed transcript exceeds ${MAX_DECOMPRESSED_TRANSCRIPT_BYTES / BYTES_PER_MIB} MiB`,
+      );
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks, totalBytes).toString("utf8");
 }
 
 async function readTranscriptTail(path: string, start: number): Promise<string> {
+  if (start < 0 || !Number.isSafeInteger(start)) {
+    throw new Error("Transcript read offset is invalid");
+  }
   const chunks: string[] = [];
   const reader = createReadStream(path, { encoding: "utf8", start });
   for await (const chunk of reader) chunks.push(String(chunk));
@@ -475,7 +492,7 @@ async function sendCapture(
 
 function stateFromSnapshot(input: {
   source: TranscriptSource;
-  metadata: Awaited<ReturnType<typeof stat>>;
+  metadata: Awaited<ReturnType<typeof lstat>>;
   snapshot: CaptureSnapshotV1;
   result: CaptureUploadResult;
   fullFileHash?: string | undefined;
@@ -500,7 +517,7 @@ function stateFromSnapshot(input: {
 
 function stateFromDelta(input: {
   source: TranscriptSource;
-  metadata: Awaited<ReturnType<typeof stat>>;
+  metadata: Awaited<ReturnType<typeof lstat>>;
   previous: LocalFileState;
   delta: CaptureDeltaV1;
   result: CaptureUploadResult;
@@ -534,7 +551,10 @@ async function upload(
   state: SyncState,
   options: SyncRunOptions,
 ): Promise<void> {
-  const metadata = await stat(source.path);
+  const metadata = await lstat(source.path);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error("Transcript path must be a regular file, not a symbolic link");
+  }
   const previous = state.files[source.path];
   if (
     typeof previous === "object" &&
@@ -767,7 +787,11 @@ async function filterTranscriptFiles(
 
   for (const source of sources) {
     try {
-      const metadata = await stat(source.path);
+      const metadata = await lstat(source.path);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) {
+        missingSkipped += 1;
+        continue;
+      }
       const modifiedAt = Number(metadata.mtimeMs);
       const fileSize = Number(metadata.size);
       if (cutoffMs !== null && modifiedAt < cutoffMs) {
@@ -861,6 +885,7 @@ async function transcriptFiles(
     cwd: config.openClawRoot,
     absolute: true,
     onlyFiles: true,
+    followSymbolicLinks: false,
     ignore: TRANSCRIPT_IGNORE_PATTERNS,
   }).catch(() => []);
   const sources: TranscriptSource[] = preferOpenClawTranscriptSources(
@@ -875,6 +900,7 @@ async function transcriptFiles(
       cwd: root,
       absolute: true,
       onlyFiles: true,
+      followSymbolicLinks: false,
       ignore: TRANSCRIPT_IGNORE_PATTERNS,
     }).catch(() => []);
     sources.push(
@@ -886,6 +912,7 @@ async function transcriptFiles(
       cwd: root,
       absolute: true,
       onlyFiles: true,
+      followSymbolicLinks: false,
       ignore: [
         ...TRANSCRIPT_IGNORE_PATTERNS,
         "**/*key*",

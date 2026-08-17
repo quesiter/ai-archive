@@ -1,4 +1,4 @@
-import {
+﻿import {
   FormEvent,
   type ReactNode,
   useCallback,
@@ -17,7 +17,11 @@ import {
   useParams,
   useSearchParams,
 } from "react-router-dom";
-import { providerLabels, type Provider } from "@ai-archive/contracts";
+import {
+  providerLabels,
+  stripInternalConversationMetadata,
+  type Provider,
+} from "@ai-archive/contracts";
 import { api, ApiError, jsonBody } from "./api.js";
 
 type UnknownRecord = Record<string, any>;
@@ -138,7 +142,8 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
 const navigation = [
   ["/", "总览", "⌂"],
   ["/conversations", "会话", "◫"],
-  ["/projects", "项目知识", "◇"],
+  ["/classification", "分类结果", "◇"],
+  ["/knowledge", "项目知识", "▣"],
   ["/reports", "报告", "▤"],
   ["/imports", "导入", "⇧"],
   ["/devices", "设备", "⌘"],
@@ -448,7 +453,7 @@ function Dashboard() {
                 {formatCount(categoryStats.length)} 个分类，近 7 日新增或更新 {formatCount(categoryTotals.growth7d)} 条会话
               </p>
             </div>
-            <Link className="button-link secondary small" to="/projects">查看分类</Link>
+            <Link className="button-link secondary small" to="/classification">查看分类</Link>
           </div>
           {topCategories.length ? (
             <div className="category-dashboard-list">
@@ -1029,6 +1034,40 @@ function messageTime(value: unknown): string {
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
 }
 
+function ExportLinks({ path }: { path: string }) {
+  return <div className="export-links" aria-label="导出对话记录">
+    <span>导出</span>
+    <a className="button-link secondary small" href={`${path}?format=csv`}>CSV</a>
+    <a className="button-link secondary small" href={`${path}?format=md`}>Markdown</a>
+    <a className="button-link secondary small" href={`${path}?format=xlsx`}>XLSX</a>
+  </div>;
+}
+
+function cleanSegmentContent(segment: UnknownRecord): string {
+  return stripInternalConversationMetadata(String(segment.content ?? ""));
+}
+
+function safeExternalHref(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value) return undefined;
+  try {
+    const url = new URL(value, window.location.origin);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
+function renderSegment(segment: UnknownRecord, key: string) {
+  const content = cleanSegmentContent(segment);
+  if (!content) return null;
+  const href = safeExternalHref(segment.href);
+  return <div key={key} className={`segment ${segment.type}`}>
+    {segment.type !== "text" && <small className="segment-label">{segmentLabel(segment.type)}</small>}
+    {segment.type === "code" ? <pre><code>{content}</code></pre> : href ? <a href={href} target="_blank" rel="noopener noreferrer">{content}</a> : <p>{content}</p>}
+  </div>;
+}
+
 function ConversationDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -1040,9 +1079,12 @@ function ConversationDetail() {
 
   useEffect(() => {
     if (!state.loading && window.location.hash) {
-      requestAnimationFrame(() =>
-        document.querySelector(window.location.hash)?.scrollIntoView({ block: "center" }),
-      );
+      const match = window.location.hash.match(/^#message-(\d+)$/);
+      if (match?.[1]) {
+        requestAnimationFrame(() =>
+          document.getElementById(`message-${match[1]}`)?.scrollIntoView({ block: "center" }),
+        );
+      }
     }
   }, [state.loading, state.data]);
 
@@ -1085,7 +1127,16 @@ function ConversationDetail() {
   if (state.error) return <ErrorBanner message={state.error} />;
   const data = state.data!;
   const selectedRevision = data.selectedRevision as UnknownRecord | null;
-  return <><PageHeader title={data.conversation.title || "未命名会话"} subtitle={`${providerLabels[data.conversation.provider as Provider]} · ${data.conversation.externalSessionId}`} actions={<div className="button-group">{data.conversation.canonicalUrl && <a className="button-link" href={data.conversation.canonicalUrl} target="_blank" rel="noreferrer">打开原会话</a>}<button className="danger" onClick={() => void removeConversation()}>永久删除归档</button></div>} />
+  const displayMessages = (data.messages as UnknownRecord[]).flatMap((message) => {
+    const segments = Array.isArray(message.segments) ? message.segments as UnknownRecord[] : [];
+    const processSegments = segments.filter((segment) => segment.type === "tool_status" || segment.type === "reasoning");
+    const contentSegments = segments.filter((segment) => segment.type !== "tool_status" && segment.type !== "reasoning" && cleanSegmentContent(segment));
+    const isCodexInternal = data.conversation.provider === "codex" && (message.role === "tool" || message.role === "system");
+    if (!contentSegments.length && !processSegments.length) return [];
+    return [{ ...message, contentSegments, processSegments, isCodexInternal }];
+  });
+  const canonicalUrl = safeExternalHref(data.conversation.canonicalUrl);
+  return <><PageHeader title={data.conversation.title || "未命名会话"} subtitle={`${providerLabels[data.conversation.provider as Provider]} · ${data.conversation.externalSessionId}`} actions={<div className="button-group"><ExportLinks path={`/api/v1/conversations/${id}/export`} />{canonicalUrl && <a className="button-link" href={canonicalUrl} target="_blank" rel="noopener noreferrer">打开原会话</a>}<button className="danger" onClick={() => void removeConversation()}>永久删除归档</button></div>} />
     <ErrorBanner message={actionError} />
     <div className="toolbar"><label>版本 <select value={selectedRevision?.id ?? ""} onChange={(event) => setSearchParams(event.target.value ? { revisionId: event.target.value } : {})}>{data.revisions.map((revision: UnknownRecord) => <option key={revision.id} value={revision.id}>{new Date(revision.capturedAt).toLocaleString()} · {captureModeLabels[String(revision.captureMode)] ?? revision.captureMode} · {revision.completeness} · {revision.messageCount} 条</option>)}</select></label><label>项目（选择后人工锁定） <select disabled={projectsState.loading} value={data.projectAssignment?.projectId ?? ""} onChange={(event) => void assignProject(event.target.value)}><option value="">待归类</option>{projectsState.data?.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>{data.projectAssignment?.lockedByUser ? <><span className="pill complete">人工锁定</span><button className="secondary small" onClick={() => void releaseProjectLock()}>交还 AI 调整</button></> : <span className="pill">AI 可动态调整</span>}</div>
     {selectedRevision && <section className="revision-meta-grid">
@@ -1097,16 +1148,21 @@ function ConversationDetail() {
       <div><span>采集时间</span><strong>{formatTaskTime(selectedRevision.capturedAt)}</strong></div>
       {selectedRevision.completenessReason && <div className="wide"><span>原因说明</span><strong>{selectedRevision.completenessReason}</strong></div>}
     </section>}
-    <section className="transcript">{data.messages.map((message: UnknownRecord, index: number) => {
-      const previous = index > 0 ? data.messages[index - 1] as UnknownRecord : undefined;
+    <section className="transcript">{displayMessages.map((message: UnknownRecord, index: number) => {
+      const previous = index > 0 ? displayMessages[index - 1] as UnknownRecord : undefined;
       const sameSpeaker = Boolean(previous && previous.role === message.role);
       const timestamp = messageTime(message.sourceCreatedAt ?? message.createdAt);
+      if (message.isCodexInternal) return <details className="tool-details hidden-process" key={message.id}>
+        <summary><span>Codex 工具链信息已隐藏</span><small>消息 #{message.ordinal} · 点击查看</small></summary>
+        <div className="message-segments">{[...message.contentSegments, ...message.processSegments].map((segment: UnknownRecord, segmentIndex: number) => renderSegment(segment, segment.id ?? `${message.id}-process-${segmentIndex}`))}</div>
+      </details>;
       return <article id={`message-${message.ordinal}`} className={`message ${message.role} ${sameSpeaker ? "same-speaker" : "speaker-start"}`} key={message.id}>
         {!sameSpeaker && <header className="message-header"><span className="speaker-chip">{speakerLabel(message)}</span><span className="message-meta">#{message.ordinal}{timestamp ? ` · ${timestamp}` : ""}</span></header>}
-        <div className="message-segments">{message.segments.map((segment: UnknownRecord, segmentIndex: number) => <div key={segment.id ?? `${message.id}-${segmentIndex}`} className={`segment ${segment.type}`}>
-          {segment.type !== "text" && <small className="segment-label">{segmentLabel(segment.type)}</small>}
-          {segment.type === "code" ? <pre><code>{segment.content}</code></pre> : segment.href ? <a href={segment.href} target="_blank" rel="noreferrer">{segment.content}</a> : <p>{segment.content}</p>}
-        </div>)}</div>
+        <div className="message-segments">{message.contentSegments.map((segment: UnknownRecord, segmentIndex: number) => renderSegment(segment, segment.id ?? `${message.id}-${segmentIndex}`))}</div>
+        {message.processSegments.length > 0 && <details className="tool-details inline-process">
+          <summary><span>过程信息已折叠</span><small>{message.processSegments.length} 段 · 点击查看</small></summary>
+          <div className="message-segments">{message.processSegments.map((segment: UnknownRecord, segmentIndex: number) => renderSegment(segment, segment.id ?? `${message.id}-process-${segmentIndex}`))}</div>
+        </details>}
       </article>;
     })}</section>
   </>;
@@ -1114,11 +1170,13 @@ function ConversationDetail() {
 
 function Projects() {
   const overviewState = useLoad(() => api<UnknownRecord>("/api/v1/projects/overview"), []);
-  const knowledgeState = useLoad(() => api<UnknownRecord[]>("/api/v1/knowledge"), []);
   const [error, setError] = useState("");
   const [classificationMessage, setClassificationMessage] = useState("");
   const [classificationTask, setClassificationTask] = useState<UnknownRecord | null>(null);
   const [classificationRunMode, setClassificationRunMode] = useState<"economy" | "full">("economy");
+  const [mergeSourceId, setMergeSourceId] = useState("");
+  const [mergeTargetId, setMergeTargetId] = useState("");
+  const [mergeMessage, setMergeMessage] = useState("");
   const classificationActive = isActiveStatus(classificationTask?.status);
   const overview = overviewState.data ?? {};
   const projectGroups = Array.isArray(overview.projects) ? overview.projects : [];
@@ -1144,7 +1202,6 @@ function Projects() {
   const unclassifiedConversationCount = Number(
     totals.unclassifiedConversationCount ?? unclassified.length,
   );
-  const knowledgeCount = Number(totals.knowledgeCount ?? knowledgeState.data?.length ?? 0);
 
   useEffect(() => {
     let cancelled = false;
@@ -1170,7 +1227,6 @@ function Projects() {
           setClassificationMessage(task.message ?? statusLabel(task.status));
           if (!isActiveStatus(task.status)) {
             overviewState.reload();
-            knowledgeState.reload();
           }
         })
         .catch((reason) =>
@@ -1184,7 +1240,6 @@ function Projects() {
     classificationTask?.id,
     classificationActive,
     overviewState.reload,
-    knowledgeState.reload,
   ]);
 
   async function createProject(event: FormEvent<HTMLFormElement>) {
@@ -1231,6 +1286,29 @@ function Projects() {
     }
   }
 
+  async function mergeProjects(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const source = projectGroups.find((project) => project.id === mergeSourceId);
+    const target = projectGroups.find((project) => project.id === mergeTargetId);
+    if (!source || !target || source.id === target.id) return;
+    if (!window.confirm(`确认把项目“${source.name}”合并到“${target.name}”？源项目将在迁移完成后删除，此操作不可撤销。`)) return;
+    setError("");
+    setMergeMessage("正在合并项目…");
+    try {
+      const result = await api<UnknownRecord>(`/api/v1/projects/${source.id}/merge`, {
+        method: "POST",
+        ...jsonBody({ targetProjectId: target.id }),
+      });
+      setMergeMessage(`合并完成：迁移 ${result.movedConversationCount ?? 0} 个会话、${result.movedKnowledgeCount ?? 0} 条知识，合并 ${result.mergedKnowledgeCount ?? 0} 条重复知识。`);
+      setMergeSourceId("");
+      setMergeTargetId("");
+      overviewState.reload();
+    } catch (reason) {
+      setMergeMessage("");
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
   function confidenceLabel(value: unknown): string {
     return typeof value === "number" ? `${Math.round(value * 100)}%` : "未评分";
   }
@@ -1244,8 +1322,8 @@ function Projects() {
   return (
     <>
       <PageHeader
-        title="项目知识"
-        subtitle="自动归档后按需归类；人工锁定永不覆盖"
+        title="分类结果"
+        subtitle="按项目浏览已归类会话和待归类会话。"
         actions={
           <div className="button-group">
             <select
@@ -1257,7 +1335,7 @@ function Projects() {
                 )
               }
             >
-              <option value="economy">增量节能归类</option>
+              <option value="economy">增量智能归类</option>
               <option value="full">完整重评未锁定会话</option>
             </select>
             <button disabled={classificationActive} onClick={() => void runClassification()}>
@@ -1266,12 +1344,22 @@ function Projects() {
           </div>
         }
       />
-      <ErrorBanner message={error || overviewState.error || knowledgeState.error} />
+      <ErrorBanner message={error || overviewState.error} />
       {classificationMessage && (
         <div className={`alert ${classificationTask?.status === "failed" ? "error" : "success"}`}>
           {classificationMessage}
         </div>
       )}
+      <section className="panel summary-panel">
+        <h2>结论</h2>
+        <p>
+          {classificationActive
+            ? "正在重新归类会话，完成后这里会自动刷新。"
+            : activeCategoryCount > 0
+              ? `当前共有 ${activeCategoryCount} 个已启用项目，已归类 ${categorizedConversationCount} 个会话，仍有 ${unclassifiedConversationCount} 个待归类会话。`
+              : "当前还没有可展示的分类结果，先创建项目或运行智能归类。"}
+        </p>
+      </section>
       {classificationTask && (
         <section className="panel progress-panel">
           <div className="progress-header">
@@ -1337,11 +1425,6 @@ function Projects() {
           <strong>{unclassifiedConversationCount}</strong>
           <small>含仅有建议的会话</small>
         </article>
-        <article className="metric">
-          <span>知识条目</span>
-          <strong>{knowledgeCount}</strong>
-          <small>来自已归类会话</small>
-        </article>
       </section>
 
       <section className="panel project-create-panel">
@@ -1354,6 +1437,30 @@ function Projects() {
           <input name="description" placeholder="描述（可选）" />
           <button>创建</button>
         </form>
+      </section>
+
+      <section className="panel project-admin-panel">
+        <div>
+          <h2>合并项目</h2>
+          <p className="panel-subtitle">把 A 项目的会话、知识和关联报告迁移到 B 项目；完成后删除 A 项目。</p>
+        </div>
+        <form className="inline-form project-merge-form" onSubmit={mergeProjects}>
+          <label>A · 源项目
+            <select value={mergeSourceId} onChange={(event) => setMergeSourceId(event.target.value)} required>
+              <option value="">请选择</option>
+              {projectGroups.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+            </select>
+          </label>
+          <span className="merge-arrow">→</span>
+          <label>B · 目标项目
+            <select value={mergeTargetId} onChange={(event) => setMergeTargetId(event.target.value)} required>
+              <option value="">请选择</option>
+              {projectGroups.filter((project) => project.id !== mergeSourceId).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+            </select>
+          </label>
+          <button className="danger" disabled={!mergeSourceId || !mergeTargetId || mergeSourceId === mergeTargetId}>确认合并</button>
+        </form>
+        {mergeMessage && <p className="merge-result">{mergeMessage}</p>}
       </section>
 
       <section className="project-board">
@@ -1388,6 +1495,9 @@ function Projects() {
                       <span>{project.knowledgeCount ?? 0} 知识</span>
                     </div>
                   </summary>
+                  <div className="project-group-actions">
+                    <ExportLinks path={`/api/v1/projects/${project.id}/export`} />
+                  </div>
                   {conversations.length ? (
                     <div className="project-conversation-list">
                       {conversations.map((conversation: UnknownRecord) => (
@@ -1431,7 +1541,10 @@ function Projects() {
                 </summary>
                 <div className="empty-project-list">
                   {emptyProjectGroups.map((project) => (
-                    <span key={project.id}>{project.name}</span>
+                    <div className="empty-project-item" key={project.id}>
+                      <span>{project.name}</span>
+                      <ExportLinks path={`/api/v1/projects/${project.id}/export`} />
+                    </div>
                   ))}
                 </div>
               </details>
@@ -1478,19 +1591,150 @@ function Projects() {
         )}
       </section>
 
+    </>
+  );
+}
+
+function KnowledgePage() {
+  const knowledgeState = useLoad(() => api<UnknownRecord[]>("/api/v1/knowledge"), []);
+  const overviewState = useLoad(() => api<UnknownRecord>("/api/v1/projects/overview"), []);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [task, setTask] = useState<UnknownRecord | null>(null);
+  const active = isActiveStatus(task?.status);
+  const knowledge = knowledgeState.data ?? [];
+  const overview = overviewState.data ?? {};
+  const projectGroups = Array.isArray(overview.projects) ? overview.projects : [];
+  const projectCount = Number(overview.totals?.projectCount ?? projectGroups.length);
+  const knowledgeCount = Number(overview.totals?.knowledgeCount ?? knowledge.length);
+  const activeProjects = Number(overview.totals?.activeProjectCount ?? 0);
+  const sourceProjectCount = new Set(knowledge.map((item) => item.projectId)).size;
+
+  useEffect(() => {
+    let cancelled = false;
+    void api<{ task: UnknownRecord | null }>("/api/v1/knowledge/rebuild/latest")
+      .then((payload) => {
+        if (!cancelled && payload.task && isActiveStatus(payload.task.status)) {
+          setTask(payload.task);
+          setMessage(payload.task.message ?? "项目知识重建正在运行");
+        }
+      })
+      .catch(() => null);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!task?.id || !active) return;
+    const timer = window.setInterval(() => {
+      void api<UnknownRecord>(`/api/v1/knowledge/rebuild/${task.id}`)
+        .then((nextTask) => {
+          setTask(nextTask);
+          setMessage(nextTask.message ?? statusLabel(nextTask.status));
+          if (!isActiveStatus(nextTask.status)) {
+            knowledgeState.reload();
+            overviewState.reload();
+          }
+        })
+        .catch((reason) => setMessage(reason instanceof Error ? reason.message : String(reason)));
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [task?.id, active, knowledgeState.reload, overviewState.reload]);
+
+  async function runRebuild() {
+    setMessage("正在加入项目知识重建队列…");
+    setTask(null);
+    try {
+      const payload = await api<{ jobId: string | null; task: UnknownRecord; reused?: boolean }>(
+        "/api/v1/knowledge/rebuild",
+        { method: "POST" },
+      );
+      setTask(payload.task);
+      setMessage(
+        payload.reused
+          ? "已有重建任务正在运行，已切换到当前进度"
+          : payload.task.message ?? "已加入队列，等待 Worker 接手",
+      );
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  const conclusion =
+    knowledgeCount > 0
+      ? `当前共有 ${knowledgeCount} 条项目知识，覆盖 ${activeProjects} 个项目。`
+      : "当前还没有项目知识，先完成归类或重建一次知识库。";
+
+  return (
+    <>
+      <PageHeader
+        title="项目知识"
+        subtitle="从已归类会话中抽取出的可复用项目知识。"
+        actions={
+          <div className="button-group">
+            <button disabled={active} onClick={() => void runRebuild()}>
+              {active ? "重建中" : "重建知识"}
+            </button>
+          </div>
+        }
+      />
+      <ErrorBanner message={error || knowledgeState.error || overviewState.error} />
+      {message && <div className={`alert ${task?.status === "failed" ? "error" : "success"}`}>{message}</div>}
+      <section className="panel summary-panel">
+        <h2>结论</h2>
+        <p>{conclusion}</p>
+      </section>
+      {task && (
+        <section className="panel progress-panel">
+          <div className="progress-header">
+            <div>
+              <strong>项目知识 · {statusLabel(task.status)}</strong>
+              <span>{formatTaskTime(task.updatedAt)}</span>
+            </div>
+            <span>{taskPercent(task)}%</span>
+          </div>
+          <div className="progress-bar">
+            <span style={{ width: `${taskPercent(task)}%` }} />
+          </div>
+          <div className="progress-stats">
+            <span>已处理 {task.processedCount ?? 0}/{task.totalCount ?? 0}</span>
+            <span>成功 {task.succeededCount ?? 0}</span>
+            <span>失败 {task.failedCount ?? 0}</span>
+          </div>
+          {task.error && <p className="progress-error">{task.error}</p>}
+        </section>
+      )}
+      <section className="project-metrics">
+        <article className="metric">
+          <span>项目</span>
+          <strong>{projectCount}</strong>
+          <small>已启用项目 {activeProjects} 个</small>
+        </article>
+        <article className="metric">
+          <span>知识条目</span>
+          <strong>{knowledgeCount}</strong>
+          <small>按更新时间倒序</small>
+        </article>
+        <article className="metric">
+          <span>来源项目</span>
+          <strong>{sourceProjectCount}</strong>
+          <small>按项目聚合展示</small>
+        </article>
+      </section>
       <section className="panel">
         <div className="section-title-row">
           <div>
             <h2>知识条目</h2>
-            <p className="panel-subtitle">从已归类会话中抽取出的可复用项目知识。</p>
+            <p className="panel-subtitle">从已归类会话中抽取出的项目知识。</p>
           </div>
-          <span className="pill">{knowledgeState.data?.length ?? 0} 条</span>
+          <span className="pill">{knowledge.length} 条</span>
         </div>
         {knowledgeState.loading ? (
           <Loading />
         ) : (
           <div className="knowledge-grid">
-            {knowledgeState.data?.map((item) => (
+            {knowledge.map((item) => (
               <article className="knowledge-card" key={item.id}>
                 <header>
                   <span className="pill">{item.type}</span>
@@ -1500,16 +1744,14 @@ function Projects() {
                 <p>{item.body}</p>
                 <footer>
                   <span>{Math.round(item.confidence * 100)}%</span>
-                  {item.sourceReferences.map(
-                    (reference: UnknownRecord, index: number) => (
-                      <Link
-                        key={`${reference.revisionId}-${reference.messageOrdinal}`}
-                        to={`/conversations/${reference.conversationId}?revisionId=${reference.revisionId}#message-${reference.messageOrdinal}`}
-                      >
-                        来源 {index + 1} · 消息 #{reference.messageOrdinal}
-                      </Link>
-                    ),
-                  )}
+                  {item.sourceReferences.map((reference: UnknownRecord, index: number) => (
+                    <Link
+                      key={`${reference.revisionId}-${reference.messageOrdinal}`}
+                      to={`/conversations/${reference.conversationId}?revisionId=${reference.revisionId}#message-${reference.messageOrdinal}`}
+                    >
+                      来源 {index + 1} · 消息 #{reference.messageOrdinal}
+                    </Link>
+                  ))}
                 </footer>
               </article>
             ))}
@@ -1562,7 +1804,7 @@ function Reports() {
 }
 
 function ReportDetail() {
-  const { id } = useParams(); const state = useLoad(() => api<UnknownRecord>(`/api/v1/reports/${id}`), [id]); if (state.loading) return <Loading />; if (state.error) return <ErrorBanner message={state.error} />; const report=state.data!; return <><PageHeader title={report.title} subtitle={`${report.kind} · ${new Date(report.periodStart).toLocaleDateString()} — ${new Date(report.periodEnd).toLocaleDateString()}`} /><article className="report-body"><p className="report-summary">{report.summary}</p><ReactMarkdown>{report.bodyMarkdown}</ReactMarkdown></article></>;
+  const { id } = useParams(); const state = useLoad(() => api<UnknownRecord>(`/api/v1/reports/${id}`), [id]); if (state.loading) return <Loading />; if (state.error) return <ErrorBanner message={state.error} />; const report=state.data!; return <><PageHeader title={report.title} subtitle={`${report.kind} · ${new Date(report.periodStart).toLocaleDateString()} — ${new Date(report.periodEnd).toLocaleDateString()}`} /><article className="report-body"><p className="report-summary">{report.summary}</p><ReactMarkdown skipHtml components={{ a: ({ href, children }) => { const safeHref = safeExternalHref(href); return safeHref ? <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>; }, img: ({ alt }) => <span>{alt ?? "[图片已隐藏]"}</span> }}>{String(report.bodyMarkdown ?? "")}</ReactMarkdown></article></>;
 }
 
 function importJobPercent(job: UnknownRecord): number {
@@ -1719,6 +1961,7 @@ function Imports() {
 
 function Devices() {
   const state = useLoad(() => api<UnknownRecord[]>("/api/v1/devices"), []);
+  const componentsState = useLoad(() => api<UnknownRecord[]>("/api/v1/device-components"), []);
   const [code, setCode] = useState<UnknownRecord | null>(null);
   const [error, setError] = useState("");
   const [editingId, setEditingId] = useState("");
@@ -1760,7 +2003,41 @@ function Devices() {
     }
   }
 
-  return <><PageHeader title="设备" subtitle="配对码十分钟有效，设备令牌仅具采集权限"/><ErrorBanner message={error}/><section className="two-column"><article className="panel"><h2>生成配对码</h2><form className="stack compact" onSubmit={createCode}><label>设备名称<input name="name" required placeholder="公司 Chrome"/></label><label>类型<select name="kind"><option value="chrome_extension">Chrome 扩展</option><option value="openclaw_sync">OpenClaw/Codex 同步代理</option></select></label><button>生成</button></form>{code&&<div className="pair-code"><strong>{code.code}</strong><span>有效至 {new Date(code.expiresAt).toLocaleTimeString()}</span></div>}</article><article className="panel"><h2>已配对设备</h2>{state.loading?<Loading/>:state.data?.map((device)=><div className="device-row" key={device.id}><div>{editingId===device.id?<div className="device-name-edit"><input value={editingName} onChange={(event)=>setEditingName(event.target.value)} onKeyDown={(event)=>{if(event.key==="Enter")void saveDeviceName(device.id); if(event.key==="Escape")setEditingId("");}} autoFocus/><button className="small" onClick={()=>void saveDeviceName(device.id)}>保存</button><button className="secondary small" onClick={()=>setEditingId("")}>取消</button></div>:<strong>{device.name}</strong>}<span>{device.kind}</span></div><div><span>{device.lastSeenAt?`最后在线 ${new Date(device.lastSeenAt).toLocaleString()}`:"尚未上传"}</span>{device.revokedAt?<span className="pill failed">已撤销</span>:null}<div className="button-group"><button className="secondary small" onClick={()=>{setEditingId(device.id);setEditingName(String(device.name??""));}}>重命名</button><button className="danger small" onClick={()=>void removeDevice(device)}>{device.revokedAt?"删除":"撤销"}</button></div></div></div>)}</article></section></>;
+  return <>
+    <PageHeader title="设备" subtitle="下载采集组件、生成配对码并管理已配对设备"/>
+    <ErrorBanner message={error || componentsState.error}/>
+    <section className="panel component-download-panel">
+      <div className="section-title-row">
+        <div>
+          <h2>下载上传组件</h2>
+          <p className="panel-subtitle">下载后先解压，再在本页生成对应类型的配对码完成连接。</p>
+        </div>
+        <button className="secondary small" onClick={() => componentsState.reload()}>刷新</button>
+      </div>
+      {componentsState.loading ? <Loading label="检查服务器发布包…"/> : <div className="component-download-grid">
+        {componentsState.data?.map((component) => <article className={`component-download-card ${component.available ? "" : "unavailable"}`} key={component.id}>
+          <header>
+            <div className="component-icon">{component.id === "windows" ? "WIN" : component.id === "macos" ? "MAC" : "CHR"}</div>
+            <div><strong>{component.name}</strong><span>{component.platform}</span></div>
+          </header>
+          <p>{component.description}</p>
+          <footer>
+            <div>
+              <span>{component.version || "服务器未提供安装包"}</span>
+              {component.sizeBytes ? <small>{(Number(component.sizeBytes) / 1024 / 1024).toFixed(1)} MB · {component.archiveType}</small> : <small>请检查发布包目录配置</small>}
+            </div>
+            {component.available && component.downloadUrl
+              ? <a className="button-link small" href={component.downloadUrl}>下载</a>
+              : <button className="secondary small" disabled>暂不可用</button>}
+          </footer>
+        </article>)}
+      </div>}
+    </section>
+    <section className="two-column">
+      <article className="panel"><h2>生成配对码</h2><form className="stack compact" onSubmit={createCode}><label>设备名称<input name="name" required placeholder="公司 Chrome"/></label><label>类型<select name="kind"><option value="chrome_extension">Chrome 扩展</option><option value="openclaw_sync">OpenClaw/Codex 同步代理</option></select></label><button>生成</button></form>{code&&<div className="pair-code"><strong>{code.code}</strong><span>有效至 {new Date(code.expiresAt).toLocaleTimeString()}</span></div>}</article>
+      <article className="panel"><h2>已配对设备</h2>{state.loading?<Loading/>:state.data?.map((device)=><div className="device-row" key={device.id}><div>{editingId===device.id?<div className="device-name-edit"><input value={editingName} onChange={(event)=>setEditingName(event.target.value)} onKeyDown={(event)=>{if(event.key==="Enter")void saveDeviceName(device.id); if(event.key==="Escape")setEditingId("");}} autoFocus/><button className="small" onClick={()=>void saveDeviceName(device.id)}>保存</button><button className="secondary small" onClick={()=>setEditingId("")}>取消</button></div>:<strong>{device.name}</strong>}<span>{device.kind}</span></div><div><span>{device.lastSeenAt?`最后在线 ${new Date(device.lastSeenAt).toLocaleString()}`:"尚未上传"}</span>{device.revokedAt?<span className="pill failed">已撤销</span>:null}<div className="button-group"><button className="secondary small" onClick={()=>{setEditingId(device.id);setEditingName(String(device.name??""));}}>重命名</button><button className="danger small" onClick={()=>void removeDevice(device)}>{device.revokedAt?"删除":"撤销"}</button></div></div></div>)}</article>
+    </section>
+  </>;
 }
 
 function Settings() {
@@ -2049,5 +2326,5 @@ function Settings() {
 export default function App() {
   const [authenticated,setAuthenticated]=useState<boolean|null>(null);const navigate=useNavigate();useEffect(()=>{void api("/api/v1/auth/me").then(()=>setAuthenticated(true)).catch((reason)=>setAuthenticated(reason instanceof ApiError&&reason.status===401?false:false));},[]);async function logout(){await api("/api/v1/auth/logout",{method:"POST"});setAuthenticated(false);navigate("/");}
   if(authenticated===null)return<Loading/>;if(!authenticated)return<AuthScreen onAuthenticated={()=>setAuthenticated(true)}/>;
-  return <Shell onLogout={()=>void logout()}><Routes><Route path="/" element={<Dashboard/>}/><Route path="/conversations" element={<Conversations/>}/><Route path="/conversations/:id" element={<ConversationDetail/>}/><Route path="/projects" element={<Projects/>}/><Route path="/reports" element={<Reports/>}/><Route path="/reports/:id" element={<ReportDetail/>}/><Route path="/imports" element={<Imports/>}/><Route path="/devices" element={<Devices/>}/><Route path="/logs" element={<Logs/>}/><Route path="/settings" element={<Settings/>}/><Route path="*" element={<Navigate to="/" replace/>}/></Routes></Shell>;
+  return <Shell onLogout={()=>void logout()}><Routes><Route path="/" element={<Dashboard/>}/><Route path="/conversations" element={<Conversations/>}/><Route path="/conversations/:id" element={<ConversationDetail/>}/><Route path="/classification" element={<Projects/>}/><Route path="/knowledge" element={<KnowledgePage/>}/><Route path="/projects" element={<Navigate to="/classification" replace/>}/><Route path="/reports" element={<Reports/>}/><Route path="/reports/:id" element={<ReportDetail/>}/><Route path="/imports" element={<Imports/>}/><Route path="/devices" element={<Devices/>}/><Route path="/logs" element={<Logs/>}/><Route path="/settings" element={<Settings/>}/><Route path="*" element={<Navigate to="/" replace/>}/></Routes></Shell>;
 }

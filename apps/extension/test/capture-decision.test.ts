@@ -85,4 +85,70 @@ describe("capture decision state machine", () => {
       }),
     ).not.toMatchObject({ action: "full" });
   });
+
+  it("skips a smaller virtualized viewport after a complete capture", () => {
+    expect(
+      decideCaptureAction({
+        light: {
+          ...light,
+          messageCount: 1,
+          lastMessageId: "conversation-last",
+          lastMessageTextHash: "conversation-last-hash",
+          virtualized: true,
+        },
+        state: {
+          ...state,
+          messageCount: 2,
+          lastMessageId: "conversation-last",
+          lastMessageTextHash: "conversation-last-hash",
+        },
+        requestedReason: "new_messages",
+      }),
+    ).toMatchObject({ action: "skip" });
+  });
+
+  it("tries append when a smaller virtualized tail changes after a complete capture", () => {
+    expect(
+      decideCaptureAction({
+        light: {
+          ...light,
+          messageCount: 3,
+          lastMessageId: "new-visible-tail",
+          lastMessageTextHash: "new-visible-hash",
+          virtualized: true,
+        },
+        state: {
+          ...state,
+          messageCount: 24,
+          lastMessageId: "archived-tail",
+          lastMessageTextHash: "archived-tail-hash",
+        },
+        requestedReason: "new_messages",
+      }),
+    ).toMatchObject({ action: "append", triggerReason: "new_messages" });
+  });
+
+  it("still rescans a shorter branch after generation or an explicit route change", () => {
+    const shorter = {
+      ...light,
+      messageCount: 3,
+      lastMessageId: "branch-last",
+      lastMessageTextHash: "branch-hash",
+    };
+    expect(
+      decideCaptureAction({
+        light: shorter,
+        state: { ...state, messageCount: 24 },
+        requestedReason: "stream_finished",
+        previousStreaming: true,
+      }),
+    ).toMatchObject({ action: "full", triggerReason: "branch_changed" });
+    expect(
+      decideCaptureAction({
+        light: shorter,
+        state: { ...state, messageCount: 24 },
+        requestedReason: "new_session",
+      }),
+    ).toMatchObject({ action: "full", triggerReason: "branch_changed" });
+  });
 });

@@ -1,6 +1,6 @@
 # 部署与使用
 
-本文面向群晖 NAS、Chrome 插件、本地 Codex/OpenClaw 同步代理和数据备份恢复。当前服务端版本为 `0.2.21`，Chrome 插件版本为 `0.4.0`。
+本文面向群晖 NAS、Chrome 插件、本地 Codex/OpenClaw 同步代理和数据备份恢复。当前服务端版本为 `V20260817`，Chrome 插件版本为 `V20260817`。
 
 ## 1. 群晖 NAS 全新安装
 
@@ -9,7 +9,7 @@
 1. 上传源码包到 NAS：
 
 ```sh
-/volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
+/volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
 ```
 
 2. 创建源码目录和数据目录：
@@ -20,8 +20,10 @@ mkdir -p /volume1/docker/ai-conversation-archive/data/postgres
 mkdir -p /volume1/docker/ai-conversation-archive/data/imports/inbox
 mkdir -p /volume1/docker/ai-conversation-archive/data/imports/processed
 mkdir -p /volume1/docker/ai-conversation-archive/data/imports/failed
+chown -R 1000:1000 /volume1/docker/ai-conversation-archive/data/imports
+chmod -R u+rwX,go-rwx /volume1/docker/ai-conversation-archive/data/imports
 cd /volume1/docker/ai-conversation-archive/source
-tar -xzf /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
+tar -xzf /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
 ```
 
 3. 生成配置文件、数据库密码和主密钥：
@@ -35,6 +37,13 @@ sed -i "s|^APP_MASTER_KEY=.*|APP_MASTER_KEY=$APP_MASTER_KEY|" deploy/.env
 ```
 
 按需编辑 `deploy/.env` 中的 `APP_ORIGIN`、`ARCHIVE_PORT` 和 `ARCHIVE_DATA_DIR`。生产环境建议 `APP_ORIGIN` 使用 HTTPS 外部地址。
+
+生产安全相关配置：
+
+- `TRUST_PROXY` 默认 `false`。只有应用确实位于可信反向代理后时，才设置代理跳数，例如 `1`；不要直接设置为 `true` 信任任意转发头。
+- `EXTENSION_ORIGINS` 默认只允许官方固定 ID `chrome-extension://daolmhnfgimkgnnadojnmhkkjdolplfi`。自行重签 Chrome 扩展时，必须改为新扩展 ID；多个来源用英文逗号分隔。
+- `ALLOW_PRIVATE_NETWORK_TARGETS` 默认 `false`，此时 LLM 和 SMTP 会阻止回环、内网、链路本地、云元数据和保留地址，并将连接固定到已验证 DNS 结果。只有明确使用可信内网模型或 SMTP 时才设为 `true`。
+- app 和 worker 镜像以非 root 用户运行。NAS 上已有的 `data/imports` 目录必须允许容器中的 Node 用户（UID 1000）读写；如出现 `EACCES`，请在宿主机调整该目录权限后再启动。
 
 4. 构建并启动：
 
@@ -71,7 +80,7 @@ curl -fsS http://127.0.0.1:18080/healthz
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
 ```
 
 脚本会保留现有 `deploy/.env`，创建必要数据目录，尝试数据库备份，解压新版源码包，构建镜像，切换源码目录，强制重建 app/worker 容器，并检查 `/healthz` 返回的版本号。
@@ -80,7 +89,7 @@ sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversat
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-0.2.21-clean-install.tar.gz
+SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
 ```
 
 如果已经手动把源码覆盖到 `source` 目录，可以原地构建重启：
@@ -95,7 +104,7 @@ sh scripts/update-server.sh
 最新插件包：
 
 ```text
-release/ai-archiveextension-0.4.0-chrome.zip
+release/ai-archiveextension-V20260817-chrome.zip
 ```
 
 安装方式：
@@ -108,6 +117,8 @@ release/ai-archiveextension-0.4.0-chrome.zip
 6. 打开插件，只输入配对码即可；设备名称只在后台填写。
 
 Chrome 不允许普通扩展自动固定到工具栏，也不允许扩展自行默认启用无痕模式。插件已声明支持无痕上下文；用户仍需在 Chrome 扩展详情页打开“允许在无痕模式下使用”。企业环境可以通过 Chrome 企业策略统一固定和开启权限。
+
+设备令牌只保存在浏览器本机的 `storage.local`，不会写入 Chrome Sync。升级旧扩展后会自动清理曾同步的认证字段；如果怀疑同步账号或浏览器配置泄露，请在设备页撤销设备并重新配对。
 
 支持的页面入口包括：
 
@@ -130,10 +141,22 @@ Chrome 不允许普通扩展自动固定到工具栏，也不允许扩展自行�
 公司 Windows 电脑推荐使用便携包：
 
 ```text
-release/ai-conversation-archive-windows-sync-0.2.18.zip
+release/ai-conversation-archive-windows-sync-V20260817.zip
 ```
 
-解压到任意目录后双击 `sync-local-windows.bat`。首次运行输入 Web 后台生成的 `OpenClaw/Codex 同步代理` 配对码。默认模式只导入近期安全范围并持续监听新增会话。
+解压到任意目录后先双击 `sync-local-windows.bat` 完成首次配对。首次运行输入 Web 后台生成的 `OpenClaw/Codex 同步代理` 配对码。默认模式只导入近期安全范围并持续监听新增会话。
+
+完成首次配对后，脚本会自动安装并启动后台计划任务，避免长期保留前台命令行窗口。之后也可以用同一个入口重新安装：
+
+```bat
+sync-local-windows.bat install
+```
+
+后台任务会在当前用户登录后隐藏启动，并复用本机配对配置。日志位于 `%LOCALAPPDATA%\AIArchive\Sync\Logs`。卸载后台任务：
+
+```bat
+sync-local-windows.bat uninstall
+```
 
 完整历史导入需要显式执行：
 
@@ -152,32 +175,12 @@ sync-local-windows.bat rebuild-only
 MacBook 上使用最新 macOS 同步包：
 
 ```text
-release/ai-conversation-archive-macos-sync-0.2.20.tar.gz
+release/ai-conversation-archive-macos-sync-V20260817.tar.gz
 ```
 
-解压后执行：
+解压后双击 `AI-Archive-Sync.command`。首次运行输入 Web 后台生成的 `OpenClaw/Codex 同步代理` 配对码；配对成功后脚本会询问是否安装后台同步。输入 `Y` 后会自动安装并启动 macOS LaunchAgent，之后登录系统会隐藏运行。
 
-```sh
-sh sync-local-macos.sh
-```
-
-如果 OpenClaw 不在默认目录，可以手工配对：
-
-```sh
-node openclaw-sync.cjs pair \
-  --server https://ai-archive.gyee.tech:18443 \
-  --code ABCD1234 \
-  --openclaw-root "$HOME/.openclaw"
-```
-
-同时导入 Codex：
-
-```sh
-node openclaw-sync.cjs pair \
-  --server https://ai-archive.gyee.tech:18443 \
-  --code ABCD1234 \
-  --with-codex
-```
+如果之后需要重新安装或卸载后台同步，双击 `AI-Archive-Sync.command` 后在菜单中选择对应操作即可。后台日志位于 `~/Library/Logs/AIArchive`。
 
 代理会读取 OpenClaw、Codex 和 Claude Code 的本地 JSONL 会话文件。它只上传会话内容，不读取模型密钥、Cookie、token 或 credential 文件。
 

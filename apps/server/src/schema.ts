@@ -27,6 +27,7 @@ const createdAt = timestamp("created_at", { withTimezone: true })
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
+  singletonKey: integer("singleton_key").notNull().default(1).unique(),
   username: text("username").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   totpSecretEncrypted: text("totp_secret_encrypted").notNull(),
@@ -292,7 +293,7 @@ export const backgroundTasks = pgTable(
   "background_tasks",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    kind: text("kind").$type<"classification_rebuild">().notNull(),
+    kind: text("kind").$type<"classification_rebuild" | "knowledge_rebuild">().notNull(),
     status: text("status")
       .$type<"queued" | "running" | "completed" | "failed">()
       .notNull(),

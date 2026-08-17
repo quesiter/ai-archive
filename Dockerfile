@@ -16,6 +16,7 @@ RUN pnpm install --frozen-lockfile
 COPY packages packages
 COPY apps/server apps/server
 COPY apps/web apps/web
+COPY release release
 RUN pnpm --filter @ai-archive/contracts build \
   && pnpm --filter @ai-archive/web build \
   && pnpm --filter @ai-archive/server build
@@ -30,7 +31,12 @@ COPY --from=builder /app/apps/server/node_modules ./apps/server/node_modules
 COPY --from=builder /app/apps/server/dist ./apps/server/dist
 COPY --from=builder /app/apps/server/migrations ./apps/server/migrations
 COPY --from=builder /app/apps/web/dist ./apps/web/dist
+COPY --from=builder /app/release ./release
+RUN mkdir -p /data/imports/inbox /data/imports/processed /data/imports/failed \
+  && chown -R node:node /app /data
 WORKDIR /app/apps/server
 ENV WEB_DIST=/app/apps/web/dist
+ENV COMPONENT_RELEASE_DIR=/app/release
 EXPOSE 8080
+USER node
 CMD ["node", "dist/index.js"]

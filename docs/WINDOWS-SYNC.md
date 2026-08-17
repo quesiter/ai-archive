@@ -5,10 +5,38 @@
 ## 便携包使用
 
 1. 在 Windows 电脑上安装 Node.js 22 或更新版本，并确认 `node` 在 `PATH` 中可用。
-2. 解压 `ai-conversation-archive-windows-sync-0.2.18.zip` 到任意目录，例如 `C:\AIArchiveSync`。
+2. 解压 `ai-conversation-archive-windows-sync-V20260817.zip` 到任意目录，例如 `C:\AIArchiveSync`。
 3. 在 Web 后台的设备页面生成 `OpenClaw/Codex 同步代理` 配对码。
 4. 双击 `sync-local-windows.bat`，首次运行时输入配对码。
-5. 窗口会先按安全限制导入近期会话，然后持续监听新增会话；保持窗口打开即可。
+5. 脚本会自动安装并启动后台任务；以后不用再保留命令行窗口。
+
+## 后台自启
+
+安装后会创建当前用户的计划任务 `AI Archive Local Sync`，每次登录后隐藏运行同步代理。任务会复用 `%USERPROFILE%\.config\ai-archive\openclaw-sync.json`，因此升级同步包或重新安装计划任务不需要重新配对。
+
+如果之后需要重新安装后台任务，可以双击运行：
+
+```bat
+sync-local-windows.bat install
+```
+
+如果确实需要前台观察同步日志，再运行：
+
+```bat
+sync-local-windows.bat watch-only
+```
+
+后台日志写入：
+
+```text
+%LOCALAPPDATA%\AIArchive\Sync\Logs
+```
+
+停止并移除后台任务：
+
+```powershell
+sync-local-windows.bat uninstall
+```
 
 移动到公司 Windows 电脑时，请复制解压后的整个文件夹；至少要保证 `sync-local-windows.bat` 和 `openclaw-sync.cjs` 放在同一个目录。单独复制 `.bat` 文件无法运行，因为真正的同步程序在 `openclaw-sync.cjs` 里。
 

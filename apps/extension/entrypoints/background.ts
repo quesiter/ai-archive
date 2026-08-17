@@ -18,6 +18,36 @@ import {
 } from "../lib/outbox";
 import { packagedServerOrigin } from "../lib/packaged-origin";
 
+const AUTH_STORAGE_KEYS: Array<keyof AuthStorage> = [
+  "serverUrl",
+  "deviceId",
+  "deviceToken",
+  "deviceName",
+];
+
+type AuthStorage = Pick<
+  ExtensionSettings,
+  "serverUrl" | "deviceId" | "deviceToken" | "deviceName"
+>;
+
+async function readAuthState(): Promise<Partial<AuthStorage>> {
+  return (await browser.storage.local.get(AUTH_STORAGE_KEYS)) as Partial<AuthStorage>;
+}
+
+async function writeAuthState(state: AuthStorage): Promise<void> {
+  // Device tokens are bearer credentials. Keep them on this browser profile
+  // instead of copying them through the user's Chrome Sync account.
+  await browser.storage.local.set(state);
+  await browser.storage.sync.remove(AUTH_STORAGE_KEYS);
+}
+
+async function clearAuthState(): Promise<void> {
+  await Promise.all([
+    browser.storage.local.remove(AUTH_STORAGE_KEYS),
+    browser.storage.sync.remove(AUTH_STORAGE_KEYS),
+  ]);
+}
+
 function normalizedServerUrl(value: string): string {
   const url = new URL(value);
   if (!["https:", "http:"].includes(url.protocol)) {
@@ -186,12 +216,19 @@ async function flushOutbox(force = false): Promise<FlushResult> {
 }
 
 export default defineBackground(() => {
+  // Remove credentials written by older builds to Chrome Sync.
+  void browser.storage.sync.remove(AUTH_STORAGE_KEYS);
+
   browser.alarms.create("flush-outbox", { periodInMinutes: 1 });
   browser.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === "flush-outbox") void flushOutbox();
   });
 
-  browser.runtime.onMessage.addListener((rawMessage: unknown) => {
+  browser.runtime.onMessage.addListener((rawMessage: unknown, sender) => {
+    if (sender.id !== browser.runtime.id) return undefined;
+    if (!rawMessage || typeof rawMessage !== "object" || !("type" in rawMessage)) {
+      return undefined;
+    }
     const message = rawMessage as ExtensionMessage;
     if (message.type === "enqueueCapture") {
       return (async () => {
@@ -232,7 +269,7 @@ export default defineBackground(() => {
         if (!response.ok || !payload.deviceId || !payload.token) {
           throw new Error(payload.error ?? "设备配对失败");
         }
-        await browser.storage.local.set({
+        await writeAuthState({
           serverUrl,
           deviceId: payload.deviceId,
           deviceToken: payload.token,
@@ -247,10 +284,7 @@ export default defineBackground(() => {
 
   void (async () => {
     const packagedUrl = normalizedServerUrl(packagedServerOrigin());
-    const settings = (await browser.storage.local.get([
-      "serverUrl",
-      "deviceToken",
-    ])) as ExtensionSettings;
+    const settings = (await readAuthState()) as Partial<AuthStorage>;
     if (settings.deviceToken && settings.serverUrl) {
       let storedUrl = "";
       try {
@@ -259,12 +293,7 @@ export default defineBackground(() => {
         // A malformed legacy address is treated as a server change.
       }
       if (storedUrl !== packagedUrl) {
-        await browser.storage.local.remove([
-          "serverUrl",
-          "deviceId",
-          "deviceToken",
-          "deviceName",
-        ]);
+        await clearAuthState();
         await setStatus({
           status: "failed",
           message: "归档服务地址已更新，请使用新的配对码重新配对",
@@ -273,7 +302,12 @@ export default defineBackground(() => {
         return;
       }
     } else if (settings.deviceToken) {
-      await browser.storage.local.set({ serverUrl: packagedUrl });
+      await writeAuthState({
+        serverUrl: packagedUrl,
+        deviceId: settings.deviceId ?? "",
+        deviceToken: settings.deviceToken,
+        deviceName: settings.deviceName ?? "Chrome",
+      });
     }
     await flushOutbox();
   })();

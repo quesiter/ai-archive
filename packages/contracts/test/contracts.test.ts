@@ -3,7 +3,20 @@ import {
   CaptureDeltaV1Schema,
   CaptureSnapshotV1Schema,
   providers,
+  stripInternalConversationMetadata,
 } from "../src/index.js";
+
+describe("stripInternalConversationMetadata", () => {
+  it("removes runtime envelopes but keeps the user prompt", () => {
+    expect(
+      stripInternalConversationMetadata(
+        "<recommended_plugins>hidden</recommended_plugins>\n" +
+          "<environment_context><cwd>/repo</cwd></environment_context>\n" +
+          "保留这句话",
+      ),
+    ).toBe("保留这句话");
+  });
+});
 
 describe("CaptureSnapshotV1", () => {
   it("contains all planned providers", () => {
@@ -12,6 +25,7 @@ describe("CaptureSnapshotV1", () => {
       "gemini",
       "grok",
       "yuanbao",
+      "doubao",
       "minimax_agent",
       "deepseek",
       "qianwen",

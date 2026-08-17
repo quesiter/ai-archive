@@ -3,11 +3,57 @@ import { config } from "./config.js";
 import { authenticateDevice, authenticateWebSession } from "./services/auth.js";
 
 export const SESSION_COOKIE = "archive_session";
+const SAFE_WEB_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 export function bearerToken(request: FastifyRequest): string | undefined {
   const header = request.headers.authorization;
-  if (!header?.startsWith("Bearer ")) return undefined;
-  return header.slice("Bearer ".length).trim();
+  const match = header?.match(/^Bearer[ \t]+([^\s,]+)[ \t]*$/i);
+  return match?.[1];
+}
+
+function headerOrigin(value: string | string[] | undefined): string | null {
+  const source = Array.isArray(value) ? value[0] : value;
+  if (!source) return null;
+  try {
+    const url = new URL(source);
+    if (!url.hostname || !["http:", "https:"].includes(url.protocol)) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+export function isAllowedWebMutation(input: {
+  method: string;
+  origin?: string | string[] | undefined;
+  referer?: string | string[] | undefined;
+  secFetchSite?: string | string[] | undefined;
+}): boolean {
+  if (SAFE_WEB_METHODS.has(input.method.toUpperCase())) return true;
+  const fetchSite = Array.isArray(input.secFetchSite)
+    ? input.secFetchSite[0]
+    : input.secFetchSite;
+  if (fetchSite === "cross-site") return false;
+  const claimedOrigin = headerOrigin(input.origin) ?? headerOrigin(input.referer);
+  return claimedOrigin === config.appOrigin;
+}
+
+export async function requireSameOrigin(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<boolean> {
+  if (
+    isAllowedWebMutation({
+      method: request.method,
+      origin: request.headers.origin,
+      referer: request.headers.referer,
+      secFetchSite: request.headers["sec-fetch-site"],
+    })
+  ) {
+    return true;
+  }
+  await reply.code(403).send({ error: "Same-origin request required" });
+  return false;
 }
 
 export async function requireWebUser(
@@ -19,13 +65,7 @@ export async function requireWebUser(
     await reply.code(401).send({ error: "Authentication required" });
     return null;
   }
-  if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) {
-    const origin = request.headers.origin;
-    if (origin && origin !== config.APP_ORIGIN) {
-      await reply.code(403).send({ error: "Origin is not allowed" });
-      return null;
-    }
-  }
+  if (!(await requireSameOrigin(request, reply))) return null;
   return user;
 }
 

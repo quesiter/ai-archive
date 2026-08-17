@@ -7,9 +7,10 @@ import { redactionRules } from "../schema.js";
 import {
   getPublicSettings,
   SECRET_SETTING_KEYS,
-  setSetting,
+  setSettings,
 } from "../services/settings.js";
 import { testLlmConnection } from "../services/llm.js";
+import safeRegex from "safe-regex2";
 
 const ALLOWED_SETTINGS = new Set([
   "llm.baseUrl",
@@ -46,13 +47,16 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   app.put("/api/v1/settings", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
     const input = z.record(z.string(), z.string().max(20_000)).parse(request.body);
-    for (const [key, value] of Object.entries(input)) {
+    for (const key of Object.keys(input)) {
       if (!ALLOWED_SETTINGS.has(key)) {
         return reply.code(400).send({ error: `Unsupported setting: ${key}` });
       }
-      if (SECRET_SETTING_KEYS.has(key) && value === "********") continue;
-      await setSetting(key, value);
     }
+    await setSettings(
+      Object.entries(input).filter(
+        ([key, value]) => !(SECRET_SETTING_KEYS.has(key) && value === "********"),
+      ),
+    );
     return { ok: true };
   });
 
@@ -86,6 +90,9 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       .parse(request.body);
     try {
       new RegExp(input.pattern, "gu");
+      if (!safeRegex(input.pattern)) {
+        return reply.code(400).send({ error: "Regular expression is too complex" });
+      }
     } catch {
       return reply.code(400).send({ error: "Invalid regular expression" });
     }
@@ -97,13 +104,14 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/redaction-rules/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
       const input = z
         .object({ enabled: z.boolean() })
         .parse(request.body);
       const [rule] = await db
         .update(redactionRules)
         .set(input)
-        .where(eq(redactionRules.id, request.params.id))
+        .where(eq(redactionRules.id, params.id))
         .returning();
       if (!rule) return reply.code(404).send({ error: "Rule not found" });
       return rule;
@@ -114,7 +122,8 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/redaction-rules/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      await db.delete(redactionRules).where(eq(redactionRules.id, request.params.id));
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      await db.delete(redactionRules).where(eq(redactionRules.id, params.id));
       return reply.code(204).send();
     },
   );

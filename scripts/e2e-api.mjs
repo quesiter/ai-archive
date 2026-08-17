@@ -64,7 +64,7 @@ for (let attempt = 0; attempt < 30; attempt += 1) {
 const bootstrap = await expectOk(
   await fetch(`${base}/api/v1/auth/bootstrap`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", origin: base },
     body: JSON.stringify({
       username: "archive-admin",
       password: "correct horse battery staple",
@@ -73,7 +73,7 @@ const bootstrap = await expectOk(
 );
 const loginResponse = await fetch(`${base}/api/v1/auth/login`, {
   method: "POST",
-  headers: { "content-type": "application/json" },
+  headers: { "content-type": "application/json", origin: base },
   body: JSON.stringify({
     username: "archive-admin",
     password: "correct horse battery staple",

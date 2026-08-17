@@ -26,6 +26,8 @@
 
 ## 3. 配对 Chrome 插件
 
+在“设备”页面顶部可以直接下载 Chrome 扩展、Windows 电脑上传组件和 macOS 电脑上传组件。只有服务器发布目录中实际存在的包才会显示可下载按钮。
+
 ### 3.1 在后台生成配对码
 
 1. 打开“设备”页面。
@@ -263,11 +265,17 @@ Chrome 也不允许普通插件强制把自己固定到工具栏。固定按钮�
 2. 下载 ZIP。
 3. 在后台“导入”页面上传。
 
-### 9.3 NAS inbox 投递
+### 9.3 Chat Memo
+
+Chat Memo 导出的 ZIP 可以直接在后台“导入”页面上传。系统会识别其中的 ChatGPT、Gemini、腾讯元宝、DeepSeek、千问和豆包文本会话，并保留标题、原始 URL、消息时间和平台 Session ID。
+
+同一 Session 的相同内容只保留一份；不同分支或内容版本会保存为新的 Revision。导入页的“未变”数量表示该快照已经存在，不是失败。
+
+### 9.4 NAS inbox 投递
 
 也可以把 ZIP 放入服务器配置的 `IMPORT_INBOX` 目录。Worker 每 5 分钟扫描一次并自动入队。
 
-### 9.4 导入一直没有解析完成
+### 9.5 导入一直没有解析完成
 
 排查顺序：
 
@@ -310,95 +318,48 @@ Web 备份适合“清空生产环境、重新部署网站、再把业务数据�
 4. 名称填写运行代理的电脑，例如“MacBook OpenClaw”。
 5. 设备侧只需要服务端地址和配对码，不输入设备名称。
 
-### 11.2 在 MacBook 上配对 OpenClaw
+### 11.2 在 MacBook 上配对并后台运行
 
-在运行 OpenClaw 的 MacBook 上执行：
+在运行 OpenClaw、Codex 或 Claude Code 的 MacBook 上解压 macOS 同步包，双击 `AI-Archive-Sync.command`。
 
-```sh
-node apps/openclaw-sync/dist/index.cjs pair \
-  --server https://ai-archive.gyee.tech:18443 \
-  --code ABCD1234
+首次运行时输入后台生成的配对码。配对成功后脚本会询问是否安装后台同步，输入 `Y` 后会创建 macOS LaunchAgent，之后登录系统会自动隐藏运行。
+
+如果之后需要重新安装、卸载或临时前台同步，再次双击 `AI-Archive-Sync.command`，按菜单选择对应操作。
+
+### 11.3 Windows 上配对并后台运行
+
+在 Windows 电脑上解压 Windows 同步包，双击 `sync-local-windows.bat`。首次运行时输入后台生成的配对码；配对成功后脚本会自动创建 Windows 计划任务，之后登录系统会自动隐藏运行。
+
+如果之后需要重新安装或卸载后台同步：
+
+```bat
+sync-local-windows.bat install
+sync-local-windows.bat uninstall
 ```
 
-如果 OpenClaw 目录不是默认 `~/.openclaw`：
+### 11.4 Codex 和 Claude Code 路径
 
-```sh
-node apps/openclaw-sync/dist/index.cjs pair \
-  --server https://ai-archive.gyee.tech:18443 \
-  --code ABCD1234 \
-  --openclaw-root "$HOME/.openclaw"
+Mac 和 Windows 的一键脚本都会默认读取 OpenClaw、Codex 和 Claude Code 的常见本地目录：
+
+```text
+~/.openclaw
+~/.codex
+~/.claude
 ```
 
-### 11.3 同时导入 Codex 会话
+Windows 对应为：
 
-默认 Codex 根目录：
-
-```sh
-node apps/openclaw-sync/dist/index.cjs pair \
-  --server https://ai-archive.gyee.tech:18443 \
-  --code ABCD1234 \
-  --with-codex
+```text
+%USERPROFILE%\.openclaw
+%USERPROFILE%\.codex
+%USERPROFILE%\.claude
 ```
 
-显式指定 Codex 根目录：
-
-```sh
-node apps/openclaw-sync/dist/index.cjs pair \
-  --server https://ai-archive.gyee.tech:18443 \
-  --code ABCD1234 \
-  --codex-root "$HOME/.codex"
-```
-
-  Windows 示例：
-
-  推荐直接运行一键脚本：
-
-  ```bat
-  scripts\sync-local-windows.bat
-  ```
-
-  第一次运行时，脚本会提示输入后台生成的配对码；之后再次运行会跳过配对，自动重新构建同步代理、导入历史 Codex 会话，并持续监听新增会话。只想导入一次、不保持监听时：
-
-  ```bat
-  scripts\sync-local-windows.bat rebuild-only
-  ```
-
-  需要手工执行时也可以使用：
-
-  ```powershell
-  node apps/openclaw-sync/dist/index.cjs pair `
-    --server https://ai-archive.gyee.tech:18443 `
-    --code ABCD1234 `
-  --codex-root "$env:USERPROFILE\.codex"
-```
-
-### 11.4 导入 Claude Code 会话
-
-使用默认候选目录：
-
-```sh
-node apps/openclaw-sync/dist/index.cjs pair \
-  --server https://ai-archive.gyee.tech:18443 \
-  --code ABCD1234 \
-  --with-claude-code
-```
-
-显式指定 Claude Code JSONL 根目录：
-
-```sh
-node apps/openclaw-sync/dist/index.cjs pair \
-  --server https://ai-archive.gyee.tech:18443 \
-  --code ABCD1234 \
-  --claude-code-root "$HOME/.claude"
-```
+如果路径不在默认位置，可以先设置环境变量再运行一键脚本：`AI_ARCHIVE_OPENCLAW_ROOT`、`AI_ARCHIVE_CODEX_ROOT`、`AI_ARCHIVE_CLAUDE_CODE_ROOT`。
 
 Claude Code 的本地文件路径和 JSONL 事件字段可能随版本变化，因此该根目录是可配置的。解析器会保留可确认的用户、AI、system、tool 和 unknown 消息；损坏单行不会让整个文件失败；文件名包含 key、token、cookie、credential 的文件会被忽略。
 
-### 11.5 启动同步
-
-```sh
-node apps/openclaw-sync/dist/index.cjs run
-```
+### 11.5 同步行为
 
 代理会：
 
@@ -410,12 +371,18 @@ node apps/openclaw-sync/dist/index.cjs run
 6. 文件缩短、前部改写、压缩轮换或服务端基线不一致时完整解析。
 7. 网络失败时不推进 offset，成功后记录本地 state。
 
-### 11.6 重建同步状态
+### 11.6 重新导入近期历史
 
-需要重新核对全部本地文件时：
+需要重新核对近期本地文件时：
 
 ```sh
-node apps/openclaw-sync/dist/index.cjs rebuild
+./AI-Archive-Sync.command rebuild
+```
+
+Windows：
+
+```bat
+sync-local-windows.bat rebuild-only
 ```
 
 ## 12. 日志排错

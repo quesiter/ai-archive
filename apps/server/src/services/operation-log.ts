@@ -10,6 +10,21 @@ const MAX_METADATA_DEPTH = 4;
 const MAX_METADATA_ARRAY_ITEMS = 12;
 const MAX_METADATA_KEYS = 24;
 const MAX_METADATA_STRING_LENGTH = 1_500;
+const SENSITIVE_KEY = /(?:authorization|cookie|password|passwd|secret|token|api[_-]?key|credential)/i;
+
+export function redactLogText(value: string): string {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer [REDACTED]")
+    .replace(/\b(?:sk|api|key|token)[-_][A-Za-z0-9_-]{12,}\b/gi, "[REDACTED]")
+    .replace(
+      /([?&](?:access_token|api_key|key|token|secret|password)=)[^&#\s]+/gi,
+      "$1[REDACTED]",
+    )
+    .replace(
+      /((?:authorization|password|secret|token|api[_-]?key)\s*[:=]\s*)["']?[^\s,"'}]+/gi,
+      "$1[REDACTED]",
+    );
+}
 
 export type OperationLogInput = {
   scope: OperationLogScope;
@@ -27,6 +42,11 @@ function truncateText(value: string, limit = MAX_METADATA_STRING_LENGTH): string
     : `${value.slice(0, limit)}…[truncated ${value.length - limit} chars]`;
 }
 
+export function safeStoredError(value: unknown, limit = 1_500): string {
+  const message = value instanceof Error ? value.message : String(value ?? "Unknown error");
+  return truncateText(redactLogText(message), limit);
+}
+
 export function normalizeLogMetadata(
   value: unknown,
   depth = 0,
@@ -34,7 +54,7 @@ export function normalizeLogMetadata(
   if (value === null || typeof value === "boolean" || typeof value === "number") {
     return value;
   }
-  if (typeof value === "string") return truncateText(value);
+  if (typeof value === "string") return truncateText(redactLogText(value));
   if (typeof value === "bigint") return value.toString();
   if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) {
@@ -50,7 +70,7 @@ export function normalizeLogMetadata(
     return Object.fromEntries(
       entries.map(([key, item]) => [
         truncateText(key, 120),
-        normalizeLogMetadata(item, depth + 1),
+        SENSITIVE_KEY.test(key) ? "[REDACTED]" : normalizeLogMetadata(item, depth + 1),
       ]),
     );
   }
@@ -68,7 +88,7 @@ export async function writeOperationLog(input: OperationLogInput): Promise<void>
     await db.insert(operationLogs).values({
       scope: input.scope,
       level: input.level ?? levelFromStatus(input.status),
-      message: truncateText(input.message, 3_000),
+      message: truncateText(redactLogText(input.message), 3_000),
       status: input.status ?? null,
       entityType: input.entityType ?? null,
       entityId: input.entityId ?? null,

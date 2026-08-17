@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, lte } from "drizzle-orm";
 import { db } from "../db.js";
 import { backgroundTasks } from "../schema.js";
-import { writeOperationLog } from "./operation-log.js";
+import { safeStoredError, writeOperationLog } from "./operation-log.js";
 
 export type BackgroundTask = typeof backgroundTasks.$inferSelect;
 export type BackgroundTaskKind = BackgroundTask["kind"];
@@ -21,6 +21,14 @@ interface BackgroundTaskUpdate {
   completedAt?: Date | null;
 }
 
+interface BackgroundTaskUpdateOptions {
+  log?: boolean;
+}
+
+function operationScope(kind: BackgroundTaskKind) {
+  return kind === "knowledge_rebuild" ? "analysis" : "classification";
+}
+
 export async function createBackgroundTask(
   kind: BackgroundTaskKind,
   message: string,
@@ -31,7 +39,7 @@ export async function createBackgroundTask(
     .returning();
   if (!task) throw new Error("Failed to create background task");
   await writeOperationLog({
-    scope: "classification",
+    scope: operationScope(kind),
     message,
     status: task.status,
     entityType: "background_task",
@@ -44,15 +52,16 @@ export async function createBackgroundTask(
 export async function updateBackgroundTask(
   id: string,
   values: BackgroundTaskUpdate,
+  options: BackgroundTaskUpdateOptions = {},
 ): Promise<BackgroundTask | null> {
   const [task] = await db
     .update(backgroundTasks)
     .set({ ...values, updatedAt: new Date() })
     .where(eq(backgroundTasks.id, id))
     .returning();
-  if (task && (values.status || values.message || values.error)) {
+  if (task && options.log !== false && (values.status || values.message || values.error)) {
     await writeOperationLog({
-      scope: "classification",
+      scope: operationScope(task.kind),
       message: values.error ?? values.message ?? `智能归类任务${task.status}`,
       status: task.status,
       entityType: "background_task",
@@ -121,7 +130,7 @@ export async function failStaleBackgroundTasks(
 
   for (const task of staleTasks) {
     await writeOperationLog({
-      scope: "classification",
+      scope: operationScope(task.kind),
       level: "error",
       message: "超时智能归类任务已自动标记失败",
       status: task.status,
@@ -175,7 +184,7 @@ export async function failBackgroundTask(
 ): Promise<BackgroundTask | null> {
   return updateBackgroundTask(id, {
     status: "failed",
-    error,
+    error: safeStoredError(error),
     message: "任务失败",
     completedAt: new Date(),
   });

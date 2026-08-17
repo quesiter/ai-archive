@@ -206,6 +206,8 @@ flowchart TD
 1. Web 后台上传 ZIP。
 2. Worker 定时扫描 `IMPORT_INBOX` 目录。
 
+除 ChatGPT 官方 ZIP 和 Gemini Takeout 外，Worker 还支持 Chat Memo 的文本 ZIP。Chat Memo 文件按平台标识解析为独立快照；URL 中的 Session ID 用作 `provider + externalSessionId` 幂等键，混合平台任务在 `stats.providers` 中记录平台列表。
+
 导入任务使用文件 SHA-256 去重。任务进入 `import-archive` 队列，由 Worker 异步解析，job 过期时间显式设置为 6 小时，避免大 ZIP 被 PgBoss 默认 15 分钟超时打断。解析完成后移动到 processed 目录，失败后移动到 failed 目录，并在 `import_jobs` 和 `operation_logs` 中记录状态。
 
 导入页刷新、Worker 启动和 inbox 扫描都会检查 processing 状态的导入任务。如果任务长时间没有更新且 PgBoss 中已没有对应的 created/retry/active job，源 ZIP 仍在 inbox 时会自动改回 queued 并重新入队；源文件缺失时会标记 failed，避免 UI 长期误判为仍在解析。

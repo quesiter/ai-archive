@@ -64,4 +64,14 @@ describe("backup archive parsing", () => {
       parseBackupArchive("backup.json", Buffer.from(JSON.stringify(invalid))),
     ).rejects.toThrow();
   });
+
+  it("rejects unknown backup tables", async () => {
+    const invalid = {
+      ...backupEnvelope(),
+      tables: { ...backupEnvelope().tables, users: [] },
+    };
+    await expect(
+      parseBackupArchive("backup.json", Buffer.from(JSON.stringify(invalid))),
+    ).rejects.toThrow(/Unknown backup table/);
+  });
 });

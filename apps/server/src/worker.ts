@@ -4,7 +4,9 @@ import { closeDatabase } from "./db.js";
 import { processArchive, scanImportInbox } from "./jobs/import-job.js";
 import {
   classifyConversation,
+  rebuildKnowledge,
   reclassifyUnlockedConversations,
+  retryDeferredAnalysisRuns,
   runAnalysis,
 } from "./services/analysis.js";
 import { sendReportEmailById } from "./services/email.js";
@@ -13,6 +15,7 @@ import {
   enqueueUnlockedReclassification,
   getBoss,
   queueNames,
+  type KnowledgeRebuildJobData,
   type ReclassificationJobData,
   stopBoss,
 } from "./services/queue.js";
@@ -23,6 +26,9 @@ const boss = await getBoss();
 
 await failStaleBackgroundTasks("classification_rebuild").catch((error) => {
   console.warn("Failed to mark stale classification tasks", error);
+});
+await failStaleBackgroundTasks("knowledge_rebuild").catch((error) => {
+  console.warn("Failed to mark stale knowledge tasks", error);
 });
 
 await boss.work(queueNames.weekly, async () => runAnalysis("weekly"));
@@ -66,6 +72,14 @@ await boss.work(
     }
     if (typeof data?.offset === "number") input.offset = data.offset;
     return reclassifyUnlockedConversations(input);
+  },
+);
+await boss.work(
+  queueNames.rebuildKnowledge,
+  { includeMetadata: true },
+  async (jobs) => {
+    const data = jobs[0]?.data as KnowledgeRebuildJobData | undefined;
+    return rebuildKnowledge(data?.taskId);
   },
 );
 await boss.work(queueNames.importArchive, { includeMetadata: true }, async (jobs) => {
@@ -114,6 +128,10 @@ const reclassificationCron = new Cron(
   },
 );
 
+const analysisRetryCron = new Cron("*/5 * * * *", { timezone: config.TZ, protect: true }, async () => {
+  await retryDeferredAnalysisRuns();
+});
+
 const inboxCron = new Cron("*/5 * * * *", { protect: true }, async () => {
   await scanImportInbox();
 });
@@ -123,6 +141,7 @@ async function shutdown(): Promise<void> {
   weeklyCron.stop();
   monthlyCron.stop();
   reclassificationCron.stop();
+  analysisRetryCron.stop();
   inboxCron.stop();
   await stopBoss();
   await closeDatabase();

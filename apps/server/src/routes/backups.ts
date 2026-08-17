@@ -5,6 +5,7 @@ import {
   restoreBackupArchive,
 } from "../services/backup.js";
 import { writeOperationLog } from "../services/operation-log.js";
+import { MAX_BACKUP_COMPRESSED_BYTES } from "../services/backup.js";
 
 async function readFilePart(part: { file: AsyncIterable<Buffer | Uint8Array | string> }): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -38,7 +39,7 @@ export async function backupRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/api/v1/backups/import", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
-    const part = await request.file({ limits: { fileSize: 2 * 1024 * 1024 * 1024 } });
+    const part = await request.file({ limits: { fileSize: MAX_BACKUP_COMPRESSED_BYTES } });
     if (!part) return reply.code(400).send({ error: "Backup file is required" });
     const lowerName = part.filename.toLowerCase();
     if (
