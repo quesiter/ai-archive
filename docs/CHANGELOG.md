@@ -8,7 +8,7 @@
 - 管理员可按单个会话或单个项目导出全部可见对话，用户可将源项目合并到目标项目。
 - Devices 页面集中提供 Windows、macOS 和 Chrome 组件下载，并统一客户端版本标识。
 - 增强请求同源校验、认证限流、Token 处理、初始化及配对并发安全、SSRF/DNS 重绑定防护、解压限制、日志脱敏、正则安全和链接协议校验。
-- 容器服务使用非 root 用户并移除 Linux capabilities；修复非法 UUID 返回 500、分类规则误判和若干同步稳定性问题。
+- app/worker 使用非 root 用户并移除 Linux capabilities；PostgreSQL 仅保留卷权限调整与切换到 `postgres` 账户所需的最小能力集。修复非法 UUID 返回 500、分类规则误判和若干同步稳定性问题。
 - 更新全部生产及开发依赖，依赖审计无已知漏洞。
 
 发布包：`release/ai-conversation-archive-nas-V20260817-clean-install.tar.gz`、`release/ai-archiveextension-V20260817-chrome.zip`、`release/ai-conversation-archive-windows-sync-V20260817.zip`、`release/ai-conversation-archive-macos-sync-V20260817.tar.gz`。

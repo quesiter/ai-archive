@@ -290,7 +290,7 @@ docker compose --env-file .env logs --tail=200 postgres
 11. `TRUST_PROXY` 只填写实际可信的代理跳数，不使用无边界的 `true`。
 12. `EXTENSION_ORIGINS` 只包含当前发布扩展的固定 ID。
 13. 除可信内网模型/SMTP 外，保持 `ALLOW_PRIVATE_NETWORK_TARGETS=false`。
-14. app/worker 使用非 root 用户运行，导入数据目录只授予 UID 1000 所需读写权限。
+14. app/worker 使用非 root 用户运行，导入数据目录只授予 UID 1000 所需读写权限；PostgreSQL 仅恢复官方入口脚本启动所需的 `CHOWN`、`DAC_OVERRIDE`、`FOWNER`、`SETGID`、`SETUID` 能力。
 
 ## 14. 发布包检查
 

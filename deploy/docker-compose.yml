@@ -23,6 +23,14 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # Required by the official entrypoint to fix volume ownership and switch
+    # to the unprivileged postgres account during startup.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
 
   app:
     image: ${ARCHIVE_IMAGE:-ai-conversation-archive:latest}
