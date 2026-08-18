@@ -20,6 +20,13 @@ type Candidate = Pick<
   "id" | "conversationId" | "baseRevisionId" | "baseMessageCount" | "messageCount"
 >;
 
+class RevisionNotCompactableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RevisionNotCompactableError";
+  }
+}
+
 async function candidates(): Promise<Candidate[]> {
   return db
     .select({
@@ -56,7 +63,9 @@ async function compactCandidate(candidate: Candidate): Promise<number> {
       .limit(1);
     if (!revision || revision.storageKind !== "snapshot") return 0;
     if (!revision.baseRevisionId || revision.baseMessageCount === null) {
-      throw new Error(`Revision ${revision.id} is missing its compaction base metadata`);
+      throw new RevisionNotCompactableError(
+        `Revision ${revision.id} is missing its compaction base metadata`,
+      );
     }
     const [base] = await tx
       .select()
@@ -69,7 +78,9 @@ async function compactCandidate(candidate: Candidate): Promise<number> {
       base.storageKind !== "snapshot" ||
       base.messageCount !== revision.baseMessageCount
     ) {
-      throw new Error(`Revision ${revision.id} does not have a compactable snapshot base`);
+      throw new RevisionNotCompactableError(
+        `Revision ${revision.id} does not have a compactable snapshot base`,
+      );
     }
 
     const validation = await tx.execute(sql`
@@ -121,7 +132,9 @@ async function compactCandidate(candidate: Candidate): Promise<number> {
     `);
     const valid = Boolean((validation[0] as { valid?: boolean } | undefined)?.valid);
     if (!valid) {
-      throw new Error(`Revision ${revision.id} prefix differs from its declared base snapshot`);
+      throw new RevisionNotCompactableError(
+        `Revision ${revision.id} prefix differs from its declared base snapshot`,
+      );
     }
     if (!execute) return base.messageCount;
 
@@ -150,20 +163,30 @@ async function compactCandidate(candidate: Candidate): Promise<number> {
 
 let validated = 0;
 let deletedMessages = 0;
+let skipped = 0;
 try {
   const rows = await candidates();
   for (const [index, candidate] of rows.entries()) {
-    const compacted = await compactCandidate(candidate);
-    validated += 1;
-    deletedMessages += compacted;
-    console.log(
-      `${execute ? "compacted" : "validated"} ${index + 1}/${rows.length} revision=${candidate.id} prefixMessages=${compacted}`,
-    );
+    try {
+      const compacted = await compactCandidate(candidate);
+      validated += 1;
+      deletedMessages += compacted;
+      console.log(
+        `${execute ? "compacted" : "validated"} ${index + 1}/${rows.length} revision=${candidate.id} prefixMessages=${compacted}`,
+      );
+    } catch (error) {
+      if (!(error instanceof RevisionNotCompactableError)) throw error;
+      skipped += 1;
+      console.warn(
+        `skipped ${index + 1}/${rows.length} revision=${candidate.id} reason=${error.message}`,
+      );
+    }
   }
   console.log(
     JSON.stringify({
       mode: execute ? "execute" : "dry-run",
       revisions: validated,
+      skipped,
       prefixMessages: deletedMessages,
     }),
   );
