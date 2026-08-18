@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import {
   CaptureDeltaV1Schema,
   CapturePayloadV1Schema,
@@ -22,6 +22,7 @@ import {
   messages,
 } from "../schema.js";
 import { sanitizeDatabaseText, truncateDatabaseText } from "./text-safety.js";
+import { loadCaptureRevisionMessages } from "./revision-storage.js";
 
 export class IncrementalBaseMismatchError extends Error {
   readonly code = "incremental_base_mismatch";
@@ -180,39 +181,6 @@ export function databaseSafeSegmentContent(segment: CaptureMessage["segments"][n
   return truncateDatabaseText(normalized, limit, `${segment.type} segment`);
 }
 
-async function loadRevisionMessages(
-  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
-  revisionId: string,
-): Promise<CaptureMessage[]> {
-  const rows = await tx
-    .select()
-    .from(messages)
-    .where(eq(messages.revisionId, revisionId))
-    .orderBy(asc(messages.ordinal));
-  return Promise.all(
-    rows.map(async (message) => {
-      const segments = await tx
-        .select()
-        .from(messageSegments)
-        .where(eq(messageSegments.messageId, message.id))
-        .orderBy(asc(messageSegments.ordinal));
-      return {
-        ordinal: message.ordinal,
-        role: message.role,
-        ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
-        ...(message.model ? { model: message.model } : {}),
-        ...(message.sourceCreatedAt ? { createdAt: message.sourceCreatedAt.toISOString() } : {}),
-        segments: segments.map((segment) => ({
-          type: segment.type,
-          content: segment.content,
-          ...(segment.href ? { href: segment.href } : {}),
-          ...(segment.language ? { language: segment.language } : {}),
-        })),
-      };
-    }),
-  );
-}
-
 async function latestBranchRevision(
   tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
   conversationId: string,
@@ -303,11 +271,16 @@ async function insertRevision(
   input: {
     conversationId: string;
     snapshot: CaptureSnapshotV1;
+    storedMessages: CaptureMessage[];
+    storageKind: "snapshot" | "delta";
     hash: string;
     deviceId: string | null;
   },
 ) {
-  const searchText = buildRevisionSearchText(input.snapshot.messages);
+  // Delta revisions index only the newly stored body. Searching a conversation
+  // already spans all revisions, so copying the inherited prefix here wastes
+  // space and can crowd the newest text out of the bounded search document.
+  const searchText = buildRevisionSearchText(input.storedMessages);
   const [revision] = await tx
     .insert(conversationRevisions)
     .values({
@@ -323,6 +296,7 @@ async function insertRevision(
       triggerReason: input.snapshot.triggerReason ?? null,
       baseRevisionId: input.snapshot.baseRevisionId ?? null,
       baseMessageCount: input.snapshot.baseMessageCount ?? null,
+      storageKind: input.storageKind,
       adapterVersion: input.snapshot.adapterVersion,
       sourceDeviceId: input.deviceId,
       capturedAt: new Date(input.snapshot.capturedAt),
@@ -351,7 +325,7 @@ async function insertRevision(
     return { id: existing.id, unchanged: true };
   }
 
-  const sortedMessages = [...input.snapshot.messages].sort(
+  const sortedMessages = [...input.storedMessages].sort(
     (left, right) => left.ordinal - right.ordinal,
   );
 
@@ -490,10 +464,27 @@ export function mergedSnapshotFromDelta(input: {
   });
 }
 
+export function revisionStorageBody(
+  payload: CapturePayloadV1,
+  snapshot: CaptureSnapshotV1,
+): {
+  storedMessages: CaptureMessage[];
+  storageKind: "snapshot" | "delta";
+} {
+  const delta = CaptureDeltaV1Schema.safeParse(payload);
+  return delta.success
+    ? { storedMessages: delta.data.appendedMessages, storageKind: "delta" }
+    : { storedMessages: snapshot.messages, storageKind: "snapshot" };
+}
+
 async function snapshotFromPayload(
   tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
   payload: CapturePayloadV1,
-): Promise<CaptureSnapshotV1> {
+): Promise<{
+  snapshot: CaptureSnapshotV1;
+  storedMessages: CaptureMessage[];
+  storageKind: "snapshot" | "delta";
+}> {
   if (CaptureDeltaV1Schema.safeParse(payload).success) {
     const delta = CaptureDeltaV1Schema.parse(payload);
     const [conversation] = await tx
@@ -513,11 +504,13 @@ async function snapshotFromPayload(
       delta.branchFingerprint,
     );
     if (!baseRevision) throw new IncrementalBaseMismatchError("No base revision exists");
-    const baseMessages = await loadRevisionMessages(tx, baseRevision.id);
+    const baseMessages = await loadCaptureRevisionMessages(baseRevision.id, tx);
     validateDeltaBase({ delta, baseRevision, baseMessages });
-    return mergedSnapshotFromDelta({ delta, baseRevision, baseMessages });
+    const snapshot = mergedSnapshotFromDelta({ delta, baseRevision, baseMessages });
+    return { snapshot, ...revisionStorageBody(delta, snapshot) };
   }
-  return CaptureSnapshotV1Schema.parse(payload);
+  const snapshot = CaptureSnapshotV1Schema.parse(payload);
+  return { snapshot, ...revisionStorageBody(payload, snapshot) };
 }
 
 export async function ingestCapture(
@@ -542,7 +535,7 @@ export async function ingestCapture(
       sql`select pg_advisory_xact_lock(hashtextextended(${`conversation:${provider}:${sessionId}`}, 0))`,
     );
 
-    const snapshot = await snapshotFromPayload(tx, payload);
+    const { snapshot, storedMessages, storageKind } = await snapshotFromPayload(tx, payload);
     const hash = snapshotHash(snapshot);
 
     await tx.execute(
@@ -653,6 +646,8 @@ export async function ingestCapture(
     const revision = await insertRevision(tx, {
       conversationId: conversation.id,
       snapshot,
+      storedMessages,
+      storageKind,
       hash,
       deviceId,
     });

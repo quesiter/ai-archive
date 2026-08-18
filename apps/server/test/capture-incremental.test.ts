@@ -86,8 +86,13 @@ describe("incremental capture validation", () => {
     ).toBe(snapshotHash(snapshot));
   });
 
-  it("accepts a valid append delta and materializes a full revision body", async () => {
-    const { mergedSnapshotFromDelta, snapshotHash, validateDeltaBase } = await import(
+  it("accepts a valid append delta but stores only its new message body", async () => {
+    const {
+      mergedSnapshotFromDelta,
+      revisionStorageBody,
+      snapshotHash,
+      validateDeltaBase,
+    } = await import(
       "../src/services/capture.js"
     );
     const input = {
@@ -102,7 +107,36 @@ describe("incremental capture validation", () => {
     expect(merged.captureMode).toBe("append");
     expect(merged.baseRevisionId).toBe(baseRevision.id);
     expect(merged.messages.map((message) => message.ordinal)).toEqual([0, 1, 2, 3]);
+    expect(revisionStorageBody(input.delta, merged)).toMatchObject({
+      storageKind: "delta",
+      storedMessages: input.delta.appendedMessages,
+    });
     expect(snapshotHash(merged)).toBe(snapshotHash({ ...merged }));
+  });
+
+  it("keeps full captures as independently readable snapshots", async () => {
+    const { revisionStorageBody } = await import("../src/services/capture.js");
+    const snapshot: CaptureSnapshotV1 = {
+      schemaVersion: 1,
+      provider: "chatgpt",
+      sessionId: "session-1",
+      branchFingerprint: "branch-fingerprint-1",
+      adapterVersion: "1.2.1",
+      capturedAt: "2026-07-25T04:00:00.000Z",
+      captureMode: "full",
+      completeness: {
+        status: "complete",
+        topReached: true,
+        bottomReached: true,
+        stable: true,
+      },
+      messages: baseMessages,
+    };
+
+    expect(revisionStorageBody(snapshot, snapshot)).toMatchObject({
+      storageKind: "snapshot",
+      storedMessages: baseMessages,
+    });
   });
 
   it("bounds revision search text without dropping the archived messages", async () => {

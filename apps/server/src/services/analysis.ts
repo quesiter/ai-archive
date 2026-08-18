@@ -16,7 +16,6 @@ import {
 import { z } from "zod";
 import {
   ExtractedKnowledgeSchema,
-  type CaptureMessage,
   type KnowledgeType,
   type SourceReference,
 } from "@ai-archive/contracts";
@@ -27,11 +26,10 @@ import {
   conversationRevisions,
   conversations,
   knowledgeItems,
-  messageSegments,
-  messages,
   projects,
   reports,
 } from "../schema.js";
+import { loadCaptureRevisionMessages } from "./revision-storage.js";
 import {
   completeBackgroundTask,
   failBackgroundTask,
@@ -1156,36 +1154,7 @@ async function loadConversationMaterial(
     .where(eq(conversations.id, conversationId))
     .limit(1);
   if (!conversation) throw new Error("Conversation disappeared during analysis");
-  const messageRows = await db
-    .select()
-    .from(messages)
-    .where(eq(messages.revisionId, revisionId))
-    .orderBy(asc(messages.ordinal));
-  const normalized: CaptureMessage[] = [];
-  for (const message of messageRows) {
-    const segments = await db
-      .select()
-      .from(messageSegments)
-      .where(eq(messageSegments.messageId, message.id))
-      .orderBy(asc(messageSegments.ordinal));
-    normalized.push({
-      ordinal: message.ordinal,
-      role: message.role,
-      ...(message.externalMessageId
-        ? { externalMessageId: message.externalMessageId }
-        : {}),
-      ...(message.model ? { model: message.model } : {}),
-      ...(message.sourceCreatedAt
-        ? { createdAt: message.sourceCreatedAt.toISOString() }
-        : {}),
-      segments: segments.map((segment) => ({
-        type: segment.type,
-        content: segment.content,
-        ...(segment.href ? { href: segment.href } : {}),
-        ...(segment.language ? { language: segment.language } : {}),
-      })),
-    });
-  }
+  const normalized = await loadCaptureRevisionMessages(revisionId);
   const validOrdinals = new Set<number>();
   const text = normalized
     .map((message) => {

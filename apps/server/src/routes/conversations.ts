@@ -30,6 +30,10 @@ import {
   hardDeleteConversation,
 } from "../services/capture.js";
 import {
+  loadHydratedRevisionMessages,
+  loadRevisionStorageChain,
+} from "../services/revision-storage.js";
+import {
   loadConversationExportData,
   renderConversationExport,
   type ConversationExportFormat,
@@ -213,7 +217,10 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
               .where(eq(conversationRevisions.id, revisionId))
               .limit(1)
           : [];
-        const [hit] = query.q && revision
+        const storageRevisionIds = query.q && revision
+          ? (await loadRevisionStorageChain(revision.id)).map((item) => item.id)
+          : [];
+        const [hit] = query.q && storageRevisionIds.length
           ? await db
               .select({
                 ordinal: messages.ordinal,
@@ -223,7 +230,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
               .innerJoin(messageSegments, eq(messageSegments.messageId, messages.id))
               .where(
                 and(
-                  eq(messages.revisionId, revision.id),
+                  inArray(messages.revisionId, storageRevisionIds),
                   ilike(messageSegments.content, `%${query.q}%`),
                 ),
               )
@@ -312,21 +319,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
           messages: [],
         };
       }
-      const messageRows = await db
-        .select()
-        .from(messages)
-        .where(eq(messages.revisionId, selectedRevision.id))
-        .orderBy(asc(messages.ordinal));
-      const hydratedMessages = await Promise.all(
-        messageRows.map(async (message) => ({
-          ...message,
-          segments: await db
-            .select()
-            .from(messageSegments)
-            .where(eq(messageSegments.messageId, message.id))
-            .orderBy(asc(messageSegments.ordinal)),
-        })),
-      );
+      const hydratedMessages = await loadHydratedRevisionMessages(selectedRevision.id);
       return {
         conversation,
         projectAssignment: projectAssignment ?? null,

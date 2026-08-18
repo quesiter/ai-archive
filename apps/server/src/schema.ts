@@ -109,6 +109,10 @@ export const conversationRevisions = pgTable(
     triggerReason: text("trigger_reason").$type<CaptureTriggerReason>(),
     baseRevisionId: uuid("base_revision_id"),
     baseMessageCount: integer("base_message_count"),
+    storageKind: text("storage_kind")
+      .$type<"snapshot" | "delta">()
+      .notNull()
+      .default("snapshot"),
     adapterVersion: text("adapter_version").notNull(),
     sourceDeviceId: uuid("source_device_id").references(() => devices.id, {
       onDelete: "set null",
@@ -124,6 +128,7 @@ export const conversationRevisions = pgTable(
       table.snapshotHash,
     ),
     index("conversation_revision_conversation_idx").on(table.conversationId),
+    index("conversation_revision_base_idx").on(table.baseRevisionId),
     index("conversation_revision_captured_idx").on(table.capturedAt),
   ],
 );

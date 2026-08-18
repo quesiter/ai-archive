@@ -6,10 +6,9 @@ import {
   conversationProjects,
   conversationRevisions,
   conversations,
-  messageSegments,
-  messages,
   projects,
 } from "../schema.js";
+import { loadHydratedRevisionMessagesBatch } from "./revision-storage.js";
 
 export type ConversationExportFormat = "csv" | "md" | "xlsx";
 
@@ -195,57 +194,7 @@ export async function loadConversationExportData(input: {
     return { ...scope, generatedAt: new Date().toISOString(), rows: [] };
   }
 
-  const messageRows = await db
-    .select({
-      id: messages.id,
-      revisionId: messages.revisionId,
-      ordinal: messages.ordinal,
-      role: messages.role,
-      model: messages.model,
-      sourceCreatedAt: messages.sourceCreatedAt,
-      segmentOrdinal: messageSegments.ordinal,
-      segmentType: messageSegments.type,
-      segmentContent: messageSegments.content,
-      segmentHref: messageSegments.href,
-      segmentLanguage: messageSegments.language,
-    })
-    .from(messages)
-    .innerJoin(messageSegments, eq(messageSegments.messageId, messages.id))
-    .where(inArray(messages.revisionId, revisionIds))
-    .orderBy(asc(messages.revisionId), asc(messages.ordinal), asc(messageSegments.ordinal));
-  const messagesById = new Map<
-    string,
-    {
-      revisionId: string;
-      ordinal: number;
-      role: string;
-      model: string | null;
-      sourceCreatedAt: Date | null;
-      segments: Array<{
-        type: string;
-        content: string;
-        href: string | null;
-        language: string | null;
-      }>;
-    }
-  >();
-  for (const row of messageRows) {
-    const message = messagesById.get(row.id) ?? {
-      revisionId: row.revisionId,
-      ordinal: row.ordinal,
-      role: row.role,
-      model: row.model,
-      sourceCreatedAt: row.sourceCreatedAt,
-      segments: [],
-    };
-    message.segments.push({
-      type: row.segmentType,
-      content: row.segmentContent,
-      href: row.segmentHref,
-      language: row.segmentLanguage,
-    });
-    messagesById.set(row.id, message);
-  }
+  const messagesByRevision = await loadHydratedRevisionMessagesBatch(revisionIds);
 
   const conversationByRevision = new Map(
     scope.conversations.flatMap((conversation) => {
@@ -254,27 +203,29 @@ export async function loadConversationExportData(input: {
     }),
   );
   const rows: ConversationExportRow[] = [];
-  for (const message of messagesById.values()) {
-    const relation = conversationByRevision.get(message.revisionId);
+  for (const [revisionId, revisionMessages] of messagesByRevision) {
+    const relation = conversationByRevision.get(revisionId);
     if (!relation) continue;
-    const content = exportableMessageContent(message);
-    if (!content || (message.role !== "user" && message.role !== "assistant")) continue;
-    rows.push({
-      projectName: relation.conversation.projectName ?? "",
-      conversationId: relation.conversation.id,
-      conversationTitle:
-        relation.conversation.title || relation.conversation.externalSessionId,
-      provider: relation.conversation.provider,
-      externalSessionId: relation.conversation.externalSessionId,
-      canonicalUrl: safeExportUrl(relation.conversation.canonicalUrl),
-      revisionId: relation.revision.id,
-      capturedAt: relation.revision.capturedAt.toISOString(),
-      messageOrdinal: message.ordinal,
-      role: message.role,
-      model: message.model ?? "",
-      messageAt: message.sourceCreatedAt?.toISOString() ?? "",
-      content,
-    });
+    for (const message of revisionMessages) {
+      const content = exportableMessageContent(message);
+      if (!content || (message.role !== "user" && message.role !== "assistant")) continue;
+      rows.push({
+        projectName: relation.conversation.projectName ?? "",
+        conversationId: relation.conversation.id,
+        conversationTitle:
+          relation.conversation.title || relation.conversation.externalSessionId,
+        provider: relation.conversation.provider,
+        externalSessionId: relation.conversation.externalSessionId,
+        canonicalUrl: safeExportUrl(relation.conversation.canonicalUrl),
+        revisionId: relation.revision.id,
+        capturedAt: relation.revision.capturedAt.toISOString(),
+        messageOrdinal: message.ordinal,
+        role: message.role,
+        model: message.model ?? "",
+        messageAt: message.sourceCreatedAt?.toISOString() ?? "",
+        content,
+      });
+    }
   }
   rows.sort(
     (left, right) =>
