@@ -34,12 +34,25 @@
 - 认证 API 禁止缓存，生产响应启用 HSTS 与浏览器权限策略；异常日志执行第二层凭据脱敏。
 - app、worker、host-monitor 采用非 root 和只读根文件系统，且不授予额外 Linux capabilities。
 - 全部 174 项自动化测试、类型检查、生产构建与 Compose 配置校验通过。
-- 生产镜像仅保留运行依赖并移除 npm/corepack；体积由约 224.6 MB 降至 98.1 MB，Trivy 可修复 High/Critical 漏洞和镜像秘密扫描结果均为 0。
+- 生产镜像仅保留运行依赖并移除 npm/corepack；本地 OCI 审计环境报告的镜像尺寸由约 224.6 MB 降至 98.4 MB，Trivy 可修复 High/Critical 漏洞和镜像秘密扫描结果均为 0。不同 Docker 存储驱动显示的未压缩占用不可直接横向比较。
 - 四个 V2.0.2 交付包已完成版本、内容、排除项和敏感信息核验；SHA-256 见[部署文档](DEPLOYMENT.md)。
 
 在线网页采集支持 ChatGPT、Gemini、Grok、腾讯元宝、MiniMax Agent、DeepSeek、千问和 Kimi。本地同步支持 OpenClaw、Codex 和 Claude Code。历史 ZIP 导入支持 ChatGPT、Gemini Takeout 和 Chat Memo 已实现的平台格式。
 
 核心归档、搜索、导出、历史导入、修订查看和备份恢复不依赖模型；项目归类、知识整理和报告需要配置 OpenAI 兼容模型。
+
+## V2.0.2 发布核验
+
+2026-08-22 已按发布提交 `003d7bf` 完成生产部署核验：
+
+- `pnpm typecheck`、全部 174 项自动化测试、`pnpm build`、Compose 配置和 Markdown 本地链接检查均通过。
+- `pnpm audit` 与生产依赖审计未发现已知漏洞；当前源码和 Git 历史未发现测试夹具之外的高置信凭据。
+- 精简镜像在非 root、只读根文件系统下通过真实 PostgreSQL 迁移和完整服务启动测试；Trivy 可修复 High/Critical 漏洞与镜像秘密扫描结果均为 0。
+- NAS 更新脚本确认运行版本为 `V2.0.2`；app、host-monitor、PostgreSQL 健康，worker 正常运行，app 与 worker 均为 `node` 用户和只读根文件系统。
+- 公网 `/healthz` 返回 `200`、`ok: true` 与 `V2.0.2`，并确认 `Cache-Control: no-store`、HSTS、Permissions Policy、COOP 和 CSP 已生效；生产 Web 静态资源包含 V2.0.2 版本与更新记录。
+- 发布前数据库备份保存在 `/volume1/docker/ai-conversation-archive/backups/daily/archive_2026-08-22_164201.dump`；最终 NAS 包 SHA-256 为 `501EC7755E12B9B13D3B96EE77856EE9A625C622FA16C80DB3D33888235B03C1`。
+
+本节记录发布时已经完成的验证，不代表持续监控结果；实时运行状态仍以系统“设置 → 系统状态”和 `/healthz` 为准。
 
 ## V2.0.1 发布核验
 
