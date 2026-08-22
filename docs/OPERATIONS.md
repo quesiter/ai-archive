@@ -33,7 +33,7 @@ docker compose -f deploy/docker-compose.yml config
 pnpm test:e2e-api
 ~~~
 
-e2e-api 默认期望 /healthz 返回 V2.1.0，需要正在运行的测试服务。
+e2e-api 默认期望 /healthz 返回 V2.1.1，需要正在运行的测试服务。
 
 ## 3. 日常状态检查
 
@@ -46,7 +46,7 @@ curl -fsS http://127.0.0.1:18080/healthz
 
 正常状态：
 
-- /healthz 返回 ok=true 与 V2.1.0。
+- /healthz 返回 ok=true 与 V2.1.1。
 - app、postgres、host-monitor 为 healthy；worker 为 Up。
 - host-monitor 只在 Compose 网络暴露 9091。
 - “设置 → 系统状态”能读取数据库、项目容器和存储指标。
@@ -57,7 +57,7 @@ curl -fsS http://127.0.0.1:18080/healthz
 
 ~~~sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.1.0-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.1.1-clean-install.tar.gz
 ~~~
 
 脚本会保留 deploy/.env 并核对新版本。健康检查仍返回旧号时，检查镜像缓存、反向代理目标和 app/worker/host-monitor 是否被强制重建。

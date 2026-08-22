@@ -23,10 +23,11 @@ import {
   type Provider,
 } from "@ai-archive/contracts";
 import { api, ApiError, jsonBody } from "./api.js";
+import { buildConversationListSearch } from "./conversation-list.js";
 import { releaseNotes } from "./release-notes.js";
 
 type UnknownRecord = Record<string, any>;
-const WEB_VERSION = "V2.1.0";
+const WEB_VERSION = "V2.1.1";
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -308,12 +309,6 @@ function sourceDeviceLabel(value: UnknownRecord | null | undefined): string {
     return value.sourceDevice.name;
   }
   return "未记录设备";
-}
-
-function dateParamToIso(value: string): string {
-  if (!value) return "";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
 function stageLabel(stage: unknown): string {
@@ -896,31 +891,42 @@ function Conversations() {
   const limit = 100;
   const rawOffset = Number(searchParams.get("offset") ?? 0);
   const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.floor(rawOffset)) : 0;
+  const conversationSearch = buildConversationListSearch({
+    limit,
+    offset,
+    q,
+    provider,
+    source,
+    completeness,
+    captureMode,
+    projectId,
+    tagIds,
+    from,
+    to,
+  });
   const state = useLoad(
     () =>
       api<UnknownRecord[]>(
-        `/api/v1/conversations?${new URLSearchParams({
-          limit: String(limit),
-          offset: String(Math.max(0, offset)),
-          ...(q ? { q } : {}),
-          ...(provider ? { provider } : {}),
-          ...(source ? { source } : {}),
-          ...(completeness ? { completeness } : {}),
-          ...(captureMode ? { captureMode } : {}),
-          ...(projectId ? { projectId } : {}),
-          ...(tagIds ? { tagIds } : {}),
-          ...(dateParamToIso(from) ? { from: dateParamToIso(from) } : {}),
-          ...(dateParamToIso(to) ? { to: dateParamToIso(to) } : {}),
-        })}`,
+        `/api/v1/conversations?${conversationSearch}`,
       ),
-    [q, provider, source, completeness, captureMode, projectId, tagIds, from, to, offset],
+    [conversationSearch],
   );
   const providerCountsState = useLoad(
     () => api<UnknownRecord[]>("/api/v1/conversations/provider-counts"),
-    [],
+    [conversationSearch],
   );
   const projectsState = useLoad(() => api<UnknownRecord[]>("/api/v1/projects"), []);
   const tagsState = useLoad(() => api<UnknownRecord[]>("/api/v1/tags"), []);
+
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      state.reload();
+      providerCountsState.reload();
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => document.removeEventListener("visibilitychange", refreshWhenVisible);
+  }, [state.reload, providerCountsState.reload]);
 
   function updateQuery(next: Record<string, string | number>) {
     const merged = {

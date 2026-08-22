@@ -1,6 +1,6 @@
 # 知言归藏 V2.1 部署文档
 
-本文面向群晖 NAS、Chrome 插件和 Windows/macOS 同步代理。服务端、Web 与同步代理当前为 V2.1.0，Chrome 插件为 V2.1.1。构建交付包后应以实际发布的 SHA-256 清单为准；不要沿用旧版本摘要验证新包。
+本文面向群晖 NAS、Chrome 插件和 Windows/macOS 同步代理。服务端、Web 与 Chrome 插件当前为 V2.1.1，Windows/macOS 同步代理为 V2.1.0。构建交付包后应以实际发布的 SHA-256 清单为准；不要沿用旧版本摘要验证新包。
 
 ## 1. 群晖 NAS 全新安装
 
@@ -16,7 +16,7 @@ chown -R 1000:1000 /volume1/docker/ai-conversation-archive/data/imports
 chmod -R u+rwX,go-rwx /volume1/docker/ai-conversation-archive/data/imports
 ~~~
 
-把 V2.1.0 源码包解压到 source。进入 source 后：
+把 V2.1.1 源码包解压到 source。进入 source 后：
 
 ~~~sh
 cp deploy/.env.synology.example deploy/.env
@@ -36,7 +36,7 @@ docker compose --env-file .env ps
 curl -fsS http://127.0.0.1:18080/healthz
 ~~~
 
-app 启动时先执行数据库 migration。健康响应应包含 version=V2.1.0；app、host-monitor、postgres 为 healthy，worker 为 Up。
+app 启动时先执行数据库 migration。健康响应应包含 version=V2.1.1；app、host-monitor、postgres 为 healthy，worker 为 Up。
 
 首次访问 Web 后创建管理员和 TOTP。TOTP Secret/URI 只在初始化时妥善保存。
 
@@ -75,7 +75,7 @@ app 启动时先执行数据库 migration。健康响应应包含 version=V2.1.0
 
 ~~~sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.1.0-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.1.1-clean-install.tar.gz
 ~~~
 
 脚本保留 deploy/.env、尝试备份数据库、解压源码、构建镜像、切换版本、强制重建 app/worker/host-monitor，并核对 /healthz。只在可丢弃的测试环境使用 SKIP_BACKUP=1。

@@ -10,7 +10,7 @@ UUID 路径参数和查询参数由 Zod 校验；非法值返回 400。未认证
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | /healthz | 数据库可用时返回 ok、version V2.1.0 和 time |
+| GET | /healthz | 数据库可用时返回 ok、version V2.1.1 和 time |
 | GET | /api/v1/auth/status | 是否已初始化 |
 | POST | /api/v1/auth/bootstrap | 首次创建用户与 TOTP |
 | POST | /api/v1/auth/login | 密码与六位 TOTP 登录 |
