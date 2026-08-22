@@ -53,6 +53,69 @@ function ErrorBanner({ message }: { message: string }) {
   return message ? <div className="alert error">{message}</div> : null;
 }
 
+function Modal({
+  title,
+  description,
+  onClose,
+  children,
+}: {
+  title: string;
+  description?: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    const previousActiveElement = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const firstField = panelRef.current?.querySelector<HTMLElement>("input, select, textarea");
+    (firstField ?? panelRef.current)?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCloseRef.current();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      document.body.style.overflow = previousOverflow;
+      previousActiveElement?.focus();
+    };
+  }, []);
+
+  return (
+    <div
+      className="modal-backdrop"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target) onClose();
+      }}
+    >
+      <div
+        aria-label={title}
+        aria-modal="true"
+        className="modal-panel"
+        ref={panelRef}
+        role="dialog"
+        tabIndex={-1}
+      >
+        <div className="modal-header">
+          <div>
+            <h2>{title}</h2>
+            {description && <p>{description}</p>}
+          </div>
+          <button aria-label="关闭弹窗" className="modal-close" onClick={onClose} type="button">×</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
   const status = useLoad(() => api<{ initialized: boolean }>("/api/v1/auth/status"), []);
   const [bootstrapResult, setBootstrapResult] = useState<{
@@ -1435,6 +1498,7 @@ function Projects() {
   const [mergeSourceId, setMergeSourceId] = useState("");
   const [mergeTargetId, setMergeTargetId] = useState("");
   const [mergeMessage, setMergeMessage] = useState("");
+  const [projectDialog, setProjectDialog] = useState<"create" | "merge" | null>(null);
   const classificationActive = isActiveStatus(classificationTask?.status);
   const classificationClock = useTaskClock(classificationActive);
   const overview = overviewState.data ?? {};
@@ -1520,6 +1584,7 @@ function Projects() {
         }),
       });
       formElement.reset();
+      setProjectDialog(null);
       overviewState.reload();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -1567,6 +1632,7 @@ function Projects() {
       setMergeMessage(`合并完成：迁移 ${result.movedConversationCount ?? 0} 个会话和 ${result.movedReportCount ?? 0} 份关联报告。`);
       setMergeSourceId("");
       setMergeTargetId("");
+      setProjectDialog(null);
       overviewState.reload();
     } catch (reason) {
       setMergeMessage("");
@@ -1673,70 +1739,57 @@ function Projects() {
         }
       />
       <ErrorBanner message={error || overviewState.error} />
-      {visibleClassificationMessage && (
-        <div className={`alert ${classificationTask?.status === "failed" ? "error" : classificationDeferredMessage ? "warning" : "success"}`}>
-          {visibleClassificationMessage}
+      {mergeMessage && <div className="alert success">{mergeMessage}</div>}
+      <section className={`panel project-status-panel${classificationTask ? " has-task" : ""}`}>
+        <div className="project-status-summary">
+          <strong>{classificationTask ? `项目与标签整理 · ${statusLabel(classificationTask.status)}` : "项目概况"}</strong>
+          <span>
+            {visibleClassificationMessage || (
+              activeCategoryCount > 0
+                ? `当前 ${activeCategoryCount} 个已启用项目，已归类 ${categorizedConversationCount} 个会话，待归类 ${unclassifiedConversationCount} 个。`
+                : "当前还没有可展示的组织结果，先创建项目或运行一次整理。"
+            )}
+          </span>
+          {classificationTask && <time>{formatTaskTime(classificationTask.updatedAt)}</time>}
         </div>
-      )}
-      <section className="panel summary-panel">
-        <h2>结论</h2>
-        <p>
-          {classificationActive
-            ? "正在整理会话的项目与标签，完成后这里会自动刷新。"
-            : activeCategoryCount > 0
-              ? `当前共有 ${activeCategoryCount} 个已启用项目，已归类 ${categorizedConversationCount} 个会话，仍有 ${unclassifiedConversationCount} 个待归类会话。`
-              : "当前还没有可展示的组织结果，先创建项目或运行一次整理。"}
-        </p>
-      </section>
-      {classificationTask && (
-        <section className="panel progress-panel">
-          <div className="progress-header">
-            <div>
-              <strong>
-                项目与标签整理 · {statusLabel(classificationTask.status)}
-                {stats.stage ? ` · ${stageLabel(stats.stage)}` : ""}
-              </strong>
-              <span>{formatTaskTime(classificationTask.updatedAt)}</span>
+        {classificationTask && (
+          <>
+            <div className="project-status-progress">
+              <div className="progress-bar">
+                <span style={{ width: `${percent}%` }} />
+              </div>
+              <strong>{percent}%</strong>
             </div>
-            <span>{percent}%</span>
-          </div>
-          <div className="progress-bar">
-            <span style={{ width: `${percent}%` }} />
-          </div>
-          <div className="progress-stats">
-            <span>范围 {classificationScopeLabel}</span>
-            <span>已处理 {classificationTask.processedCount ?? 0}/{classificationTask.totalCount ?? 0}</span>
-            <span>已归类 {stats.classified ?? 0}</span>
-            <span>标签关联 {stats.tagAssignments ?? 0}</span>
-            <span>失败 {classificationTask.failedCount ?? 0}</span>
-          </div>
-          {classificationDeferredMessage && (
-            <p className="ai-deferred-notice">{classificationDeferredMessage}</p>
-          )}
-          {candidateReasonEntries.length > 0 && (
-            <div className="progress-breakdown">
+            <div className="project-status-details">
+              <span>范围 {classificationScopeLabel}</span>
+              <span>已处理 {classificationTask.processedCount ?? 0}/{classificationTask.totalCount ?? 0}</span>
+              <span>已归类 {stats.classified ?? 0}</span>
+              <span>标签关联 {stats.tagAssignments ?? 0}</span>
+              <span>失败 {classificationTask.failedCount ?? 0}</span>
+              {stats.stage && <span>阶段 {stageLabel(stats.stage)}</span>}
               {candidateReasonEntries.map((item) => (
-                <span key={item.key}>
+                <span className="project-status-pill" key={item.key}>
                   {classificationCandidateReasonLabels[item.key] ?? item.key} {formatCount(item.count)}
                 </span>
               ))}
             </div>
-          )}
-          {classificationTask.error && !classificationActive && !classificationDeferredMessage && (
-            <p className="progress-error">{classificationTask.error}</p>
-          )}
-          {failureSamples.length > 0 && (
-            <div className="failure-list">
-              {failureSamples.map((sample, index) => (
-                <p key={`${sample.conversationId ?? index}`}>
-                  {sample.title || sample.conversationId || `样例 ${index + 1}`}：
-                  {sample.error}
-                </p>
-              ))}
-            </div>
-          )}
-        </section>
-      )}
+            {classificationTask.error && !classificationActive && !classificationDeferredMessage && (
+              <p className="progress-error">{classificationTask.error}</p>
+            )}
+            {failureSamples.length > 0 && (
+              <details className="failure-list compact-failure-list">
+                <summary>查看 {failureSamples.length} 条失败样例</summary>
+                {failureSamples.map((sample, index) => (
+                  <p key={`${sample.conversationId ?? index}`}>
+                    {sample.title || sample.conversationId || `样例 ${index + 1}`}：
+                    {sample.error}
+                  </p>
+                ))}
+              </details>
+            )}
+          </>
+        )}
+      </section>
 
       <section className="project-metrics">
         <article className="metric">
@@ -1761,49 +1814,29 @@ function Projects() {
         </article>
       </section>
 
-      <section className="panel project-create-panel">
-        <div className="project-action-copy">
-          <h2>新建项目</h2>
-          <p className="panel-subtitle">新增项目后，可重新运行项目与标签整理或在会话详情中人工锁定。</p>
-        </div>
-        <form className="project-create-form" onSubmit={createProject}>
-          <input name="name" aria-label="项目名称" placeholder="新项目名称" required />
-          <input name="description" aria-label="项目描述" placeholder="描述（可选）" />
-          <button>创建</button>
-        </form>
-      </section>
-
-      <section className="panel project-admin-panel">
-        <div className="project-action-copy">
-          <h2>合并项目</h2>
-          <p className="panel-subtitle">把 A 项目的会话和关联报告迁移到 B 项目；完成后删除 A 项目。</p>
-        </div>
-        <form className="project-merge-form" onSubmit={mergeProjects}>
-          <label>A · 源项目
-            <select value={mergeSourceId} onChange={(event) => setMergeSourceId(event.target.value)} required>
-              <option value="">请选择</option>
-              {activeProjectGroups.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-            </select>
-          </label>
-          <span className="merge-arrow">→</span>
-          <label>B · 目标项目
-            <select value={mergeTargetId} onChange={(event) => setMergeTargetId(event.target.value)} required>
-              <option value="">请选择</option>
-              {activeProjectGroups.filter((project) => project.id !== mergeSourceId).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-            </select>
-          </label>
-          <button className="danger" disabled={!mergeSourceId || !mergeTargetId || mergeSourceId === mergeTargetId}>确认合并</button>
-        </form>
-        {mergeMessage && <p className="merge-result">{mergeMessage}</p>}
-      </section>
-
       <section className="project-board">
         <div className="section-title-row">
           <div>
             <h2>项目</h2>
             <p className="panel-subtitle">展开项目可查看会话、标签分布、时间线与导出入口。</p>
           </div>
-          <span className="pill">{activeCategoryCount} 个活跃项目</span>
+          <div className="project-board-actions">
+            <span className="pill">{activeCategoryCount} 个活跃项目</span>
+            <button
+              className="secondary small"
+              onClick={() => {
+                setError("");
+                setProjectDialog("merge");
+              }}
+            >合并项目</button>
+            <button
+              className="small"
+              onClick={() => {
+                setError("");
+                setProjectDialog("create");
+              }}
+            >新建项目</button>
+          </div>
         </div>
         {overviewState.loading ? (
           <Loading label="加载项目中…" />
@@ -1994,6 +2027,54 @@ function Projects() {
           <Loading label="当前没有待归类会话。" />
         )}
       </section>
+
+      {projectDialog === "create" && (
+        <Modal
+          description="新增后可重新运行整理，或在会话详情中人工锁定项目。"
+          onClose={() => setProjectDialog(null)}
+          title="新建项目"
+        >
+          <ErrorBanner message={error} />
+          <form className="stack modal-form" onSubmit={createProject}>
+            <label>项目名称<input name="name" autoFocus placeholder="例如：知识归档系统" required /></label>
+            <label>项目描述（可选）<textarea name="description" placeholder="简要说明项目范围" rows={3} /></label>
+            <div className="modal-actions">
+              <button className="secondary" onClick={() => setProjectDialog(null)} type="button">取消</button>
+              <button type="submit">创建项目</button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {projectDialog === "merge" && (
+        <Modal
+          description="源项目的会话和关联报告将迁移到目标项目，随后删除源项目。"
+          onClose={() => setProjectDialog(null)}
+          title="合并项目"
+        >
+          <ErrorBanner message={error} />
+          <form className="stack modal-form" onSubmit={mergeProjects}>
+            <label>A · 源项目
+              <select value={mergeSourceId} onChange={(event) => setMergeSourceId(event.target.value)} required>
+                <option value="">请选择要删除的源项目</option>
+                {activeProjectGroups.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+              </select>
+            </label>
+            <div className="modal-merge-arrow">↓ 会话和报告迁移至</div>
+            <label>B · 目标项目
+              <select value={mergeTargetId} onChange={(event) => setMergeTargetId(event.target.value)} required>
+                <option value="">请选择保留的目标项目</option>
+                {activeProjectGroups.filter((project) => project.id !== mergeSourceId).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+              </select>
+            </label>
+            <p className="modal-warning">合并后无法撤销，请确认源项目与目标项目选择正确。</p>
+            <div className="modal-actions">
+              <button className="secondary" onClick={() => setProjectDialog(null)} type="button">取消</button>
+              <button className="danger" disabled={!mergeSourceId || !mergeTargetId || mergeSourceId === mergeTargetId}>确认合并</button>
+            </div>
+          </form>
+        </Modal>
+      )}
 
     </>
   );
