@@ -2,6 +2,17 @@
 
 本文面向群晖 NAS、Chrome 插件、Windows/macOS 本地同步代理和数据备份恢复。当前服务端、Web、Chrome 插件和同步代理统一为 `V2.0.1`。
 
+## 0. 当前发布包校验值
+
+以下 SHA-256 对应 2026-08-22 从 `main` 提交 `a5867f4` 构建并完成部署核验的 V2.0.1 交付物。复制或上传后应先核对摘要，再执行安装或升级。
+
+| 交付物 | SHA-256 |
+| --- | --- |
+| `ai-conversation-archive-nas-V2.0.1-clean-install.tar.gz` | `61691A1D143A349D748E8A1B66368B6BD926D6AA29F41C142B4C9753916868D9` |
+| `ai-archiveextension-V2.0.1-chrome.zip` | `C74AACF24764A3EFC5C894F4B4175C6327A415E7F0D654ED7E8B429961B5297F` |
+| `ai-conversation-archive-windows-sync-V2.0.1.zip` | `2238863A17F9E3E7DD1F4FB3B3B0368D404B776EAD2C70EE9A5F76FFEBC37E75` |
+| `ai-conversation-archive-macos-sync-V2.0.1.tar.gz` | `049AB36CBA3FF23DB2310562A012AD730FD3CB34169350F4AE4FC65B355F7A3E` |
+
 ## 1. 群晖 NAS 全新安装
 
 推荐环境：群晖 DSM 7.2.2、Container Manager、x86-64 机型。DS923+ 的 Ryzen R1600 可以运行本项目；默认配置下不要在同一台 NAS 上同时部署本地大模型。

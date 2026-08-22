@@ -8,6 +8,7 @@
 - 将 2026-08-22 当天的六次连续发布合并为一个 `V260822` 历史版本，保留原六次发布的全部已实现内容。
 - 其余历史记录使用连续的语义化版本号，并在括号中保留发布时的原版本号；原安装包名称、Git 提交和接口兼容标识不做改写。
 - 服务端、Web、Chrome 插件、Windows/macOS 同步代理和共享协议同步升级为 `V2.0.1`。
+- 完成需求、系统、界面、数据库、API、部署、运维、用户及客户端文档的最终复核，并记录已部署版本、自动化验证结果和发布包 SHA-256。
 
 发布包：`release/ai-conversation-archive-nas-V2.0.1-clean-install.tar.gz`、`release/ai-archiveextension-V2.0.1-chrome.zip`、`release/ai-conversation-archive-windows-sync-V2.0.1.zip`、`release/ai-conversation-archive-macos-sync-V2.0.1.tar.gz`。
 
