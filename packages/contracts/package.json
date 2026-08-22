@@ -1,6 +1,6 @@
 {
   "name": "@ai-archive/contracts",
-  "version": "2026.8.17",
+  "version": "2026.8.22",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",

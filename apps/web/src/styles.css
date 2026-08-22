@@ -66,6 +66,8 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .sidebar-brand { display: flex; align-items: center; gap: .72rem; padding: .25rem .55rem; letter-spacing: 0; }
 .sidebar-brand span, .brand-mark { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 8px; background: #dff7ef; color: #08242a; font-weight: 950; box-shadow: none; }
 .sidebar-brand strong { font-size: 1.02rem; }
+.sidebar-brand-copy { display: flex; min-width: 0; flex-direction: column; gap: .12rem; }
+.sidebar-brand-copy small { color: #83aaa8; font-size: .58rem; white-space: nowrap; }
 .sidebar nav { display: flex; flex-direction: column; gap: .35rem; flex: 1; }
 .sidebar nav a { display: flex; gap: .75rem; align-items: center; padding: .72rem .8rem; border-radius: 8px; color: #a8c6c5; font-size: .88rem; transition: background .16s, color .16s, transform .16s; }
 .sidebar nav a span { width: 22px; text-align: center; color: #76bdb5; font-size: 1.05rem; }
@@ -753,7 +755,7 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
   .app-shell { grid-template-columns: 76px minmax(0, 1fr); }
   .sidebar { padding: 1rem .65rem; }
   .sidebar-brand { justify-content: center; padding: 0; }
-  .sidebar-brand strong, .sidebar nav a:not(.active) { font-size: 0; }
+  .sidebar-brand-copy, .sidebar nav a:not(.active) { display: none; }
   .sidebar nav a { justify-content: center; }
   .sidebar nav a.active { font-size: 0; }
   .sidebar-version { align-items: center; padding: 0; }

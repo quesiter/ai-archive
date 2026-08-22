@@ -1,4 +1,4 @@
-# API 文档
+# 知言归藏 API 文档
 
 ## 1. 通用约定
 
@@ -34,6 +34,16 @@
 
 `issues` 只在 Zod 校验失败等场景返回。
 
+Web 写操作同时受严格同源、SameSite Cookie 和全局速率限制保护；管理员初始化为 15 分钟最多 3 次，登录为 5 分钟最多 5 次，设备领取配对码为 10 分钟最多 10 次。除单接口覆盖外，全局限制为每个来源每分钟 300 次。
+
+### 1.1 健康与版本
+
+```http
+GET /healthz
+```
+
+不需要认证。数据库可用时返回 `{"ok":true,"version":"V260822-4","time":"..."}`，不可用时返回 503 和 `ok:false`；所有响应同时设置 `X-AI-Archive-Version`。该接口不在 `/api/v1` 基础路径下。
+
 ## 2. 认证接口
 
 ### 2.1 获取初始化状态
@@ -48,7 +58,7 @@ GET /api/v1/auth/status
 
 ```json
 {
-  "bootstrapped": true
+  "initialized": true
 }
 ```
 
@@ -83,7 +93,7 @@ Content-Type: application/json
 {
   "username": "admin",
   "password": "your-password",
-  "totp": "123456"
+  "totpCode": "123456"
 }
 ```
 
@@ -413,7 +423,15 @@ GET /api/v1/conversations/:id?revisionId=<revision-id>
 }
 ```
 
-### 5.4 删除会话
+### 5.4 导出会话
+
+```http
+GET /api/v1/conversations/:id/export?format=csv
+```
+
+认证：Web 登录。`format` 必须为 `csv`、`md` 或 `xlsx`，返回对应附件。导出使用最新完整修订；若采集时间相同，以修订创建时间确定新旧。
+
+### 5.5 删除会话
 
 ```http
 DELETE /api/v1/conversations/:id
@@ -619,7 +637,32 @@ Content-Type: application/json
 }
 ```
 
-### 7.5 设置会话项目
+### 7.5 导出项目会话
+
+```http
+GET /api/v1/projects/:id/export?format=xlsx
+```
+
+认证：Web 登录。`format` 为 `csv`、`md` 或 `xlsx`；按项目导出所有会话的最新完整修订。
+
+### 7.6 合并项目
+
+```http
+POST /api/v1/projects/:id/merge
+Content-Type: application/json
+```
+
+路径中的 `id` 为源项目 A，请求体中的 `targetProjectId` 为目标项目 B：
+
+```json
+{
+  "targetProjectId": "uuid"
+}
+```
+
+系统迁移源项目会话归属、知识和相关报告，处理知识指纹冲突后删除源项目并写入操作日志。源项目与目标项目不能相同。
+
+### 7.7 设置会话项目
 
 ```http
 PUT /api/v1/conversations/:id/project
@@ -642,7 +685,7 @@ Content-Type: application/json
 | `lock` | 用户手动锁定，智能归类不得覆盖。 |
 | `auto` | 解除锁定并可入队重新评估。 |
 
-### 7.6 运行智能归类
+### 7.8 运行智能归类
 
 ```http
 POST /api/v1/classification/run
@@ -693,7 +736,7 @@ Content-Type: application/json
 
 如果已有排队或运行中的批量归类任务，接口返回 202，并带 `reused: true`。
 
-### 7.7 最新分类任务
+### 7.9 最新分类任务
 
 ```http
 GET /api/v1/classification/tasks/latest
@@ -707,19 +750,31 @@ GET /api/v1/classification/tasks/latest
 }
 ```
 
-### 7.8 指定分类任务
+### 7.10 指定分类任务
 
 ```http
 GET /api/v1/classification/tasks/:id
 ```
 
-### 7.9 知识列表
+### 7.11 知识列表
 
 ```http
 GET /api/v1/knowledge?projectId=&status=
 ```
 
-### 7.10 未归类会话
+按更新时间倒序返回知识，包含项目名、类型、标题、正文、状态、置信度和来源引用；`projectId` 与 `status` 均可选。
+
+### 7.12 重建项目知识
+
+```http
+POST /api/v1/knowledge/rebuild
+GET /api/v1/knowledge/rebuild/latest
+GET /api/v1/knowledge/rebuild/:id
+```
+
+`POST` 创建或复用仍在排队/运行的 `knowledge_rebuild` 后台任务并返回 202。两个 `GET` 分别取得最新任务和指定任务，响应含状态、总数、已处理数、成功/失败数、消息、错误和统计字段。
+
+### 7.13 未归类会话
 
 ```http
 GET /api/v1/unclassified
@@ -735,7 +790,7 @@ GET /api/v1/unclassified
 GET /api/v1/reports
 ```
 
-返回最近 100 份报告。
+返回最近 100 份已生成报告；Web 的“生成状态”另从分析运行列表中分别选取最新周报和最新月报运行。
 
 ### 8.2 分析运行列表
 
@@ -772,6 +827,8 @@ Content-Type: application/json
 ```
 
 `kind` 可选 `weekly` 或 `monthly`。
+
+周报窗口为 Asia/Shanghai 下上一完整周一 00:00（含）至本周一 00:00（不含）；月报窗口为上一自然月 1 日 00:00（含）至本月 1 日 00:00（不含）。
 
 响应：
 
@@ -810,7 +867,7 @@ Content-Type: multipart/form-data
 限制：
 
 1. 只接受 `.zip`。
-2. 单文件最大 2GB。
+2. 单文件最大 512 MiB；解压后总量最大 512 MiB，单个 ZIP 条目最大 128 MiB。
 3. 使用文件 SHA-256 去重。
 
 响应：
@@ -834,6 +891,8 @@ GET /api/v1/backups/export
 ```
 
 认证：Web 登录。
+
+压缩文件最大 512 MiB，解压后的 JSON 最大 1 GiB，单表最多 2,000,000 行。
 
 响应：`application/gzip` 附件，文件名形如：
 
@@ -1048,6 +1107,8 @@ POST /api/v1/redaction-rules/security-pack
 
 启用或补齐安全规则后，同时创建已有归档清理任务。
 
+响应为 202，包含新增数量、重新启用数量、规则包总数以及清理任务。重复调用不会创建重复规则，也不会重复创建仍在运行的清理任务。
+
 ### 11.9 清理已有归档
 
 ```http
@@ -1068,4 +1129,7 @@ GET /api/v1/redaction/storage-cleanup
 | `400` | 请求体、参数或模型配置校验失败。 |
 | `401` | 未登录或设备令牌无效。 |
 | `404` | 资源不存在。 |
+| `409` | 状态冲突，例如重复初始化、增量基线不一致或任务未成功入队。 |
+| `413` | JSON、ZIP 或备份超过接口限制。 |
+| `429` | 请求超过速率限制。 |
 | `409` | 增量采集基线不一致，或异步任务入队冲突。 |

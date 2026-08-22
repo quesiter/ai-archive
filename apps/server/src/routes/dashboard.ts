@@ -108,6 +108,7 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
             asc(conversationRevisions.conversationId),
             desc(sql`${conversationRevisions.completeness} = 'complete'`),
             desc(conversationRevisions.capturedAt),
+            desc(conversationRevisions.createdAt),
           ),
       ]);
 

@@ -9,11 +9,24 @@ STAMP=$(date +%Y-%m-%d_%H%M%S)
 DAY=$(date +%u)
 MONTH_DAY=$(date +%d)
 
+docker_cli() {
+  if docker info >/dev/null 2>&1; then
+    docker "$@"
+    return
+  fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+    sudo -n docker "$@"
+    return
+  fi
+  echo "Docker daemon is not accessible with the current account." >&2
+  return 127
+}
+
 mkdir -p "$BACKUP_ROOT/daily" "$BACKUP_ROOT/weekly" "$BACKUP_ROOT/monthly"
 
 [ -f "$ENV_FILE" ] || { echo "Compose environment not found: $ENV_FILE" >&2; exit 1; }
 
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
+docker_cli compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
   pg_dump -U "${POSTGRES_USER:-archive}" -d "${POSTGRES_DB:-archive}" \
   --format=custom --no-owner --no-privileges > "$BACKUP_ROOT/daily/archive_$STAMP.dump"
 

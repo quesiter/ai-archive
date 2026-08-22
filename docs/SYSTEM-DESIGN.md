@@ -1,8 +1,8 @@
-# 系统设计文档
+# 知言归藏系统设计文档
 
 ## 1. 设计目标
 
-`AI Conversation Archive` 是一个个人自托管的 AI 会话归档与项目知识系统。设计重点不是替代第三方 AI 产品，而是把跨平台会话稳定保存到用户自己的数据库中，并提供可追踪的 AI 二次整理能力。
+“知言归藏”是个人自托管的 AI 会话归档与项目知识系统。设计重点不是替代第三方 AI 产品，而是把跨平台会话稳定保存到用户自己的数据库中，并提供可追踪的 AI 二次整理能力。
 
 核心设计目标：
 
@@ -25,7 +25,7 @@ flowchart LR
     Ext --> Outbox
   end
 
-  subgraph Local["本地电脑或 MacBook"]
+  subgraph Local["Windows 或 macOS 电脑"]
     OpenClaw["OpenClaw JSONL"]
     Codex["Codex JSONL"]
     Claude["Claude Code JSONL"]
@@ -166,17 +166,19 @@ https://yuanbao.tencent.com/chat/<space-or-account-id>/<conversation-id>
 
 ### 4.4 采集入库
 
-服务端 `POST /api/v1/captures` 接收 `CaptureSnapshotV1`。快照经过共享协议校验后写入数据库。
+服务端 `POST /api/v1/captures` 接收 `CaptureSnapshotV1` 或 `CaptureDeltaV1`。载荷经过共享协议校验和入库脱敏后写入数据库。
 
 入库策略：
 
 1. 会话唯一键：`provider + externalSessionId`。
 2. 修订唯一键：`conversationId + snapshotHash`。
 3. 采集请求幂等键：`deviceId + Idempotency-Key`。
-4. 新修订写入 `conversation_revisions`、`messages`、`message_segments`。
-5. 内容未变时返回 `unchanged: true`，不重复写入消息。
-6. 成功或失败都写入 `capture_runs` 和操作日志。
-7. 如果开启 `classification.autoOnCapture`，新修订会尝试入队单会话归类任务。
+4. 完整载荷直接写入修订、消息和分段；增量载荷先校验基线修订、消息数、最后消息指纹和 ordinal，再形成可恢复的完整修订视图。
+5. 新的增量修订可用 `storageKind=delta` 只保存追加消息并引用 `baseRevisionId`；读取详情、搜索、导出和分析时沿基线链恢复完整消息。`compact-revisions` 可把符合条件的旧增量快照转换为该存储形式并做逐消息校验。
+6. 内容未变时返回 `unchanged: true`，不重复写入消息，也不写持久化成功操作日志。
+7. 完整、部分或失败尝试写入 `capture_runs`；发生变化的成功采集和失败采集写入操作日志。
+8. 选择最新修订时优先完整版本，再按 `capturedAt`、`createdAt` 降序。
+9. 如果开启 `classification.autoOnCapture`，新修订会尝试入队单会话归类任务；归类入队失败不回滚已成功的归档。
 
 ### 4.5 本地同步代理
 
@@ -197,7 +199,9 @@ flowchart TD
   K -- 否 --> M["保留未同步，下次重试"]
 ```
 
-同步代理设计为只读本地会话文件，不读取模型密钥、平台 Cookie 或账号凭据。代理可以运行在独立 MacBook 上，只要能访问归档服务地址即可。`.gz` 压缩轮换文件按完整历史文件处理；未压缩 JSONL 才进行 offset 增量读取。
+同步代理设计为只读本地会话文件，不读取模型密钥、平台 Cookie 或账号凭据。代理可在 Windows 或 macOS 独立运行，只要能访问归档服务地址即可。`.gz` 压缩轮换文件按完整历史文件处理；未压缩 JSONL 才进行 offset 增量读取。
+
+扫描器使用合并运行机制：扫描尚未结束时收到新的文件变化，会记录一次后续扫描请求而不是直接丢弃事件。Codex 首次历史扫描使用文件 mtime；已有同步状态的 Codex 文件后续增长使用实际观察时刻作为 `capturedAt`。Codex JSONL 流按 LF 分隔记录，只有位于 LF 前的 CR 才作为 CRLF 行尾移除，记录内部的独立 CR 仍作为 JSON 空白保留。服务端选择最新修订时再以 `createdAt` 作为同采集时间下的稳定并列排序键，因此早期问题修订不会遮挡后写入的助手答案。
 
 ### 4.6 历史导入
 
@@ -238,6 +242,8 @@ Web 后台备份是逻辑业务备份，面向“重建网站后导入数据”�
 | --- | --- |
 | `classify-conversation` | 单个会话归类，通常由采集后自动触发。 |
 | `reclassify-unlocked` | 批量归类任务。默认先筛增量候选；完整重评时处理全部未人工锁定会话。 |
+| `rebuild-knowledge` | 逐会话抽取并按项目合并知识。 |
+| `nightly-ai-maintenance` | 每天 22:00 编排增量归类和知识重建。 |
 
 归类运行模式：
 
@@ -279,18 +285,20 @@ totalCount, processedCount, succeededCount, failedCount, message, stats
 
 ### 4.9 周报与月报
 
-报告运行队列：
+报告及其他 Worker 队列：
 
 | 队列 | 用途 |
 | --- | --- |
 | `analysis-weekly` | 周报生成。 |
 | `analysis-monthly` | 月报生成。 |
 | `email-report` | 报告生成后发送邮件。 |
+| `import-archive` | 异步解析历史 ZIP。 |
+| `redact-storage` | 对已有归档执行不可逆敏感信息清理。 |
 
 周期计算使用 `Asia/Shanghai`：
 
-1. 周报：上一个完整周一到周一。
-2. 月报：上一个完整自然月。
+1. 周报：上一个完整周一 00:00（含）到本周一 00:00（不含），界面按周一至周日显示准确日期。
+2. 月报：上一个完整自然月，结束时间为本月 1 日 00:00（不含）。
 
 周报流程：
 
@@ -334,7 +342,7 @@ AI 调用统一通过 `apps/server/src/services/llm.ts`：
 
 任务状态聚合接口 `/api/v1/activity` 汇总：
 
-1. 批量分类任务。
+1. 批量分类、项目知识重建和历史脱敏任务。
 2. 周报、月报分析任务。
 3. 历史导入任务。
 4. 近 24 小时采集异常摘要。
@@ -367,8 +375,9 @@ info, warning, error
 | --- | --- | --- |
 | 仪表盘 | `/` | 归档规模、分类分布、近 7 日增长、文本量、近 24 小时采集健康和最近报告。 |
 | 会话 | `/conversations` | 紧凑会话列表、搜索、平台/来源/时间/完整性/采集模式过滤、搜索命中摘要、分页。 |
-| 会话详情 | `/conversations/:id` | 会话消息、修订版本、来源平台、原始 URL、来源设备、采集模式、触发原因、项目绑定、删除。 |
-| 项目 | `/projects` | 项目列表、创建编辑、归档、知识、未归类、智能归类进度。 |
+| 会话详情 | `/conversations/:id` | 会话消息、稳定排序的修订版本、来源平台、原始 URL、来源设备、采集模式、触发原因、项目绑定、三种格式导出和永久删除。 |
+| 分类结果 | `/classification` | 项目创建编辑、归档、合并、项目导出、分类进度、项目分组和待归类会话。`/projects` 仅重定向到此页。 |
+| 项目知识 | `/knowledge` | 有效中文知识、项目/类型/关键字过滤、原始依据链接和知识重建进度。 |
 | 报告 | `/reports` | 周报/月报列表、分析运行状态、立即生成。 |
 | 报告详情 | `/reports/:id` | 查看报告标题、摘要和 Markdown 正文。 |
 | 导入 | `/imports` | 上传 ZIP、查看导入任务状态。 |
@@ -411,6 +420,8 @@ flowchart LR
 | 服务端校验失败 | 返回 400，记录 capture 失败日志。 |
 | 增量基线不一致 | 返回 409 和 `requiresFullCapture: true`，客户端回退完整采集。 |
 | 同步代理上传失败 | 不更新本地 state，下次扫描继续重试。 |
+| 同步期间再次收到文件变化 | 合并为当前扫描结束后的一次追加扫描，避免 Codex 后续答案事件丢失。 |
+| 多个修订的采集时间相同 | 按修订创建时间再次降序排序，默认选择后写入的完整修订。 |
 | 单条分类失败 | 计入失败样本，批量任务继续。 |
 | AI 额度或速率限制 | 识别 MiniMax `2056`（包括 `base_resp.status_code`，并兼容旧 `2062`）、`1002`、HTTP `429` 等限流信号；优先解析错误中的 `resets at`，否则查询 `/v1/token_plan/remains` 的五小时/周窗口剩余时间，选择阻塞任务的刷新窗口并增加 10 分钟缓冲。归类、知识重建和报告任务暂停、保留断点并按 `retryAt` 到点续跑；查询失败时一小时兜底，队列安全重试覆盖完整周窗口。前端依据任务统计字段显示额度窗口、预计时间和动态倒计时。 |
 | 报告正在运行 | 同周期运行有幂等保护，避免重复跑。 |
@@ -418,11 +429,3 @@ flowchart LR
 | 无知识可报告 | 生成本地占位报告。 |
 | SMTP 未配置 | 报告仍保存到 Web 后台，跳过邮件发送。 |
 | 备份密钥不一致 | 跳过加密设置并提示重新填写敏感配置。 |
-
-## 8. 可演进点
-
-1. 为容易变化的平台适配器增加更多 fixture 和回归测试。
-2. 给采集失败样本增加 DOM 诊断导出，便于快速修适配器。
-3. 给分类和报告增加更细的 token 估算和预算上限。
-4. 增加批量重建搜索索引和知识索引工具。
-5. 在 NAS 页面增加升级状态检查和迁移状态提示。

@@ -1,4 +1,4 @@
-# 数据模型文档
+# 知言归藏数据库设计文档
 
 ## 1. 概览
 
@@ -31,6 +31,7 @@ erDiagram
 | 字段 | 说明 |
 | --- | --- |
 | `id` | UUID 主键。 |
+| `singletonKey` | 固定为 1 且唯一，数据库层保证只有一个管理员。 |
 | `username` | 用户名，唯一。 |
 | `passwordHash` | 密码哈希。 |
 | `totpSecretEncrypted` | 加密后的 TOTP Secret。 |
@@ -132,6 +133,7 @@ Web 后台登录会话表。
 | `triggerReason` | 采集触发原因，例如 `new_session`、`new_messages`、`stream_finished`、`branch_changed`、`adapter_upgraded`、`manual_retry`、`incremental_base_mismatch`、`historical_import`、`local_file_appended`、`local_file_rewritten`。 |
 | `baseRevisionId` | 增量采集基线修订 ID。 |
 | `baseMessageCount` | 增量采集基线消息数量。 |
+| `storageKind` | `snapshot` 或 `delta`。增量修订可只保存追加消息并通过基线链恢复完整视图。 |
 | `adapterVersion` | 平台适配器版本。 |
 | `sourceDeviceId` | 来源设备，设备删除后置空。 |
 | `capturedAt` | 采集时间。 |
@@ -150,7 +152,10 @@ Web 后台登录会话表。
 | 索引 | 说明 |
 | --- | --- |
 | `conversation_revision_conversation_idx` | 按会话查询修订。 |
+| `conversation_revision_base_idx` | 按增量基线修订查询。 |
 | `conversation_revision_captured_idx` | 按采集时间查询分析窗口。 |
+
+默认选择“最新修订”时先优先 `complete`，再按 `capturedAt`、`createdAt` 降序。`createdAt` 是稳定的并列排序键，用于处理 Codex 文件 mtime 不变而多个修订 `capturedAt` 相同的情况。
 
 ### 3.3 `messages`
 
@@ -301,12 +306,12 @@ Web 后台登录会话表。
 
 ### 5.2 `background_tasks`
 
-通用后台任务表，当前用于批量智能归类。
+通用后台任务表，用于批量智能归类、项目知识重建和历史敏感信息清理。
 
 | 字段 | 说明 |
 | --- | --- |
 | `id` | UUID 主键。 |
-| `kind` | 当前为 `classification_rebuild`。 |
+| `kind` | `classification_rebuild`、`knowledge_rebuild` 或 `storage_redaction`。 |
 | `status` | `queued`、`running`、`completed`、`failed`。 |
 | `totalCount` | 总数。 |
 | `processedCount` | 已处理数量。 |
@@ -328,8 +333,8 @@ Web 后台登录会话表。
 | `id` | UUID 主键。 |
 | `kind` | `weekly` 或 `monthly`。 |
 | `projectId` | 可选项目 ID，当前周报/月报通常为空。 |
-| `periodStart` | 报告周期开始。 |
-| `periodEnd` | 报告周期结束。 |
+| `periodStart` | 报告周期开始（含）。 |
+| `periodEnd` | 报告周期结束（不含）。周报为下一个周一 00:00，月报为下月 1 日 00:00。 |
 | `title` | 标题。 |
 | `summary` | 摘要。 |
 | `bodyMarkdown` | Markdown 正文。 |
@@ -497,5 +502,6 @@ Web 后台登录会话表。
 3. 智能归类写入 `conversation_projects`。
 4. 知识抽取写入 `knowledge_items`。
 5. 周报/月报写入 `reports`。
-6. 删除会话时，相关修订、消息、分段和项目关系会级联清理。
-7. 撤销设备不会删除历史修订，只会阻止该设备继续上传。
+6. 后续采集在快照哈希、搜索索引和消息正文写入前执行不可逆入库脱敏；安全规则包或手动历史清理会更新已有消息、索引、知识、报告和日志。
+7. 删除会话时，相关修订、消息、分段和项目关系会级联清理；引用该会话的知识来源会由删除服务同步处理。
+8. 撤销设备不会删除历史修订，只会阻止该设备继续上传；彻底删除设备时历史修订的 `sourceDeviceId` 置空。

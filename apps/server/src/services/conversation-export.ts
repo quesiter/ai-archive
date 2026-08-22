@@ -177,6 +177,7 @@ export async function loadConversationExportData(input: {
       asc(conversationRevisions.conversationId),
       desc(sql`(${conversationRevisions.completeness} = 'complete')`),
       desc(conversationRevisions.capturedAt),
+      desc(conversationRevisions.createdAt),
     );
   const selectedRevisionByConversation = new Map<
     string,
@@ -326,7 +327,7 @@ export async function renderConversationXlsx(
   data: ConversationExportData,
 ): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = "AI Conversation Archive";
+  workbook.creator = "知言归藏";
   workbook.created = new Date(data.generatedAt);
   const worksheet = workbook.addWorksheet("对话记录", {
     views: [{ state: "frozen", ySplit: 1 }],

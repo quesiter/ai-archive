@@ -1,44 +1,41 @@
-# 中文文档总览
+# 知言归藏文档总览
 
-本文档集记录 `AI Conversation Archive` 在 2026-07-26 当前代码状态下的功能、设计与运维方式。项目仍处于测试阶段，文档以当前实现为准，不把历史升级日志当作唯一入口。
+> 汇智能之言，成项目之知。
+
+本文档集以 `V260822-4` 的可执行代码、数据库迁移和部署配置为准，只描述已经实现的能力。规划设想不混入当前需求、API、界面或运维说明；历史行为仅保留在变更历史中。
 
 ## 文档入口
 
-| 文档 | 用途 |
-| --- | --- |
-| [需求文档](REQUIREMENTS.md) | 描述产品目标、用户角色、功能需求、非功能需求、验收标准和已知边界。 |
-| [系统设计文档](SYSTEM-DESIGN.md) | 描述整体架构、采集链路、同步代理、AI 运行方式、队列、日志与安全设计。 |
-| [数据模型文档](DATA-MODEL.md) | 描述 PostgreSQL 表结构、核心关系、幂等键、归档版本和分析数据的存储方式。 |
-| [API 文档](API.md) | 描述 Web、设备、采集、导入、归类、报告、日志和设置接口。 |
-| [用户手册](USER-GUIDE.md) | 面向日常使用，说明后台、Chrome 插件、本地同步代理、导入、分类和报告如何操作。 |
-| [运维手册](OPERATIONS.md) | 面向部署维护，说明本地开发、NAS 部署、升级、备份恢复、日志排错和安全检查。 |
-| [变更历史](CHANGELOG.md) | 合并原 `UPDATE-*.md` 的版本更新记录。 |
-
-## 现有代码组成
-
-| 模块 | 路径 | 说明 |
+| 文档 | 读者与用途 | 事实来源 |
 | --- | --- | --- |
-| 服务端 | `apps/server` | Fastify API、PostgreSQL/Drizzle、pg-boss 队列、Worker、历史导入、AI 分析、邮件发送。 |
-| Web 后台 | `apps/web` | React 单用户管理后台，包含仪表盘、会话、项目、报告、导入、设备、日志和设置页面。 |
-| Chrome 插件 | `apps/extension` | Manifest V3 插件，在支持的 AI 网页中自动识别会话 ID，先轻量判断变化，再按完整或增量模式归档。 |
-| 本地同步代理 | `apps/openclaw-sync` | 读取本机 OpenClaw、Codex、Claude Code JSONL 会话文件，转换为统一采集协议并上传。 |
-| 共享协议 | `packages/contracts` | 采集快照、消息、分段、设备配对、知识抽取等 Zod Schema 与 TypeScript 类型。 |
-| 部署与脚本 | `deploy`、`scripts` | Docker Compose、备份、恢复、API 冒烟测试等脚本。 |
+| [项目需求文档](REQUIREMENTS.md) | 产品与研发；确认当前产品范围、验收口径和边界。 | Web/客户端行为、API、测试。 |
+| [系统设计文档](SYSTEM-DESIGN.md) | 研发与维护者；理解模块、数据流、任务编排、AI 和安全设计。 | 服务端、Worker、客户端源码。 |
+| [界面设计文档](UI-DESIGN.md) | 产品、设计与前端；核对 Web、扩展和同步客户端界面。 | `apps/web`、`apps/extension`、同步脚本。 |
+| [数据库设计文档](DATA-MODEL.md) | 后端与 DBA；核对表、关系、约束、幂等和生命周期。 | `schema.ts` 与 `0000`—`0011` 迁移。 |
+| [API 文档](API.md) | 前后端与集成方；调用当前已注册 HTTP 接口。 | `apps/server/src/routes`。 |
+| [用户手册](USER-GUIDE.md) | 管理员；完成登录、采集、同步、归类、知识、报告与脱敏操作。 | 当前 Web 与客户端。 |
+| [部署文档](DEPLOYMENT.md) | 部署人员；全新安装、反向代理、客户端发布和升级。 | Compose、Dockerfile、更新脚本。 |
+| [运维手册](OPERATIONS.md) | 运维人员；监控、迁移、备份恢复、排障与发布检查。 | 运行配置、脚本和队列实现。 |
+| [Windows 同步](WINDOWS-SYNC.md) | Windows 用户；安装便携同步包和后台计划任务。 | Windows 脚本。 |
+| [macOS 同步](MACOS-SYNC.md) | macOS 用户；安装便携同步包和 LaunchAgent。 | macOS 脚本。 |
+| [变更历史](CHANGELOG.md) | 所有人；追踪已发布版本变化。 | Git 历史与发布内容。 |
 
-## 当前支持的平台
+## 当前软件组成
 
-在线网页自动采集支持：ChatGPT、Gemini、Grok、腾讯元宝、MiniMax Agent、DeepSeek、千问、Kimi。
+| 组件 | 当前版本 | 说明 |
+| --- | --- | --- |
+| 服务端与 Web | `V260822-4` | 单镜像部署；app 自动迁移并提供 API/Web，worker 执行异步任务。 |
+| Chrome 插件 | `V260822-4` | 网页会话轻量检测、完整/增量采集和本地上传队列。 |
+| Windows/macOS 同步代理 | `V260822-4` | OpenClaw、Codex、Claude Code 本地文件扫描、监听和同步。 |
 
-本地同步支持：OpenClaw、Codex、Claude Code。
+在线网页采集支持 ChatGPT、Gemini、Grok、腾讯元宝、MiniMax Agent、DeepSeek、千问和 Kimi。本地同步支持 OpenClaw、Codex 和 Claude Code。历史 ZIP 导入支持 ChatGPT、Gemini Takeout 和 Chat Memo 已实现的平台格式。
 
-核心归档、搜索、历史导入和修订查看不依赖 OpenAI 兼容模型配置；模型仅用于可选的智能归类、知识抽取、报告和后续个人分析。
+核心归档、搜索、导出、历史导入、修订查看和备份恢复不依赖模型；项目归类、知识整理和报告需要配置 OpenAI 兼容模型。
 
-历史导入支持：ChatGPT 导出 ZIP、Gemini Takeout ZIP。其他平台没有稳定官方批量历史 API，当前主要通过电脑浏览器逐个打开会话补录。
+## 文档维护规则
 
-## 阅读建议
-
-第一次部署或升级时，先读 [运维手册](OPERATIONS.md)。
-
-要确认某个功能是否已经实现，先读 [需求文档](REQUIREMENTS.md) 和 [用户手册](USER-GUIDE.md)。
-
-要排查采集、分类、报告失败，优先读 [系统设计文档](SYSTEM-DESIGN.md) 的运行链路和 [API 文档](API.md) 的状态接口，再去后台对应业务页面和“日志”页面查看具体记录。
+1. API 增删以路由注册为准，接口变更必须同步 `API.md`。
+2. 表结构以迁移和 `schema.ts` 为准，不能只改 `DATA-MODEL.md`。
+3. Web 或客户端增加页面、状态或操作时，同步 `UI-DESIGN.md` 和 `USER-GUIDE.md`。
+4. 环境变量、端口、卷、升级或恢复方式变化时，同步部署与运维文档。
+5. 未实现、实验性或仅有构想的内容不得写成当前能力。

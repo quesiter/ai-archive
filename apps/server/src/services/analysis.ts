@@ -1637,14 +1637,20 @@ async function latestClassificationRevision(
         eq(conversationRevisions.completeness, "complete"),
       ),
     )
-    .orderBy(desc(conversationRevisions.capturedAt))
+    .orderBy(
+      desc(conversationRevisions.capturedAt),
+      desc(conversationRevisions.createdAt),
+    )
     .limit(1);
   if (complete) return complete;
   const [latest] = await db
     .select({ id: conversationRevisions.id, capturedAt: conversationRevisions.capturedAt })
     .from(conversationRevisions)
     .where(eq(conversationRevisions.conversationId, conversationId))
-    .orderBy(desc(conversationRevisions.capturedAt))
+    .orderBy(
+      desc(conversationRevisions.capturedAt),
+      desc(conversationRevisions.createdAt),
+    )
     .limit(1);
   return latest ?? null;
 }
@@ -3036,7 +3042,10 @@ export async function runAnalysis(
             isNull(conversations.deletedAt),
           ),
         )
-        .orderBy(desc(conversationRevisions.capturedAt));
+        .orderBy(
+          desc(conversationRevisions.capturedAt),
+          desc(conversationRevisions.createdAt),
+        );
       const newestByConversation = new Map<
         string,
         { revisionId: string; capturedAt: Date }

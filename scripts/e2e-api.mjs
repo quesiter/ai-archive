@@ -421,7 +421,7 @@ const summary = {
   duplicateImport: duplicateImport.duplicate,
   conversations: allConversations.length,
   dashboard: dashboard.counts,
-  webServed: rootResponse.status === 200 && rootHtml.includes("AI 会话档案"),
+  webServed: rootResponse.status === 200 && rootHtml.includes("知言归藏"),
   revokedStatus: revokedResponse.status,
 };
 console.log(JSON.stringify(summary, null, 2));

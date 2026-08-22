@@ -45,7 +45,7 @@ Register-ScheduledTask `
   -Trigger $trigger `
   -Settings $settings `
   -Principal $principal `
-  -Description "Runs AI Archive local conversation sync in the background after user logon." `
+  -Description "Zhiyan Guicang local conversation sync after user logon." `
   -Force | Out-Null
 
 Start-ScheduledTask -TaskName $TaskName

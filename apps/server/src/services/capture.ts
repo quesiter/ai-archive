@@ -274,6 +274,7 @@ async function latestBranchRevision(
     .orderBy(
       desc(sql`(${conversationRevisions.completeness} = 'complete')`),
       desc(conversationRevisions.capturedAt),
+      desc(conversationRevisions.createdAt),
     )
     .limit(1);
   return revision ?? null;
@@ -794,6 +795,7 @@ export async function latestRevisionId(
     .orderBy(
       desc(sql`(${conversationRevisions.completeness} = 'complete')`),
       desc(conversationRevisions.capturedAt),
+      desc(conversationRevisions.createdAt),
     )
     .limit(1);
   return revision?.id ?? null;

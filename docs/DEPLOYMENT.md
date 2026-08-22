@@ -1,6 +1,6 @@
-# 部署与使用
+# 知言归藏部署文档
 
-本文面向群晖 NAS、Chrome 插件、本地 Codex/OpenClaw 同步代理和数据备份恢复。当前服务端版本为 `V20260817`，Chrome 插件版本为 `V20260817`。
+本文面向群晖 NAS、Chrome 插件、Windows/macOS 本地同步代理和数据备份恢复。当前服务端、Web、Chrome 插件和同步代理版本均为 `V260822-4`。
 
 ## 1. 群晖 NAS 全新安装
 
@@ -9,7 +9,7 @@
 1. 上传源码包到 NAS：
 
 ```sh
-/volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
+/volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz
 ```
 
 2. 创建源码目录和数据目录：
@@ -23,7 +23,7 @@ mkdir -p /volume1/docker/ai-conversation-archive/data/imports/failed
 chown -R 1000:1000 /volume1/docker/ai-conversation-archive/data/imports
 chmod -R u+rwX,go-rwx /volume1/docker/ai-conversation-archive/data/imports
 cd /volume1/docker/ai-conversation-archive/source
-tar -xzf /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
+tar -xzf /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz
 ```
 
 3. 生成配置文件、数据库密码和主密钥：
@@ -55,6 +55,8 @@ docker compose --env-file .env ps
 curl -fsS http://127.0.0.1:18080/healthz
 ```
 
+健康响应中的 `version` 应为 `V260822-4`；app 与 postgres 应为 healthy，worker 应保持运行。
+
 5. 首次访问 Web 后台，创建管理员账号。系统会显示 TOTP Secret/URI，请立即加入验证器，之后用密码和六位验证码登录。
 
 ## 2. 反向代理与端口
@@ -80,16 +82,16 @@ curl -fsS http://127.0.0.1:18080/healthz
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz
 ```
 
-脚本会保留现有 `deploy/.env`，创建必要数据目录，尝试数据库备份，解压新版源码包，构建镜像，切换源码目录，强制重建 app/worker 容器，并检查 `/healthz` 返回的版本号。
+脚本会保留现有 `deploy/.env`，创建必要数据目录，尝试数据库备份，解压新版源码包，构建镜像，切换源码目录，强制重建 app/worker 容器，并检查 `/healthz` 返回的版本号。脚本会先尝试直接访问 Docker；若 NAS 账户只能执行免交互的 `sudo docker`，则自动切换到该方式。数据目录无法由宿主账户直接维护时，会复用本机已有的应用镜像以 root 容器完成 UID 1000 所需的目录创建和授权。
 
 测试环境如果确认不需要备份，可以跳过备份：
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
+SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz
 ```
 
 如果已经手动把源码覆盖到 `source` 目录，可以原地构建重启：
@@ -104,7 +106,7 @@ sh scripts/update-server.sh
 最新插件包：
 
 ```text
-release/ai-archiveextension-V20260817-chrome.zip
+release/ai-archiveextension-V260822-4-chrome.zip
 ```
 
 安装方式：
@@ -123,6 +125,7 @@ Chrome 不允许普通扩展自动固定到工具栏，也不允许扩展自行�
 支持的页面入口包括：
 
 - `chatgpt.com`
+- `chat.openai.com`
 - `gemini.google.com`
 - `grok.com`
 - `yuanbao.tencent.com`
@@ -130,7 +133,9 @@ Chrome 不允许普通扩展自动固定到工具栏，也不允许扩展自行�
 - `agent.minimaxi.com`
 - `chat.deepseek.com`
 - `qianwen.com`
+- `www.qianwen.com`
 - `www.kimi.com`
+- `kimi.com`
 
 扩展会贴在页面右上侧边，自动采集或上传时有轻微动效提示。未变化的会话只做轻量检查，不滚动页面、不扫描全量消息、不重复上传。
 
@@ -141,7 +146,7 @@ Chrome 不允许普通扩展自动固定到工具栏，也不允许扩展自行�
 公司 Windows 电脑推荐使用便携包：
 
 ```text
-release/ai-conversation-archive-windows-sync-V20260817.zip
+release/ai-conversation-archive-windows-sync-V260822-4.zip
 ```
 
 解压到任意目录后先双击 `sync-local-windows.bat` 完成首次配对。首次运行输入 Web 后台生成的 `OpenClaw/Codex 同步代理` 配对码。默认模式只导入近期安全范围并持续监听新增会话。
@@ -175,7 +180,7 @@ sync-local-windows.bat rebuild-only
 MacBook 上使用最新 macOS 同步包：
 
 ```text
-release/ai-conversation-archive-macos-sync-V20260817.tar.gz
+release/ai-conversation-archive-macos-sync-V260822-4.tar.gz
 ```
 
 解压后双击 `AI-Archive-Sync.command`。首次运行输入 Web 后台生成的 `OpenClaw/Codex 同步代理` 配对码；配对成功后脚本会询问是否安装后台同步。输入 `Y` 后会自动安装并启动 macOS LaunchAgent，之后登录系统会隐藏运行。
@@ -184,12 +189,15 @@ release/ai-conversation-archive-macos-sync-V20260817.tar.gz
 
 代理会读取 OpenClaw、Codex 和 Claude Code 的本地 JSONL 会话文件。它只上传会话内容，不读取模型密钥、Cookie、token 或 credential 文件。
 
+`V260822-4` 会合并扫描期间发生的文件变化，并在 Codex 文件 mtime 没有更新时使用实际观察时间记录后续修订；服务端也会按修订创建时间稳定选择最新答案。升级同步包后重新安装后台任务即可使用新代理，已有配对配置不需要重建。
+
 ## 6. 历史导入
 
 Web 后台“导入”页支持：
 
 - ChatGPT 官方数据导出 ZIP。
 - Gemini Takeout ZIP。
+- Chat Memo 多平台导出 ZIP（当前解析 ChatGPT、Gemini、元宝、DeepSeek、千问和豆包）。
 - 把 ZIP 放入 `IMPORT_INBOX` 目录，由 Worker 定时发现并入队。
 
 Grok、腾讯元宝、MiniMax、DeepSeek、千问、Kimi 等平台没有稳定官方批量历史 API，旧会话主要通过浏览器打开会话后由插件补录。
@@ -198,9 +206,13 @@ Grok、腾讯元宝、MiniMax、DeepSeek、千问、Kimi 等平台没有稳定�
 
 在“设置”页填写 OpenAI 兼容接口的 Base URL、API Key 和模型名，并点击“测试”确认可用。
 
-智能归类默认使用增量候选：只处理新会话、未归类、低置信度或最新修订晚于上次归类的会话。节能模式会尽量使用本地匹配和缓存，减少把大量会话重复发送给模型；完整重评需要在项目页手动选择。周报/月报会从已归类会话中抽取知识，再生成报告。知识数量为 0 通常表示还没有成功运行报告/知识抽取，或智能归类尚未完成。
+智能归类默认使用增量候选：只处理新会话、未归类、低置信度或最新修订晚于上次归类的会话。节能模式会尽量使用本地匹配和缓存，减少把大量会话重复发送给模型；完整重评需要在“分类结果”页手动选择。“项目知识”页可以单独重建中文知识，并回到原始消息核对依据。周报/月报会从已归类会话中抽取知识，再生成报告。
 
-模型不是归档核心链路依赖；没有配置模型时，采集、导入、同步、会话列表、搜索、修订查看和备份恢复仍可运行。
+默认所有 AI 请求至少间隔 82 秒。MiniMax Token Plan 用完时，系统读取错误或额度接口中的刷新时间，在刷新后增加 10 分钟缓冲再自动续跑；无法取得刷新时间时一小时后重试。启用夜间维护后，每天 Asia/Shanghai 22:00 依次运行增量归类和知识分析。
+
+模型不是归档核心链路依赖；没有配置模型时，采集、导入、同步、会话列表、搜索、修订查看、导出和备份恢复仍可运行。
+
+采集入口会在消息、快照哈希和搜索索引写入前对密码、密钥、Authorization、私钥、数据库连接串、带认证 URL 和 SSH/SFTP 登录信息打码。部署后建议在“设置 > 自定义脱敏规则”一键启用安全规则包；该操作也会创建历史数据清理任务。清理是不可逆操作，运行前应先完成数据库备份。
 
 ## 8. 备份与恢复
 

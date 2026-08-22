@@ -25,7 +25,7 @@ import {
 import { api, ApiError, jsonBody } from "./api.js";
 
 type UnknownRecord = Record<string, any>;
-const WEB_VERSION = "V260822-3";
+const WEB_VERSION = "V260822-4";
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -104,9 +104,9 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
   return (
     <main className="auth-shell">
       <section className="auth-card">
-        <div className="brand-mark">A</div>
-        <h1>AI 会话档案</h1>
-        <p className="muted">九个平台，一份属于你的项目知识。</p>
+        <div className="brand-mark">知</div>
+        <h1>知言归藏</h1>
+        <p className="muted">汇智能之言，成项目之知。</p>
         <ErrorBanner message={error} />
         {!status.data?.initialized ? (
           <>
@@ -156,7 +156,13 @@ function Shell({ children, onLogout }: { children: ReactNode; onLogout: () => vo
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="sidebar-brand"><span>A</span><strong>AI Archive</strong></div>
+        <div className="sidebar-brand">
+          <span>知</span>
+          <div className="sidebar-brand-copy">
+            <strong>知言归藏</strong>
+            <small>汇智能之言，成项目之知。</small>
+          </div>
+        </div>
         <nav>
           {navigation.map(([to, label, icon]) => (
             <NavLink key={to} to={to} end={to === "/"}>
@@ -2245,7 +2251,7 @@ function Imports() {
 
   return (
     <>
-      <PageHeader title="历史导入" subtitle="支持 ChatGPT 官方 ZIP 与 Gemini Takeout ZIP" />
+      <PageHeader title="历史导入" subtitle="支持 ChatGPT、Gemini Takeout 与 Chat Memo 多平台 ZIP" />
       <section className="panel">
         <form className="upload-box" onSubmit={upload}>
           <input type="file" name="file" accept=".zip,application/zip" required />

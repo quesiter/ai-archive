@@ -2,6 +2,16 @@
 
 本文件合并原 `docs/UPDATE-*.md` 的版本说明。具体部署、升级、备份和排错步骤统一查看 [运维手册](OPERATIONS.md)。
 
+## 2026-08-22 V260822-4：知言归藏品牌、Codex 最新修订与文档基线
+
+- 产品正式命名为“知言归藏”，标语为“汇智能之言，成项目之知。”；Web、登录页、Chrome 插件、本地同步终端、TOTP issuer、导出元数据和 README 同步更新。
+- 服务端选择最新修订时增加 `createdAt` 稳定并列排序，修复 Codex 多个修订 `capturedAt` 相同时旧问题修订遮挡后续助手答案的问题；会话详情、导出、仪表盘和分析使用同一规则。
+- 本地同步代理在扫描期间收到文件变化时合并一次后续扫描；Codex 已同步文件后续增长时使用实际观察时间，避免旧 mtime 继续制造同刻修订；Codex JSONL 严格按 LF 分行，兼容记录内部作为 JSON 空白的独立 CR 字符。
+- 新增界面设计文档，按当前代码补齐需求、API、数据库、系统设计、部署、运维与客户端文档；删除被系统设计文档完整覆盖的旧 `ARCHITECTURE.md`。
+- Web、服务端、Chrome 插件和同步代理版本更新为 `V260822-4`。
+
+发布包：`release/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz`、`release/ai-archiveextension-V260822-4-chrome.zip`、`release/ai-conversation-archive-windows-sync-V260822-4.zip`、`release/ai-conversation-archive-macos-sync-V260822-4.tar.gz`。
+
 ## 2026-08-22 V260822-3：入库脱敏与精确报告周期
 
 - 设置页补齐脱敏规则测试、启停和删除，并增加一键安全规则包及已有归档清理进度；网页采集、历史导入、Codex、OpenClaw 和 Claude Code 内容在快照哈希、搜索索引和消息正文入库前统一打码密码、密钥、私钥、数据库连接及 SSH/SFTP 登录信息，备份恢复同样执行入库脱敏。

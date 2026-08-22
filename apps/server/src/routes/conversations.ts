@@ -276,7 +276,10 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         .select()
         .from(conversationRevisions)
         .where(eq(conversationRevisions.conversationId, conversation.id))
-        .orderBy(desc(conversationRevisions.capturedAt));
+        .orderBy(
+          desc(conversationRevisions.capturedAt),
+          desc(conversationRevisions.createdAt),
+        );
       const sourceDeviceIds = Array.from(
         new Set(revisions.flatMap((revision) => revision.sourceDeviceId ? [revision.sourceDeviceId] : [])),
       );

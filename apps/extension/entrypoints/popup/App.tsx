@@ -147,7 +147,7 @@ export default function App() {
 
   return (
     <main>
-      <header><span className="logo">A</span><div><strong>AI 会话归档</strong><small>自动采集 · 全量可见分支</small></div></header>
+      <header><span className="logo">知</span><div><strong>知言归藏</strong><small>汇智能之言，成项目之知。</small></div></header>
       {!settings.deviceToken ? (
         <form onSubmit={(event) => void pair(event)}>
           <h2>连接归档服务</h2>

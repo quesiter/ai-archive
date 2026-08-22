@@ -168,7 +168,7 @@ rebuild_once() {
 
 print_header() {
   echo
-  echo "AI Conversation Archive - macOS local sync"
+  echo "知言归藏 - macOS 本地同步"
   echo "Folder : $SCRIPT_DIR"
   echo "Server : $SERVER_URL"
   echo "Codex  : $CODEX_ROOT"

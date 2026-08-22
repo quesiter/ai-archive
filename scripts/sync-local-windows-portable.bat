@@ -52,7 +52,7 @@ set "NODE_OPTIONS=--max-old-space-size=4096 %NODE_OPTIONS%"
 set "PAIRED_ON_THIS_RUN=0"
 
 echo.
-echo AI Conversation Archive - Windows portable local sync
+echo 知言归藏 - Windows 便携本地同步
 echo Folder : %ROOT%
 echo Server : %SERVER_URL%
 echo Codex  : %CODEX_ROOT%
@@ -173,7 +173,7 @@ pause
 exit /b 1
 
 :usage
-echo AI Conversation Archive Windows portable local sync
+echo 知言归藏 Windows 便携本地同步
 echo.
 echo Usage:
 echo   sync-local-windows.bat              Install or restart hidden background auto-sync.

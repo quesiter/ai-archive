@@ -5,7 +5,6 @@ import { createReadStream } from "node:fs";
 import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { createGunzip, gzip } from "node:zlib";
 import chokidar from "chokidar";
@@ -24,6 +23,11 @@ import {
   parseLocalJsonlDelta,
   parseOpenClawJsonl,
 } from "./parser.js";
+import {
+  createCoalescedRunner,
+  lfSeparatedLines,
+  observedCaptureTime,
+} from "./sync-runtime.js";
 
 const execFileAsync = promisify(execFile);
 const gzipAsync = promisify(gzip);
@@ -42,7 +46,7 @@ const SAFE_MAX_MESSAGES = 12_000;
 const SAFE_DELAY_MS = 750;
 const BYTES_PER_MIB = 1024 * 1024;
 const MAX_DECOMPRESSED_TRANSCRIPT_BYTES = 200 * BYTES_PER_MIB;
-const SYNC_AGENT_VERSION = "V20260817";
+const SYNC_AGENT_VERSION = "V260822-4";
 const TRANSCRIPT_IGNORE_PATTERNS = [
   "**/*.bak",
   "**/*.deleted",
@@ -351,11 +355,8 @@ async function parseCodexJsonlFile(source: TranscriptSource, capturedAt: Date) {
   const records: Array<Record<string, unknown>> = [];
   let pendingMalformedLine: number | null = null;
   let lineNumber = 0;
-  const reader = createInterface({
-    input: createReadStream(source.path, { encoding: "utf8" }),
-    crlfDelay: Infinity,
-  });
-  for await (const line of reader) {
+  const input = createReadStream(source.path, { encoding: "utf8" });
+  for await (const line of lfSeparatedLines(input)) {
     lineNumber += 1;
     if (!line.trim()) continue;
     if (pendingMalformedLine !== null) {
@@ -578,7 +579,11 @@ async function upload(
       provider: source.provider,
       path: source.path,
       content: tail,
-      capturedAt: metadata.mtime,
+      capturedAt: observedCaptureTime({
+        provider: source.provider,
+        fileModifiedAt: metadata.mtime,
+        hasPreviousSync: true,
+      }),
       triggerReason: "local_file_appended",
       base: {
         revisionId: previous.revisionId,
@@ -675,21 +680,26 @@ async function upload(
     stateOffset(previous) > 0 && metadata.size > stateOffset(previous)
       ? "local_file_appended"
       : "local_file_rewritten";
+  const capturedAt = observedCaptureTime({
+    provider: source.provider,
+    fileModifiedAt: metadata.mtime,
+    hasPreviousSync: typeof previous === "object",
+  });
   let snapshot: CaptureSnapshotV1;
   try {
     snapshot =
       source.provider === "codex"
-        ? await parseCodexJsonlFile(source, metadata.mtime)
+        ? await parseCodexJsonlFile(source, capturedAt)
         : source.provider === "claude_code"
           ? parseClaudeCodeJsonl({
               path: source.path,
               content,
-              capturedAt: metadata.mtime,
+              capturedAt,
             })
           : parseOpenClawJsonl({
               path: source.path,
               content,
-              capturedAt: metadata.mtime,
+              capturedAt,
             });
   } catch (error) {
     if (!(error instanceof EmptyOpenClawTranscriptError)) throw error;
@@ -962,22 +972,15 @@ async function run(args: string[]): Promise<void> {
   const options = parseSyncOptions(args);
   await logVersionHandshake(config.serverUrl);
   console.log(formatLimitSummary(options));
-  let running = false;
-  const scan = async () => {
-    if (running) return;
-    running = true;
-    try {
-      for (const source of await transcriptFiles(config, options)) {
-        await upload(source, config, state, options).catch((error) =>
-          console.error(`sync failed for ${source.provider}:${source.path}:\n${formatError(error)}`),
-        );
-        if (options.delayMs > 0) await delay(options.delayMs);
-      }
-      await reconcileOpenClawCli(state);
-    } finally {
-      running = false;
+  const scan = createCoalescedRunner(async () => {
+    for (const source of await transcriptFiles(config, options)) {
+      await upload(source, config, state, options).catch((error) =>
+        console.error(`sync failed for ${source.provider}:${source.path}:\n${formatError(error)}`),
+      );
+      if (options.delayMs > 0) await delay(options.delayMs);
     }
-  };
+    await reconcileOpenClawCli(state);
+  });
   if (options.skipInitialScan) {
     console.log("Initial and periodic scans skipped; only future filesystem changes will be watched.");
   } else {
@@ -1131,7 +1134,7 @@ async function pair(args: string[]): Promise<void> {
 }
 
 function printUsage(): void {
-  console.log(`AI Conversation Archive local sync ${SYNC_AGENT_VERSION}
+  console.log(`知言归藏本地同步 ${SYNC_AGENT_VERSION}
 
 Usage:
   ai-archive-openclaw-sync pair --server https://archive.example.com --code ABCD1234 [--openclaw-root /path/to/.openclaw] [--with-codex | --codex-root /path/to/.codex]

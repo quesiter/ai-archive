@@ -1,4 +1,4 @@
-# 运维手册
+# 知言归藏运维手册
 
 ## 1. 运行环境
 
@@ -8,7 +8,7 @@
 | --- | --- |
 | Node.js | 22 或更高 |
 | 包管理器 | pnpm 11 |
-| 数据库 | PostgreSQL |
+| 数据库 | PostgreSQL 17 |
 | 队列 | pg-boss，使用同一个 PostgreSQL |
 | 浏览器 | Chrome 或 Chromium 系浏览器 |
 | NAS | 群晖 DSM 7.2.2，Container Manager |
@@ -31,6 +31,7 @@
 | `IMPORT_INBOX` | `./data/imports/inbox` | 待处理导入目录。 |
 | `IMPORT_PROCESSED` | `./data/imports/processed` | 导入成功归档目录。 |
 | `IMPORT_FAILED` | `./data/imports/failed` | 导入失败归档目录。 |
+| `COMPONENT_RELEASE_DIR` | 自动发现 `release` | 设备页可下载客户端组件的发布目录。 |
 | `TZ` | `Asia/Shanghai` | Worker 定时任务时区。 |
 | `LOG_LEVEL` | `info` | 服务日志级别。 |
 | `WEB_DIST` | `../web/dist` | Web 静态文件目录。 |
@@ -86,13 +87,13 @@ curl -fsS http://127.0.0.1:18080/healthz
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz
 ```
 
 测试环境可跳过升级前数据库备份：
 
 ```sh
-SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
+SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz
 ```
 
 升级后检查：
@@ -104,14 +105,14 @@ docker compose --env-file .env logs --tail=120 app worker
 curl -fsS http://127.0.0.1:18080/healthz
 ```
 
-`/healthz` 应返回当前版本，例如 `V20260817`。如果健康检查版本仍是旧号，通常是 Docker 镜像缓存、反向代理指向旧容器，或没有强制重建 app/worker。
+`/healthz` 应返回当前版本 `V260822-4`。如果健康检查版本仍是旧号，通常是 Docker 镜像缓存、反向代理指向旧容器，或没有强制重建 app/worker。升级脚本兼容直接 Docker 权限和免交互 `sudo docker`；当宿主账户不能进入 UID 1000 的导入目录时，会通过本机应用镜像维护目录权限。
 
 ## 6. Chrome 插件运维
 
 最新插件包：
 
 ```text
-release/ai-archiveextension-V20260817-chrome.zip
+release/ai-archiveextension-V260822-4-chrome.zip
 ```
 
 升级插件：
@@ -129,7 +130,7 @@ Chrome 的无痕模式和工具栏固定不能由普通插件自动打开。插�
 Windows 便携包：
 
 ```text
-release/ai-conversation-archive-windows-sync-V20260817.zip
+release/ai-conversation-archive-windows-sync-V260822-4.zip
 ```
 
 Windows 后台运行：
@@ -144,7 +145,7 @@ sync-local-windows.bat uninstall
 macOS 同步包：
 
 ```text
-release/ai-conversation-archive-macos-sync-V20260817.tar.gz
+release/ai-conversation-archive-macos-sync-V260822-4.tar.gz
 ```
 
 默认配置文件：
@@ -212,8 +213,11 @@ Worker 负责：
 | `analysis-monthly` | 月报生成。 |
 | `classify-conversation` | 单会话归类。 |
 | `reclassify-unlocked` | 批量智能归类。 |
+| `rebuild-knowledge` | 项目知识重建。 |
+| `nightly-ai-maintenance` | 夜间增量归类与知识分析编排。 |
 | `import-archive` | 历史 ZIP 导入。 |
 | `email-report` | 报告邮件发送。 |
+| `redact-storage` | 历史敏感信息不可逆清理。 |
 
 定时任务：
 
@@ -222,6 +226,8 @@ Worker 负责：
 | 周报 | 每周一 07:30，使用 `TZ` 时区。 |
 | 月报 | 每月 1 日 08:00，使用 `TZ` 时区。 |
 | 自动重归类 | 每周日 06:15，需要开启 `classification.autoReclassify`。 |
+| 夜间智能维护 | 每天 22:00，需要开启 `ai.nightlyMaintenanceEnabled`；先增量归类，再知识分析。 |
+| 延迟报告恢复检查 | 每 5 分钟。 |
 | 导入目录扫描 | 每 5 分钟。 |
 
 分类、导入或报告一直不动时，优先检查 Worker 容器是否运行。批量智能归类默认先在数据库里筛增量候选，只处理新会话、未归类、低置信度和内容更新的会话；完整重评是显式操作。归类会分片续跑，续跑时使用首次筛出的固定候选列表，避免 offset 因已处理记录更新而跳过后续会话。如果某个 `background_tasks` 记录长时间没有进度更新，Worker 启动和任务状态接口会自动把它标记为失败，用户可在升级或修复模型配置后重新点击“智能归类”。历史导入会额外检查 PgBoss 中是否仍有对应的活跃 `import-archive` job：没有活跃 job 且源 ZIP 仍在 inbox 时自动重新入队，源文件缺失时标记失败。
@@ -235,6 +241,8 @@ OpenAI 兼容模型配置项：
 3. `llm.model`
 
 设置页提供“测试”按钮。测试成功后再运行分类、周报或月报。
+
+所有结构化 AI 请求共用进程级节流，默认起始间隔 82 秒。MiniMax Token Plan/速率限制会优先从错误或 `/v1/token_plan/remains` 获取五小时/周额度刷新时间，在刷新后增加 10 分钟缓冲并创建延迟续跑；无法查询刷新时间时一小时后重试。任务的 `stats` 中记录 `retryAt`、`quotaResetAt`、窗口和来源，Web 显示倒计时。不要把额度等待误判为 Worker 停止。
 
 常见失败：
 
@@ -269,9 +277,11 @@ docker compose --env-file .env logs --tail=200 postgres
 - 插件重复采集：检查是否已升级轻量变化检测，服务端是否返回 `incremental_base_mismatch`。
 - 元宝会话串号：确认 URL 为 `/chat/<app>/<conversation>`，后台 `externalSessionId` 应保存两段 ID。
 - 千问无法采集：确认 URL 为 `https://www.qianwen.com/chat/<id>` 或 `https://qianwen.com/chat/<id>`，并检查扩展权限。
+- Codex 只有问题没有答案：先在会话详情切换最新修订。`V260822-4` 会以修订创建时间解决同采集时间排序，合并扫描期间收到的文件变化，并按 LF 读取含独立 CR 空白的 JSONL；升级服务端和本地同步代理后，运行一次近期 `rebuild` 可补齐受影响会话。
 - 智能归类失败：先测试模型连接，再看 Worker、`classification.maxConversationChars` 和 `scope=classification` 错误日志。
 - 周报/月报失败：检查模型测试、报告运行状态、项目知识数量和 `scope=analysis level=error` 日志。
 - 导入任务不动：检查 Worker、ZIP 大小、重复导入、导入目录权限和 `scope=import` 日志。
+- Token Plan 等待过久：查看任务统计中的 `source`、`quotaResetAt` 和 `retryAt`；`source=fallback` 表示额度接口不可用，按一小时兜底。
 
 ## 13. 安全检查清单
 
@@ -291,6 +301,7 @@ docker compose --env-file .env logs --tail=200 postgres
 12. `EXTENSION_ORIGINS` 只包含当前发布扩展的固定 ID。
 13. 除可信内网模型/SMTP 外，保持 `ALLOW_PRIVATE_NETWORK_TARGETS=false`。
 14. app/worker 使用非 root 用户运行，导入数据目录只授予 UID 1000 所需读写权限；PostgreSQL 仅恢复官方入口脚本启动所需的 `CHOWN`、`DAC_OVERRIDE`、`FOWNER`、`SETGID`、`SETUID` 能力。
+15. 在设置页启用安全规则包，并在首次启用前完成数据库备份；历史清理完成后检查任务失败数为 0。
 
 ## 14. 发布包检查
 

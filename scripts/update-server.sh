@@ -3,11 +3,11 @@ set -eu
 
 usage() {
   cat <<'EOF'
-AI Conversation Archive server update
+知言归藏 server update
 
 Usage:
   sh scripts/update-server.sh
-  sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V20260817-clean-install.tar.gz
+  sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz
 
 Environment:
   APP_ROOT=/volume1/docker/ai-conversation-archive
@@ -62,12 +62,24 @@ env_value() {
   sed -n "s/^${key}=//p" "$file" | tail -n 1 | sed 's/^"//; s/"$//'
 }
 
+docker_cli() {
+  if docker info >/dev/null 2>&1; then
+    docker "$@"
+    return
+  fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+    sudo -n docker "$@"
+    return
+  fi
+  return 127
+}
+
 compose_with() {
   env_file=$1
   compose_file=$2
   shift 2
-  if docker compose version >/dev/null 2>&1; then
-    docker compose --env-file "$env_file" -f "$compose_file" "$@"
+  if docker_cli compose version >/dev/null 2>&1; then
+    docker_cli compose --env-file "$env_file" -f "$compose_file" "$@"
     return
   fi
   if command -v docker-compose >/dev/null 2>&1; then
@@ -139,16 +151,27 @@ ensure_data_dirs() {
   fallback_root=$2
   data_dir=$(env_value ARCHIVE_DATA_DIR "$env_file" || true)
   [ -n "$data_dir" ] || data_dir="$fallback_root/data"
-  mkdir -p \
-    "$data_dir/postgres" \
-    "$data_dir/imports/inbox" \
-    "$data_dir/imports/processed" \
-    "$data_dir/imports/failed"
-  if ! chown -R 1000:1000 "$data_dir/imports" 2>/dev/null; then
-    die "Cannot grant the non-root app user access to $data_dir/imports. Run this update as an account allowed to chown that directory."
+  if mkdir -p \
+      "$data_dir/postgres" \
+      "$data_dir/imports/inbox" \
+      "$data_dir/imports/processed" \
+      "$data_dir/imports/failed" 2>/dev/null \
+    && chown -R 1000:1000 "$data_dir/imports" 2>/dev/null \
+    && chmod -R u+rwX,go-rwx "$data_dir/imports" 2>/dev/null; then
+    log "Ensured data directories under $data_dir"
+    return
   fi
-  chmod -R u+rwX,go-rwx "$data_dir/imports"
-  log "Ensured data directories under $data_dir"
+
+  helper_image=${DATA_DIR_HELPER_IMAGE:-ai-conversation-archive:latest}
+  log "Direct data-directory maintenance is unavailable; using Docker image $helper_image."
+  if docker_cli image inspect "$helper_image" >/dev/null 2>&1 \
+    && docker_cli run --rm --user 0:0 --entrypoint sh \
+      -v "$data_dir:/archive-data" "$helper_image" -c \
+      'mkdir -p /archive-data/postgres /archive-data/imports/inbox /archive-data/imports/processed /archive-data/imports/failed && chown -R 1000:1000 /archive-data/imports && chmod -R u+rwX,go-rwx /archive-data/imports'; then
+    log "Ensured data directories under $data_dir with Docker."
+    return
+  fi
+  die "Cannot grant the non-root app user access to $data_dir/imports. Grant filesystem ownership or set DATA_DIR_HELPER_IMAGE to a locally available image."
 }
 
 run_backup() {

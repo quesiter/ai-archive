@@ -31,7 +31,7 @@ export async function bootstrapAdmin(input: {
   password: string;
 }): Promise<{ secret: string; otpauthUrl: string }> {
   const totp = new OTPAuth.TOTP({
-    issuer: "AI Conversation Archive",
+    issuer: "知言归藏",
     label: input.username,
     algorithm: "SHA1",
     digits: 6,
@@ -74,7 +74,7 @@ export async function login(input: {
     throw new Error("Invalid username, password, or TOTP code");
   }
   const totp = new OTPAuth.TOTP({
-    issuer: "AI Conversation Archive",
+    issuer: "知言归藏",
     label: user.username,
     algorithm: "SHA1",
     digits: 6,

@@ -165,7 +165,7 @@ function createFloatingIndicator(actions: {
     </style>
     <div class="shell">
       <section class="panel" role="status" hidden>
-        <div class="title"><span>AI 会话归档</span><span class="provider"></span></div>
+        <div class="title"><span>知言归藏</span><span class="provider"></span></div>
         <div class="status"><span class="status-text">待机</span></div>
         <div class="message">打开会话后自动检查变化。</div>
         <div class="meta">
@@ -176,7 +176,7 @@ function createFloatingIndicator(actions: {
         </div>
         <div class="actions"><button class="action retry" type="button">重新采集</button><button class="action secondary pause" type="button">暂停本站</button></div>
       </section>
-      <button class="toggle" type="button" aria-label="查看 AI 会话归档状态" aria-expanded="false"><span>A</span><span class="dot"></span></button>
+      <button class="toggle" type="button" aria-label="查看知言归藏采集状态" aria-expanded="false"><span>知</span><span class="dot"></span></button>
     </div>`;
 
   const panel = shadow.querySelector<HTMLElement>(".panel")!;
@@ -220,7 +220,7 @@ function createFloatingIndicator(actions: {
     last.textContent = lastState.updatedAt ? new Date(lastState.updatedAt).toLocaleString() : "-";
     pause.textContent = paused ? "恢复本站" : "暂停本站";
     retry.disabled = paused;
-    toggle.title = paused ? "本站已暂停" : `AI 会话归档：${statusLabels[lastState.status]}`;
+    toggle.title = paused ? "本站已暂停" : `知言归藏：${statusLabels[lastState.status]}`;
   }
 
   toggle.addEventListener("click", () => {

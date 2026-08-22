@@ -1,11 +1,11 @@
-# Windows 本地同步代理
+# 知言归藏 Windows 本地同步代理
 
-这个便携包用于把公司或其他 Windows 电脑上的本地 Codex、OpenClaw、Claude Code 会话同步到 AI Conversation Archive。
+这个便携包用于把 Windows 电脑上的本地 Codex、OpenClaw、Claude Code 会话同步到“知言归藏”。
 
 ## 便携包使用
 
 1. 在 Windows 电脑上安装 Node.js 22 或更新版本，并确认 `node` 在 `PATH` 中可用。
-2. 解压 `ai-conversation-archive-windows-sync-V20260817.zip` 到任意目录，例如 `C:\AIArchiveSync`。
+2. 解压 `ai-conversation-archive-windows-sync-V260822-4.zip` 到任意目录，例如 `C:\AIArchiveSync`。
 3. 在 Web 后台的设备页面生成 `OpenClaw/Codex 同步代理` 配对码。
 4. 双击 `sync-local-windows.bat`，首次运行时输入配对码。
 5. 脚本会自动安装并启动后台任务；以后不用再保留命令行窗口。
@@ -13,6 +13,8 @@
 ## 后台自启
 
 安装后会创建当前用户的计划任务 `AI Archive Local Sync`，每次登录后隐藏运行同步代理。任务会复用 `%USERPROFILE%\.config\ai-archive\openclaw-sync.json`，因此升级同步包或重新安装计划任务不需要重新配对。
+
+计划任务名与配置目录继续使用旧英文兼容标识，界面与终端品牌已更新为“知言归藏”。`V260822-4` 会在扫描期间收到文件变化时安排后续扫描，修正 Codex 文件 mtime 不变时的修订时间，并兼容 JSONL 记录内部的独立回车空白；升级后建议执行一次 `rebuild-only` 补齐近期会话，再重新安装后台任务。
 
 如果之后需要重新安装后台任务，可以双击运行：
 
