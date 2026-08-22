@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   AI_RATE_LIMIT_RETRY_DELAY_MS,
+  DEFAULT_AI_REQUEST_INTERVAL_SECONDS,
   MINIMAX_TOKEN_PLAN_RETRY_BUFFER_MS,
+  aiRequestPacingDelayMs,
   extractJson,
   fallbackAiRetrySchedule,
   isRetryableRateLimitError,
@@ -10,6 +12,15 @@ import {
 } from "../src/services/llm.js";
 
 describe("extractJson", () => {
+  it("paces the observed workload across five and a half hours", () => {
+    expect(DEFAULT_AI_REQUEST_INTERVAL_SECONDS).toBe(82);
+    expect((244 - 1) * DEFAULT_AI_REQUEST_INTERVAL_SECONDS).toBeGreaterThanOrEqual(
+      5.5 * 60 * 60,
+    );
+    expect(aiRequestPacingDelayMs(182_000, 100_000)).toBe(82_000);
+    expect(aiRequestPacingDelayMs(100_000, 182_000)).toBe(0);
+  });
+
   it("parses fenced JSON responses", () => {
     expect(extractJson("```json\n{\"ok\":true}\n```")).toEqual({ ok: true });
   });

@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { fetch } from "undici";
 import { z, ZodError } from "zod";
-import { getSetting } from "./settings.js";
+import { getBooleanSetting, getNumberSetting, getSetting } from "./settings.js";
 import { withPinnedNetworkDispatcher } from "./network-target.js";
 
 export interface LlmConfig {
@@ -20,8 +20,49 @@ const STRUCTURED_COMPLETION_TIMEOUT_MS = 120_000;
 const TEST_COMPLETION_TIMEOUT_MS = 30_000;
 export const AI_RATE_LIMIT_RETRY_DELAY_MS = 60 * 60_000;
 export const MINIMAX_TOKEN_PLAN_RETRY_BUFFER_MS = 10 * 60_000;
+export const DEFAULT_AI_REQUEST_INTERVAL_SECONDS = 82;
 const MINIMAX_TOKEN_PLAN_LOOKUP_TIMEOUT_MS = 10_000;
 const MAX_TOKEN_PLAN_RETRY_DELAY_MS = 8 * 24 * 60 * 60_000;
+const MAX_AI_REQUEST_INTERVAL_SECONDS = 60 * 60;
+
+let aiRequestPacingGate: Promise<void> = Promise.resolve();
+let nextAiRequestStartAt = 0;
+
+export function aiRequestPacingDelayMs(
+  nextStartAt: number,
+  now: number,
+): number {
+  if (!Number.isFinite(nextStartAt) || !Number.isFinite(now)) return 0;
+  return Math.max(0, Math.ceil(nextStartAt - now));
+}
+
+async function waitForAiRequestPacing(): Promise<void> {
+  const enabled = await getBooleanSetting("ai.pacingEnabled", true);
+  if (!enabled) return;
+  const intervalSeconds = await getNumberSetting(
+    "ai.requestIntervalSeconds",
+    DEFAULT_AI_REQUEST_INTERVAL_SECONDS,
+    { min: 0, max: MAX_AI_REQUEST_INTERVAL_SECONDS },
+  );
+  const intervalMs = Math.round(intervalSeconds * 1_000);
+  if (intervalMs <= 0) return;
+
+  let releaseGate: (() => void) | undefined;
+  const previousGate = aiRequestPacingGate;
+  aiRequestPacingGate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  await previousGate;
+  try {
+    const waitMs = aiRequestPacingDelayMs(nextAiRequestStartAt, Date.now());
+    if (waitMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+    }
+    nextAiRequestStartAt = Date.now() + intervalMs;
+  } finally {
+    releaseGate?.();
+  }
+}
 
 export type AiRetryWindow = "five_hour" | "weekly" | "rate_limit";
 export type AiRetryScheduleSource =
@@ -484,6 +525,7 @@ export async function completeStructured<T>(input: {
     };
     let response;
     try {
+      await waitForAiRequestPacing();
       response = await client.chat.completions.create(
         {
           ...baseRequest,
@@ -494,6 +536,7 @@ export async function completeStructured<T>(input: {
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (!/response_format|json_object|unsupported/i.test(message)) throw error;
+      await waitForAiRequestPacing();
       response = await client.chat.completions.create(
         baseRequest,
         { timeout: STRUCTURED_COMPLETION_TIMEOUT_MS },
@@ -524,6 +567,7 @@ export async function testLlmConnection(input: LlmConfigInput = {}): Promise<{
     };
     let response;
     try {
+      await waitForAiRequestPacing();
       response = await client.chat.completions.create(
         {
           ...request,
@@ -534,6 +578,7 @@ export async function testLlmConnection(input: LlmConfigInput = {}): Promise<{
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (!/max_tokens|unsupported|not support/i.test(message)) throw error;
+      await waitForAiRequestPacing();
       response = await client.chat.completions.create(
         request,
         { timeout: TEST_COMPLETION_TIMEOUT_MS },

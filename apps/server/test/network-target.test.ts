@@ -50,6 +50,13 @@ describe("outbound network target validation", () => {
     expect(() => validateSettingValue("smtp.host", "https://smtp.example.com")).toThrow(
       /hostname/,
     );
+    expect(validateSettingValue("ai.requestIntervalSeconds", "82")).toBe("82");
+    expect(() => validateSettingValue("ai.requestIntervalSeconds", "3601")).toThrow(
+      /between 0 and 3600/,
+    );
+    expect(() => validateSettingValue("ai.pacingEnabled", "sometimes")).toThrow(
+      /true or false/,
+    );
   });
 
   it("pins socket lookups to the already validated hostname and addresses", async () => {

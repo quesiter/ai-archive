@@ -12,6 +12,7 @@ export const queueNames = {
   classifyConversation: "classify-conversation",
   reclassifyUnlocked: "reclassify-unlocked",
   rebuildKnowledge: "rebuild-knowledge",
+  nightlyAiMaintenance: "nightly-ai-maintenance",
   importArchive: "import-archive",
   emailReport: "email-report",
 } as const;
@@ -26,6 +27,19 @@ export interface ReclassificationJobData {
 
 export interface KnowledgeRebuildJobData {
   taskId?: string;
+}
+
+export type NightlyAiMaintenanceStage =
+  | "classification"
+  | "wait_classification"
+  | "knowledge"
+  | "wait_knowledge";
+
+export interface NightlyAiMaintenanceJobData {
+  runKey: string;
+  stage: NightlyAiMaintenanceStage;
+  classificationTaskId?: string;
+  knowledgeTaskId?: string;
 }
 
 export interface AiQueueScheduleOptions {
@@ -147,9 +161,33 @@ export async function enqueueKnowledgeRebuild(
     {
       ...singletonOptions,
       ...(schedule?.startAfter ? { startAfter: schedule.startAfter } : {}),
-      expireInHours: 6,
+      // A paced full knowledge pass can legitimately span more than one day.
+      expireInHours: 72,
       retryLimit: AI_RETRY_LIMIT,
       retryDelay: AI_RETRY_DELAY_SECONDS,
+      retryBackoff: false,
+    },
+  );
+}
+
+export async function enqueueNightlyAiMaintenance(
+  input: NightlyAiMaintenanceJobData,
+  schedule?: AiQueueScheduleOptions,
+): Promise<string | null> {
+  const boss = await getBoss();
+  const taskKey = input.classificationTaskId ?? input.knowledgeTaskId ?? "start";
+  return boss.send(
+    queueNames.nightlyAiMaintenance,
+    { ...input, requestedAt: new Date().toISOString() },
+    {
+      ...(schedule?.startAfter ? { startAfter: schedule.startAfter } : {}),
+      singletonKey: scheduledSingletonKey(
+        `${input.runKey}:${input.stage}:${taskKey}`,
+        schedule,
+      ),
+      expireInHours: 48,
+      retryLimit: 12,
+      retryDelay: 300,
       retryBackoff: false,
     },
   );

@@ -917,6 +917,9 @@ Content-Type: application/json
   "llm.baseUrl": "https://api.example.com/v1",
   "llm.apiKey": "sk-...",
   "llm.model": "model-name",
+  "ai.pacingEnabled": "true",
+  "ai.requestIntervalSeconds": "82",
+  "ai.nightlyMaintenanceEnabled": "true",
   "classification.runMode": "economy",
   "classification.maxConversationChars": "8000"
 }
@@ -928,6 +931,9 @@ Content-Type: application/json
 llm.baseUrl
 llm.apiKey
 llm.model
+ai.pacingEnabled
+ai.requestIntervalSeconds
+ai.nightlyMaintenanceEnabled
 smtp.host
 smtp.port
 smtp.secure

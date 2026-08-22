@@ -11,13 +11,20 @@ import {
 } from "./services/analysis.js";
 import { sendReportEmailById } from "./services/email.js";
 import {
+  NIGHTLY_AI_MAINTENANCE_HOUR,
+  nightlyAiRunKey,
+  runNightlyAiMaintenance,
+} from "./services/nightly-ai.js";
+import {
   enqueueAnalysis,
   enqueueConversationClassification,
   enqueueKnowledgeRebuild,
+  enqueueNightlyAiMaintenance,
   enqueueUnlockedReclassification,
   getBoss,
   queueNames,
   type KnowledgeRebuildJobData,
+  type NightlyAiMaintenanceJobData,
   type ReclassificationJobData,
   stopBoss,
 } from "./services/queue.js";
@@ -133,6 +140,17 @@ await boss.work(
     }
   },
 );
+await boss.work(
+  queueNames.nightlyAiMaintenance,
+  { includeMetadata: true },
+  async (jobs) => {
+    const data = jobs[0]?.data as NightlyAiMaintenanceJobData | undefined;
+    if (!data?.runKey || !data.stage) {
+      throw new Error("Nightly AI maintenance job data is missing");
+    }
+    return runNightlyAiMaintenance(data);
+  },
+);
 await boss.work(queueNames.importArchive, { includeMetadata: true }, async (jobs) => {
   const job = jobs[0];
   const path = (job?.data as { path?: unknown } | undefined)?.path;
@@ -183,6 +201,19 @@ const analysisRetryCron = new Cron("*/5 * * * *", { timezone: config.TZ, protect
   await retryDeferredAnalysisRuns();
 });
 
+const nightlyAiMaintenanceCron = new Cron(
+  `0 ${NIGHTLY_AI_MAINTENANCE_HOUR} * * *`,
+  { timezone: config.TZ, protect: true },
+  async () => {
+    if (await getBooleanSetting("ai.nightlyMaintenanceEnabled", true)) {
+      await enqueueNightlyAiMaintenance({
+        runKey: nightlyAiRunKey(new Date(), config.TZ),
+        stage: "classification",
+      });
+    }
+  },
+);
+
 const inboxCron = new Cron("*/5 * * * *", { protect: true }, async () => {
   await scanImportInbox();
 });
@@ -193,6 +224,7 @@ async function shutdown(): Promise<void> {
   monthlyCron.stop();
   reclassificationCron.stop();
   analysisRetryCron.stop();
+  nightlyAiMaintenanceCron.stop();
   inboxCron.stop();
   await stopBoss();
   await closeDatabase();

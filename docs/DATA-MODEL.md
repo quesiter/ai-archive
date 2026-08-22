@@ -361,6 +361,9 @@ Web 后台登录会话表。
 | `llm.baseUrl` | OpenAI 兼容接口 Base URL。 |
 | `llm.apiKey` | 模型 API Key。 |
 | `llm.model` | 模型名。 |
+| `ai.pacingEnabled` | 是否启用所有 AI 调用共享节流，默认启用。 |
+| `ai.requestIntervalSeconds` | AI 调用起始最小间隔，默认 82 秒，范围 0 到 3600。 |
+| `ai.nightlyMaintenanceEnabled` | 是否每天 Asia/Shanghai 22:00 串行执行增量归类和项目知识分析，默认启用。 |
 | `smtp.*` | 邮件发送配置。 |
 | `reports.weeklyEnabled` | 周报定时开关。 |
 | `reports.monthlyEnabled` | 月报定时开关。 |

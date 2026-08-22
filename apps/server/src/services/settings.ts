@@ -20,7 +20,18 @@ const SETTING_LIMITS = {
   "smtp.password": 20_000,
   "smtp.from": 1_000,
   "smtp.to": 5_000,
+  "ai.requestIntervalSeconds": 4,
 } as const;
+
+const BOOLEAN_SETTING_KEYS = new Set([
+  "ai.pacingEnabled",
+  "ai.nightlyMaintenanceEnabled",
+  "reports.weeklyEnabled",
+  "reports.monthlyEnabled",
+  "classification.autoOnCapture",
+  "classification.autoReclassify",
+  "classification.reuseStable",
+]);
 
 export function validateSettingValue(key: string, rawValue: string): string {
   const value = rawValue.trim();
@@ -40,6 +51,15 @@ export function validateSettingValue(key: string, rawValue: string): string {
   }
   if (key === "smtp.secure" && value && !["true", "false"].includes(value)) {
     throw new Error("smtp.secure must be true or false");
+  }
+  if (BOOLEAN_SETTING_KEYS.has(key) && value && !["true", "false"].includes(value)) {
+    throw new Error(`${key} must be true or false`);
+  }
+  if (key === "ai.requestIntervalSeconds" && value) {
+    const seconds = Number(value);
+    if (!Number.isInteger(seconds) || seconds < 0 || seconds > 3_600) {
+      throw new Error("ai.requestIntervalSeconds must be an integer between 0 and 3600");
+    }
   }
   return value;
 }

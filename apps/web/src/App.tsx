@@ -25,7 +25,7 @@ import {
 import { api, ApiError, jsonBody } from "./api.js";
 
 type UnknownRecord = Record<string, any>;
-const WEB_VERSION = "V260822-1";
+const WEB_VERSION = "V260822-2";
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -2576,6 +2576,49 @@ function Settings() {
               />
             </label>
           </div>
+        </section>
+
+        <section className="panel">
+          <h2>Token Plan 共享调度</h2>
+          <p className="panel-subtitle">
+            根据最近 244 次调用耗尽五小时额度的实测结果，默认将 AI 调用起始间隔设为 82 秒，约用 5.5 小时完成同等调用量，为其他程序保留使用空间。
+          </p>
+          <div className="form-grid">
+            <label>
+              AI 调用节流
+              <select
+                name="ai.pacingEnabled"
+                defaultValue={settings["ai.pacingEnabled"] || "true"}
+              >
+                <option value="true">启用</option>
+                <option value="false">停用</option>
+              </select>
+            </label>
+            <label>
+              调用起始最小间隔（秒）
+              <input
+                type="number"
+                min={0}
+                max={3600}
+                step={1}
+                name="ai.requestIntervalSeconds"
+                defaultValue={settings["ai.requestIntervalSeconds"] || "82"}
+              />
+            </label>
+            <label>
+              每日夜间维护
+              <select
+                name="ai.nightlyMaintenanceEnabled"
+                defaultValue={settings["ai.nightlyMaintenanceEnabled"] || "true"}
+              >
+                <option value="true">每天 22:00 启用</option>
+                <option value="false">停用</option>
+              </select>
+            </label>
+          </div>
+          <p className="muted">
+            夜间维护按照“增量智能归类 → 项目知识分析”串行执行；遇到额度上限时会显示恢复时间并自动续跑。
+          </p>
         </section>
 
         <section className="panel">
