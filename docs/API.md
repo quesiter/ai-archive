@@ -42,7 +42,7 @@ Web 写操作同时受严格同源、SameSite Cookie 和全局速率限制保护
 GET /healthz
 ```
 
-不需要认证。数据库可用时返回 `{"ok":true,"version":"V2.0.0","time":"..."}`，不可用时返回 503 和 `ok:false`；所有响应同时设置 `X-AI-Archive-Version`。该接口不在 `/api/v1` 基础路径下。
+不需要认证。数据库可用时返回 `{"ok":true,"version":"V2.0.1","time":"..."}`，不可用时返回 503 和 `ok:false`；所有响应同时设置 `X-AI-Archive-Version`。该接口不在 `/api/v1` 基础路径下。
 
 ## 2. 认证接口
 
@@ -1134,7 +1134,7 @@ GET /api/v1/system/status
 {
   "collectedAt": "2026-08-22T05:30:00.000Z",
   "services": {
-    "app": { "online": true, "version": "V2.0.0", "uptimeSeconds": 3600 },
+    "app": { "online": true, "version": "V2.0.1", "uptimeSeconds": 3600 },
     "hostMonitor": { "online": true },
     "postgres": { "online": true }
   },

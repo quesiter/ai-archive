@@ -26,7 +26,7 @@ import { api, ApiError, jsonBody } from "./api.js";
 import { releaseNotes } from "./release-notes.js";
 
 type UnknownRecord = Record<string, any>;
-const WEB_VERSION = "V2.0.0";
+const WEB_VERSION = "V2.0.1";
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);

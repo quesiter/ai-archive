@@ -470,4 +470,4 @@ sync-local-windows.bat rebuild-only
 
 ### 13.6 Codex 只显示问题，没有答案
 
-先查看会话详情的版本下拉。旧版中 Codex 可能连续写入多个 `capturedAt` 相同的修订，页面因并列排序选择了最早修订；答案其实已经存在于后续修订。升级服务端和同步代理到 `V2.0.0` 后，页面会按修订创建时间稳定选择最新完整版本，客户端也不会丢弃扫描期间收到的变化。升级后在 Windows 运行 `sync-local-windows.bat rebuild-only`，或在 macOS 选择近期历史重建，以补齐近期会话。
+先查看会话详情的版本下拉。旧版中 Codex 可能连续写入多个 `capturedAt` 相同的修订，页面因并列排序选择了最早修订；答案其实已经存在于后续修订。升级服务端和同步代理到 `V2.0.1` 后，页面会按修订创建时间稳定选择最新完整版本，客户端也不会丢弃扫描期间收到的变化。升级后在 Windows 运行 `sync-local-windows.bat rebuild-only`，或在 macOS 选择近期历史重建，以补齐近期会话。

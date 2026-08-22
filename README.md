@@ -4,7 +4,7 @@
 
 “知言归藏”是个人自托管的跨平台 AI 会话归档与项目知识系统。它把网页 AI 平台和本地 AI 编程工具中的会话统一保存到 PostgreSQL，并在不影响原始归档的前提下提供项目归类、中文知识沉淀、周报、月报、检索、导出和备份恢复。
 
-当前发布版本：服务端、Web、Chrome 插件与本地同步代理统一为 `V2.0.0`。后续发布从 `V2.0.1` 起按补丁号递增。
+当前发布版本：服务端、Web、Chrome 插件与本地同步代理统一为 `V2.0.1`。后续发布继续按补丁号递增。
 
 ## 已实现能力
 
@@ -26,10 +26,10 @@
 
 | 包 | 路径 |
 | --- | --- |
-| NAS 服务端源码包 | `release/ai-conversation-archive-nas-V2.0.0-clean-install.tar.gz` |
-| Chrome 插件 | `release/ai-archiveextension-V2.0.0-chrome.zip` |
-| Windows 同步代理 | `release/ai-conversation-archive-windows-sync-V2.0.0.zip` |
-| macOS 同步代理 | `release/ai-conversation-archive-macos-sync-V2.0.0.tar.gz` |
+| NAS 服务端源码包 | `release/ai-conversation-archive-nas-V2.0.1-clean-install.tar.gz` |
+| Chrome 插件 | `release/ai-archiveextension-V2.0.1-chrome.zip` |
+| Windows 同步代理 | `release/ai-conversation-archive-windows-sync-V2.0.1.zip` |
+| macOS 同步代理 | `release/ai-conversation-archive-macos-sync-V2.0.1.tar.gz` |
 
 既有英文目录名、包名、环境变量和备份格式名属于兼容性标识，本次品牌更新不改变这些接口。
 
@@ -37,7 +37,7 @@ NAS 更新：
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.0-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.1-clean-install.tar.gz
 ```
 
 ## 文档

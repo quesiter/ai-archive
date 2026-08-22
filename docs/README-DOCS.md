@@ -2,7 +2,7 @@
 
 > 汇智能之言，成项目之知。
 
-本文档集以服务端、Web 和客户端 `V2.0.0` 的可执行代码、数据库迁移和部署配置为准，只描述已经实现的能力。规划设想不混入当前需求、API、界面或运维说明；历史行为仅保留在变更历史中。
+本文档集以服务端、Web 和客户端 `V2.0.1` 的可执行代码、数据库迁移和部署配置为准，只描述已经实现的能力。规划设想不混入当前需求、API、界面或运维说明；历史行为仅保留在变更历史中。
 
 ## 文档入口
 
@@ -24,9 +24,9 @@
 
 | 组件 | 当前版本 | 说明 |
 | --- | --- | --- |
-| 服务端与 Web | `V2.0.0` | 单镜像部署；app 自动迁移并提供 API/Web，worker 执行异步任务，host-monitor 通过只读 cgroup 汇总项目容器指标。 |
-| Chrome 插件 | `V2.0.0` | 网页会话轻量检测、完整/增量采集和本地上传队列。 |
-| Windows/macOS 同步代理 | `V2.0.0` | OpenClaw、Codex、Claude Code 本地文件扫描、监听和同步。 |
+| 服务端与 Web | `V2.0.1` | 单镜像部署；app 自动迁移并提供 API/Web，worker 执行异步任务，host-monitor 通过只读 cgroup 汇总项目容器指标。 |
+| Chrome 插件 | `V2.0.1` | 网页会话轻量检测、完整/增量采集和本地上传队列。 |
+| Windows/macOS 同步代理 | `V2.0.1` | OpenClaw、Codex、Claude Code 本地文件扫描、监听和同步。 |
 
 在线网页采集支持 ChatGPT、Gemini、Grok、腾讯元宝、MiniMax Agent、DeepSeek、千问和 Kimi。本地同步支持 OpenClaw、Codex 和 Claude Code。历史 ZIP 导入支持 ChatGPT、Gemini Takeout 和 Chat Memo 已实现的平台格式。
 
