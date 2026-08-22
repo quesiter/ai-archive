@@ -23,9 +23,10 @@ import {
   type Provider,
 } from "@ai-archive/contracts";
 import { api, ApiError, jsonBody } from "./api.js";
+import { releaseNotes } from "./release-notes.js";
 
 type UnknownRecord = Record<string, any>;
-const WEB_VERSION = "V260822-6";
+const WEB_VERSION = "V2.0.0";
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -170,9 +171,12 @@ function Shell({ children, onLogout }: { children: ReactNode; onLogout: () => vo
             </NavLink>
           ))}
         </nav>
-        <div className="sidebar-version" aria-label={`系统版本 ${WEB_VERSION}`}>
-          <span>系统版本</span>
-          <strong>{WEB_VERSION}</strong>
+        <div className="sidebar-meta">
+          <div className="sidebar-version" aria-label={`系统版本 ${WEB_VERSION}`}>
+            <span>系统版本</span>
+            <strong>{WEB_VERSION}</strong>
+          </div>
+          <NavLink className="sidebar-changelog-link" to="/changelog">更新记录</NavLink>
         </div>
         <button className="ghost" onClick={onLogout}>退出登录</button>
       </aside>
@@ -183,6 +187,40 @@ function Shell({ children, onLogout }: { children: ReactNode; onLogout: () => vo
 
 function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
   return <header className="page-header"><div><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div>{actions}</header>;
+}
+
+function ChangelogPage() {
+  return (
+    <>
+      <PageHeader
+        title="更新记录"
+        subtitle="依据发布记录与 Git 提交历史整理，按发布时间倒序展示。"
+        actions={<Link className="button-link secondary small" to="/">返回总览</Link>}
+      />
+      <section className="release-overview panel">
+        <div>
+          <span>当前版本</span>
+          <strong>{WEB_VERSION}</strong>
+        </div>
+        <p>后续发布采用语义化补丁版本递增：V2.0.1、V2.0.2……</p>
+      </section>
+      <div className="release-timeline">
+        {releaseNotes.map((note, index) => (
+          <article className="release-entry panel" key={`${note.date}-${note.version}`}>
+            <div className="release-marker" aria-hidden="true" />
+            <header>
+              <div className="release-meta">
+                <span className={`pill ${index === 0 ? "complete" : ""}`}>{note.version}</span>
+                <time dateTime={note.date}>{note.date}</time>
+              </div>
+              {note.title && <h2>{note.title}</h2>}
+            </header>
+            <div className="release-body"><ReactMarkdown>{note.body}</ReactMarkdown></div>
+          </article>
+        ))}
+      </div>
+    </>
+  );
 }
 
 function isActiveStatus(status: unknown): boolean {
@@ -3046,5 +3084,5 @@ function Settings() {
 export default function App() {
   const [authenticated,setAuthenticated]=useState<boolean|null>(null);const navigate=useNavigate();useEffect(()=>{void api("/api/v1/auth/me").then(()=>setAuthenticated(true)).catch((reason)=>setAuthenticated(reason instanceof ApiError&&reason.status===401?false:false));},[]);async function logout(){await api("/api/v1/auth/logout",{method:"POST"});setAuthenticated(false);navigate("/");}
   if(authenticated===null)return<Loading/>;if(!authenticated)return<AuthScreen onAuthenticated={()=>setAuthenticated(true)}/>;
-  return <Shell onLogout={()=>void logout()}><Routes><Route path="/" element={<Dashboard/>}/><Route path="/conversations" element={<Conversations/>}/><Route path="/conversations/:id" element={<ConversationDetail/>}/><Route path="/classification" element={<Projects/>}/><Route path="/knowledge" element={<KnowledgePage/>}/><Route path="/projects" element={<Navigate to="/classification" replace/>}/><Route path="/reports" element={<Reports/>}/><Route path="/reports/:id" element={<ReportDetail/>}/><Route path="/imports" element={<Imports/>}/><Route path="/devices" element={<Devices/>}/><Route path="/logs" element={<Logs/>}/><Route path="/settings" element={<Settings/>}/><Route path="*" element={<Navigate to="/" replace/>}/></Routes></Shell>;
+  return <Shell onLogout={()=>void logout()}><Routes><Route path="/" element={<Dashboard/>}/><Route path="/conversations" element={<Conversations/>}/><Route path="/conversations/:id" element={<ConversationDetail/>}/><Route path="/classification" element={<Projects/>}/><Route path="/knowledge" element={<KnowledgePage/>}/><Route path="/projects" element={<Navigate to="/classification" replace/>}/><Route path="/reports" element={<Reports/>}/><Route path="/reports/:id" element={<ReportDetail/>}/><Route path="/imports" element={<Imports/>}/><Route path="/devices" element={<Devices/>}/><Route path="/logs" element={<Logs/>}/><Route path="/settings" element={<Settings/>}/><Route path="/changelog" element={<ChangelogPage/>}/><Route path="*" element={<Navigate to="/" replace/>}/></Routes></Shell>;
 }

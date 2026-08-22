@@ -2,6 +2,15 @@
 
 本文件合并原 `docs/UPDATE-*.md` 的版本说明。具体部署、升级、备份和排错步骤统一查看 [运维手册](OPERATIONS.md)。
 
+## 2026-08-22 V2.0.0：统一版本体系与产品内更新记录
+
+- 服务端、Web、Chrome 插件、Windows/macOS 同步代理和共享协议统一使用 `2.0.0`；Web 与健康检查显示 `V2.0.0`。本次只是把日期型版本归并到稳定的产品版本线，功能与数据均不回退。
+- 后续发布固定按补丁号递增：`V2.0.1`、`V2.0.2`……；历史版本继续保留发布时的真实编号，便于核对旧安装包和 Git 提交。
+- Web 新增独立“更新记录”页面，按时间倒序展示从 2026-07-24 起可追溯版本的已实现内容；侧栏底部只增加一个小型入口，不占用主导航。
+- 客户端安装包统一重发为 `V2.0.0`；设备下载会优先选择新的语义化版本线，不会被数值更大的旧日期型文件名覆盖。
+
+发布包：`release/ai-conversation-archive-nas-V2.0.0-clean-install.tar.gz`、`release/ai-archiveextension-V2.0.0-chrome.zip`、`release/ai-conversation-archive-windows-sync-V2.0.0.zip`、`release/ai-conversation-archive-macos-sync-V2.0.0.tar.gz`。
+
 ## 2026-08-22 V260822-6：项目级资源与存储统计
 
 - 修正系统状态的监测口径：不再把整台 NAS 的 CPU、内存、Swap、磁盘和 inode 当作本项目用量。

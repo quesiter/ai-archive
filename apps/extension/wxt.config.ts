@@ -43,8 +43,8 @@ export default defineConfig({
     key: "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqVzNtkfScpEbGTjXMN5K/kttoKDDckV2iTBHhrCw3MvL7bmghrmlsblIJGZTV/mV6+K9DBXE6KL0zXrwjTXcmaYKQ7oD/yzfSxpjD7ZApQpMU8KdvdNfE0DFrUjXC5KvfYQFfKdz0RcEbotzKtY4yYvcs9umkDddpOlm3xpTvr638oSFWQ/SNTWSyesEtSYeOF74CUD3+LLWk+42C8Um31GF+e8tImlW5c5efdAKEkwaE6PcXvLmy7DBtUSswtkvjWXVRdiQekWst6ORbxll06lDBb4n3eRsNx/dbZdrGoESwHxEl6VtUSJo8QXYmkhijq4wxdlbFtMRe8UclbXghwIDAQAB",
     name: "知言归藏",
     description: "汇智能之言，成项目之知。自动归档当前打开的 AI 会话。",
-    version: "2026.8.22.4",
-    version_name: "V260822-4",
+    version: "2.0.0",
+    version_name: "V2.0.0",
     incognito: "split",
     permissions: ["storage", "alarms", "tabs"],
     optional_host_permissions: [

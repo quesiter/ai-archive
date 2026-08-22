@@ -61,6 +61,12 @@ for (let attempt = 0; attempt < 30; attempt += 1) {
   await new Promise((resolve) => setTimeout(resolve, 500));
 }
 
+const health = await expectOk(await fetch(`${base}/healthz`));
+const expectedVersion = process.env.E2E_EXPECTED_VERSION ?? "V2.0.0";
+if (health.version !== expectedVersion) {
+  throw new Error(`Expected server ${expectedVersion}, received ${String(health.version)}`);
+}
+
 const bootstrap = await expectOk(
   await fetch(`${base}/api/v1/auth/bootstrap`, {
     method: "POST",

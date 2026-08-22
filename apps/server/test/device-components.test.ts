@@ -46,6 +46,17 @@ describe("device component discovery", () => {
     ).not.toHaveProperty("absolutePath");
   });
 
+  it("prefers the current semantic version track over legacy date versions", async () => {
+    const root = await releaseRoot();
+    await Promise.all([
+      writeFile(join(root, "ai-archiveextension-V260822-4-chrome.zip"), "legacy"),
+      writeFile(join(root, "ai-archiveextension-V2.0.0-chrome.zip"), "current"),
+    ]);
+
+    const components = await discoverDeviceComponents(root);
+    expect(components.find((component) => component.id === "chrome")?.version).toBe("V2.0.0");
+  });
+
   it("returns unavailable entries for a missing release directory", async () => {
     const root = await releaseRoot();
     const missing = join(root, "missing");

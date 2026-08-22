@@ -32,7 +32,7 @@
 | 网页自动采集 | ChatGPT、Gemini、Grok、腾讯元宝、MiniMax Agent、DeepSeek、千问、Kimi。 |
 | 本地会话同步 | OpenClaw Session JSONL、Codex sessions JSONL、Codex archived sessions、Codex session index 标题、Claude Code 可配置 JSONL 根目录。 |
 | 历史导入 | ChatGPT 导出 ZIP、Gemini Takeout ZIP、Chat Memo 多平台 ZIP（已实现 ChatGPT、Gemini、元宝、DeepSeek、千问、豆包）。 |
-| 管理后台 | 总览、会话、分类结果、项目知识、报告、导入、设备、日志、设置。 |
+| 管理后台 | 总览、会话、分类结果、项目知识、报告、导入、设备、日志、设置，以及由侧栏小入口打开的独立更新记录。 |
 | AI 能力 | OpenAI 兼容接口测试、项目归类、知识抽取、周报、月报、知识状态合并。 |
 | 运维能力 | Docker Compose 部署、数据库迁移、组件下载、Web 业务备份、PostgreSQL 备份/恢复脚本、健康检查、操作日志。 |
 
@@ -222,6 +222,7 @@
 | OBS-011 | 系统状态页必须展示本项目容器汇总的 CPU、内存、Swap 和最近趋势；不得把整台 NAS 的资源使用率展示为项目使用率。项目资源达到 85%/95% 时分别展示 Warning/Critical。 |
 | OBS-012 | 系统状态页必须展示应用、容器监测与 PostgreSQL 可用性，以及数据库大小、连接数、活跃连接、最长查询和已记录的 Web 备份时间。 |
 | OBS-013 | 项目存储必须按归档数据库和导入文件的实际大小统计。未配置项目存储预算时只展示已用量，不展示容量百分比或磁盘容量告警。 |
+| OBS-014 | 系统必须提供独立更新记录页面，依据发布记录与 Git 历史按时间倒序逐版本展示已实现变化；入口不得占用主导航。 |
 
 ### 5.13 备份与恢复
 

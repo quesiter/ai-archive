@@ -94,13 +94,13 @@ curl -fsS http://127.0.0.1:18080/healthz
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-6-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.0-clean-install.tar.gz
 ```
 
 测试环境可跳过升级前数据库备份：
 
 ```sh
-SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-6-clean-install.tar.gz
+SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.0-clean-install.tar.gz
 ```
 
 升级后检查：
@@ -112,14 +112,14 @@ docker compose --env-file .env logs --tail=120 host-monitor app worker
 curl -fsS http://127.0.0.1:18080/healthz
 ```
 
-`/healthz` 应返回当前版本 `V260822-6`。如果健康检查版本仍是旧号，通常是 Docker 镜像缓存、反向代理指向旧容器，或没有强制重建 host-monitor/app/worker。升级脚本兼容直接 Docker 权限和免交互 `sudo docker`；当宿主账户不能进入 UID 1000 的导入目录时，会通过本机应用镜像维护目录权限。
+`/healthz` 应返回当前版本 `V2.0.0`。如果健康检查版本仍是旧号，通常是 Docker 镜像缓存、反向代理指向旧容器，或没有强制重建 host-monitor/app/worker。升级脚本兼容直接 Docker 权限和免交互 `sudo docker`；当宿主账户不能进入 UID 1000 的导入目录时，会通过本机应用镜像维护目录权限。
 
 ## 6. Chrome 插件运维
 
 最新插件包：
 
 ```text
-release/ai-archiveextension-V260822-4-chrome.zip
+release/ai-archiveextension-V2.0.0-chrome.zip
 ```
 
 升级插件：
@@ -137,7 +137,7 @@ Chrome 的无痕模式和工具栏固定不能由普通插件自动打开。插�
 Windows 便携包：
 
 ```text
-release/ai-conversation-archive-windows-sync-V260822-4.zip
+release/ai-conversation-archive-windows-sync-V2.0.0.zip
 ```
 
 Windows 后台运行：
@@ -152,7 +152,7 @@ sync-local-windows.bat uninstall
 macOS 同步包：
 
 ```text
-release/ai-conversation-archive-macos-sync-V260822-4.tar.gz
+release/ai-conversation-archive-macos-sync-V2.0.0.tar.gz
 ```
 
 默认配置文件：
@@ -285,7 +285,7 @@ docker compose --env-file .env logs --tail=200 postgres
 - 插件重复采集：检查是否已升级轻量变化检测，服务端是否返回 `incremental_base_mismatch`。
 - 元宝会话串号：确认 URL 为 `/chat/<app>/<conversation>`，后台 `externalSessionId` 应保存两段 ID。
 - 千问无法采集：确认 URL 为 `https://www.qianwen.com/chat/<id>` 或 `https://qianwen.com/chat/<id>`，并检查扩展权限。
-- Codex 只有问题没有答案：先在会话详情切换最新修订。`V260822-4` 会以修订创建时间解决同采集时间排序，合并扫描期间收到的文件变化，并按 LF 读取含独立 CR 空白的 JSONL；升级服务端和本地同步代理后，运行一次近期 `rebuild` 可补齐受影响会话。
+- Codex 只有问题没有答案：先在会话详情切换最新修订。`V2.0.0` 会以修订创建时间解决同采集时间排序，合并扫描期间收到的文件变化，并按 LF 读取含独立 CR 空白的 JSONL；升级服务端和本地同步代理后，运行一次近期 `rebuild` 可补齐受影响会话。
 - 智能归类失败：先测试模型连接，再看 Worker、`classification.maxConversationChars` 和 `scope=classification` 错误日志。
 - 周报/月报失败：检查模型测试、报告运行状态、项目知识数量和 `scope=analysis level=error` 日志。
 - 导入任务不动：检查 Worker、ZIP 大小、重复导入、导入目录权限和 `scope=import` 日志。
@@ -314,6 +314,8 @@ docker compose --env-file .env logs --tail=200 postgres
 16. host-monitor 不映射宿主端口、不挂载 Docker Socket，保持只读根文件系统、只读指标挂载和全部 capabilities 移除。
 
 ## 14. 发布包检查
+
+当前产品版本基线为 `V2.0.0`。后续每次发布只增加补丁号，即 `V2.0.1`、`V2.0.2`……；根包、服务端、Web、共享协议、Chrome Manifest 和同步代理版本必须在同一次发布中保持一致。每次发布都应在 `docs/CHANGELOG.md` 顶部新增日期、版本、主题和客观变更，该文件会直接构建到 Web 的独立更新记录页。
 
 每次交付至少包含：
 

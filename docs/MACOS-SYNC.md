@@ -5,7 +5,7 @@
 ## 首次使用
 
 1. 在 Web 后台的设备页面生成 `OpenClaw/Codex 同步代理` 配对码。
-2. 把 `ai-conversation-archive-macos-sync-V260822-4.tar.gz` 复制到 Mac。
+2. 把 `ai-conversation-archive-macos-sync-V2.0.0.tar.gz` 复制到 Mac。
 3. 解压后双击 `AI-Archive-Sync.command`。
 4. 输入配对码。
 5. 配对成功后输入 `Y` 安装后台同步。
@@ -20,7 +20,7 @@
 
 再次双击 `AI-Archive-Sync.command` 可以重新安装、前台运行、导入近期历史或卸载后台同步。
 
-`V260822-4` 会合并扫描期间发生的文件变化、稳定记录 Codex 后续修订，并兼容 JSONL 记录内部的独立回车空白。升级后可先选择近期历史重建，再重新安装 LaunchAgent；既有配对配置不需要删除。
+`V2.0.0` 会合并扫描期间发生的文件变化、稳定记录 Codex 后续修订，并兼容 JSONL 记录内部的独立回车空白。升级后可先选择近期历史重建，再重新安装 LaunchAgent；既有配对配置不需要删除。
 
 ## 默认路径
 

@@ -14,6 +14,7 @@ COPY pnpm-lock.yaml* ./
 RUN pnpm install --frozen-lockfile
 
 COPY packages packages
+COPY docs docs
 COPY apps/server apps/server
 COPY apps/web apps/web
 COPY release release

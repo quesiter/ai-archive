@@ -56,6 +56,26 @@ const COMPONENT_DEFINITIONS: ComponentDefinition[] = [
 
 type ResolvedComponent = DeviceComponentDownload & { absolutePath: string | null };
 
+function semanticVersion(value: string): number[] | null {
+  const match = /^V?(\d+)\.(\d+)\.(\d+)$/i.exec(value);
+  return match ? match.slice(1).map(Number) : null;
+}
+
+function compareVersions(left: string, right: string): number {
+  const leftSemantic = semanticVersion(left);
+  const rightSemantic = semanticVersion(right);
+  if (leftSemantic && rightSemantic) {
+    for (let index = 0; index < leftSemantic.length; index += 1) {
+      const difference = (leftSemantic[index] ?? 0) - (rightSemantic[index] ?? 0);
+      if (difference !== 0) return difference;
+    }
+    return 0;
+  }
+  if (leftSemantic) return 1;
+  if (rightSemantic) return -1;
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+}
+
 async function safeReleaseRoot(releaseDirectory: string): Promise<string | null> {
   try {
     return await realpath(resolve(releaseDirectory));
@@ -109,10 +129,7 @@ export async function discoverDeviceComponents(
         .filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate))
         .sort(
           (left, right) =>
-            right.version.localeCompare(left.version, undefined, {
-              numeric: true,
-              sensitivity: "base",
-            }) ||
+            compareVersions(right.version, left.version) ||
             right.modifiedAtMs - left.modifiedAtMs ||
             right.filename.localeCompare(left.filename),
         )[0];
