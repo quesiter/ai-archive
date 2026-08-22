@@ -492,7 +492,7 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .report-card { padding: 1.1rem 1.2rem; }
 .report-card h3 { margin: .2rem 0; }
 .report-card p { margin: 0; color: #536d73; }
-.report-body { padding: 2rem; max-width: 900px; line-height: 1.75; }
+.report-body { width: 100%; padding: 2rem; line-height: 1.75; }
 .report-summary { font-size: 1.1rem; border-left: 4px solid var(--mint); padding-left: 1rem; }
 .metric small { color: var(--muted); font-size: .72rem; }
 .project-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .95rem; margin-bottom: 1rem; }

@@ -2602,7 +2602,7 @@ const settingsSections = [
   { id: "classification", label: "项目与标签", hint: "自动整理与稳定结果复用", icon: "◇" },
   { id: "email", label: "邮件与报告", hint: "SMTP、周报与月报", icon: "✉" },
   { id: "backup", label: "备份与恢复", hint: "业务数据导入与导出", icon: "▤" },
-  { id: "redaction", label: "脱敏与安全", hint: "安全规则与历史清理", icon: "⌁" },
+  { id: "redaction", label: "脱敏与安全", hint: "安全规则与历史清理", icon: "⊘" },
   { id: "system", label: "系统状态", hint: "项目资源与 PostgreSQL", icon: "⌁" },
 ] as const;
 
