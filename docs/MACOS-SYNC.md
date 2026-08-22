@@ -5,7 +5,7 @@
 ## 首次使用
 
 1. 在 Web 后台的设备页面生成 `OpenClaw/Codex 同步代理` 配对码。
-2. 把 `ai-conversation-archive-macos-sync-V2.0.1.tar.gz` 复制到 Mac。
+2. 把 `ai-conversation-archive-macos-sync-V2.0.2.tar.gz` 复制到 Mac。
 3. 解压后双击 `AI-Archive-Sync.command`。
 4. 输入配对码。
 5. 配对成功后输入 `Y` 安装后台同步。
@@ -44,8 +44,10 @@
 ## 路径或服务器覆盖
 
 ```sh
-AI_ARCHIVE_SERVER="http://你的NAS-IP:18080" ./AI-Archive-Sync.command
+AI_ARCHIVE_SERVER="https://your-archive.example.com:18443" ./AI-Archive-Sync.command
 ```
+
+远程服务必须使用 HTTPS；同步代理只允许 `localhost`、`127.0.0.1` 或 `::1` 使用 HTTP，不接受通过局域网 IP 进行明文配对或同步。
 
 ```sh
 AI_ARCHIVE_CODEX_ROOT="/path/to/.codex" \

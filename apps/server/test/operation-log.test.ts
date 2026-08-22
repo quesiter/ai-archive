@@ -34,4 +34,23 @@ describe("operation log redaction", () => {
       "Bearer [REDACTED]",
     );
   });
+
+  it("redacts connection URLs, private keys, SSH commands, and quoted passwords", () => {
+    const result = redactLogText([
+      "postgresql://archive:super-secret@db.example/archive",
+      "https://admin:browser-secret@example.com/private",
+      "ssh deploy@example.com -p 2222",
+      'password="a secret with spaces"',
+      "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate-material\n-----END OPENSSH PRIVATE KEY-----",
+    ].join("\n"));
+    expect(result).not.toContain("super-secret");
+    expect(result).not.toContain("browser-secret");
+    expect(result).not.toContain("deploy@example.com");
+    expect(result).not.toContain("a secret with spaces");
+    expect(result).not.toContain("private-material");
+    expect(result).toContain("[DATABASE_URL]");
+    expect(result).toContain("[AUTHENTICATED_URL]");
+    expect(result).toContain("[SSH_LOGIN]");
+    expect(result).toContain("[PRIVATE_KEY]");
+  });
 });

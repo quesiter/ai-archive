@@ -23,6 +23,7 @@ import {
   getLatestBackgroundTask,
 } from "../services/background-tasks.js";
 import { enqueueStorageRedaction } from "../services/queue.js";
+import { safeStoredError } from "../services/operation-log.js";
 
 const ALLOWED_SETTINGS = new Set([
   "llm.baseUrl",
@@ -95,7 +96,7 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     } catch (error) {
       return reply.code(400).send({
         ok: false,
-        error: error instanceof Error ? error.message : "Model test failed",
+        error: safeStoredError(error),
       });
     }
   });

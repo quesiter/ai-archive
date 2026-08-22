@@ -409,6 +409,10 @@ app 另外用 `pg_database_size` 读取归档数据库实际大小，并递归�
 7. 插件不读取 Cookie，不上传 Cookie。
 8. 安全凭据在采集入库前脱敏，发往 LLM 的内容执行第二层隐私脱敏。
 9. 分析提示中明确把会话数据视为不可信输入，避免执行会话内嵌指令。
+10. API 与健康响应使用 `Cache-Control: no-store`；生产响应增加 HSTS，并统一设置 CSP、Permissions Policy、同源开启策略、防嵌入和 MIME 嗅探保护。
+11. 操作日志和后台错误摘要在持久化或写入运行日志前再次脱敏，覆盖数据库连接串、带认证 URL、私钥、SSH/SFTP 登录信息和密码密钥赋值。
+12. app、worker 和 host-monitor 使用非 root、只读根文件系统、`no-new-privileges` 并移除全部 Linux capabilities；app/worker 只保留导入卷和受限 `/tmp` 可写。
+13. 多阶段 Docker 构建只把服务端生产依赖、编译产物、迁移、Web 静态资源和客户端发布包复制到运行镜像；npm、corepack、TypeScript、Vite、esbuild 和测试工具不进入生产运行层。
 
 ## 6. 部署形态
 
@@ -424,7 +428,7 @@ flowchart LR
   Worker --> Postgres
 ```
 
-推荐只对外暴露 HTTPS 入口，不直接暴露 PostgreSQL、host-monitor、DSM 管理口或内部应用端口。host-monitor 只读访问 `/proc` 和 `/sys/fs/cgroup`，不访问 Docker Socket，也不读取 NAS 数据卷容量。
+推荐只对外暴露 HTTPS 入口，不直接暴露 PostgreSQL、host-monitor、DSM 管理口或内部应用端口。host-monitor 只读访问 `/proc` 和 `/sys/fs/cgroup`，不访问 Docker Socket，也不读取 NAS 数据卷容量；app 与 worker 的容器层同样只读，持久写入仅发生在明确挂载的数据卷中。运行镜像通过 `pnpm deploy --prod` 生成最小生产依赖集，并移除基础镜像自带但运行时不需要的 npm/corepack。
 
 ## 7. 失败处理
 

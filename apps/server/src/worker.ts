@@ -36,6 +36,7 @@ import {
 import { failStaleBackgroundTasks } from "./services/background-tasks.js";
 import { getBooleanSetting, getSetting } from "./services/settings.js";
 import { redactStoredArchive } from "./services/storage-redaction.js";
+import { safeStoredError } from "./services/operation-log.js";
 
 const boss = await getBoss();
 
@@ -52,13 +53,13 @@ async function runAnalysisJob(kind: "weekly" | "monthly") {
 }
 
 await failStaleBackgroundTasks("classification_rebuild").catch((error) => {
-  console.warn("Failed to mark stale classification tasks", error);
+  console.warn("Failed to mark stale classification tasks", safeStoredError(error));
 });
 await failStaleBackgroundTasks("knowledge_rebuild").catch((error) => {
-  console.warn("Failed to mark stale knowledge tasks", error);
+  console.warn("Failed to mark stale knowledge tasks", safeStoredError(error));
 });
 await failStaleBackgroundTasks("storage_redaction", 24 * 60 * 60_000).catch((error) => {
-  console.warn("Failed to mark stale storage redaction tasks", error);
+  console.warn("Failed to mark stale storage redaction tasks", safeStoredError(error));
 });
 
 await boss.work(queueNames.weekly, async () => runAnalysisJob("weekly"));

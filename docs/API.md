@@ -34,7 +34,7 @@
 
 `issues` 只在 Zod 校验失败等场景返回。
 
-Web 写操作同时受严格同源、SameSite Cookie 和全局速率限制保护；管理员初始化为 15 分钟最多 3 次，登录为 5 分钟最多 5 次，设备领取配对码为 10 分钟最多 10 次。除单接口覆盖外，全局限制为每个来源每分钟 300 次。
+Web 写操作同时受严格同源、SameSite Cookie 和全局速率限制保护；管理员初始化为 15 分钟最多 3 次，登录为 5 分钟最多 5 次，设备领取配对码为 10 分钟最多 10 次。除单接口覆盖外，全局限制为每个来源每分钟 300 次。所有 API 响应使用 `Cache-Control: no-store`；生产响应包含 HSTS，并统一设置 CSP、Permissions Policy、同源开启策略、防嵌入和 MIME 嗅探保护。
 
 ### 1.1 健康与版本
 
@@ -42,7 +42,7 @@ Web 写操作同时受严格同源、SameSite Cookie 和全局速率限制保护
 GET /healthz
 ```
 
-不需要认证。数据库可用时返回 `{"ok":true,"version":"V2.0.1","time":"..."}`，不可用时返回 503 和 `ok:false`；所有响应同时设置 `X-AI-Archive-Version`。该接口不在 `/api/v1` 基础路径下。
+不需要认证。数据库可用时返回 `{"ok":true,"version":"V2.0.2","time":"..."}`，不可用时返回 503 和 `ok:false`；所有响应同时设置 `X-AI-Archive-Version` 和 `Cache-Control: no-store`。该接口不在 `/api/v1` 基础路径下。
 
 ## 2. 认证接口
 
@@ -1134,7 +1134,7 @@ GET /api/v1/system/status
 {
   "collectedAt": "2026-08-22T05:30:00.000Z",
   "services": {
-    "app": { "online": true, "version": "V2.0.1", "uptimeSeconds": 3600 },
+    "app": { "online": true, "version": "V2.0.2", "uptimeSeconds": 3600 },
     "hostMonitor": { "online": true },
     "postgres": { "online": true }
   },

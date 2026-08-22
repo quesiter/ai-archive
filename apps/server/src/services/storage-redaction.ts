@@ -16,6 +16,7 @@ import {
   startBackgroundTask,
   updateBackgroundTask,
 } from "./background-tasks.js";
+import { safeStoredError } from "./operation-log.js";
 import {
   type CompiledCustomRedactionRule,
   loadEnabledCustomRedactionRules,
@@ -376,10 +377,7 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
     });
     return progress;
   } catch (error) {
-    await failBackgroundTask(
-      taskId,
-      error instanceof Error ? error.message : String(error),
-    );
+    await failBackgroundTask(taskId, safeStoredError(error));
     throw error;
   }
 }

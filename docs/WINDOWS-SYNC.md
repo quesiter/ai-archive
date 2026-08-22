@@ -5,7 +5,7 @@
 ## 便携包使用
 
 1. 在 Windows 电脑上安装 Node.js 22 或更新版本，并确认 `node` 在 `PATH` 中可用。
-2. 解压 `ai-conversation-archive-windows-sync-V2.0.1.zip` 到任意目录，例如 `C:\AIArchiveSync`。
+2. 解压 `ai-conversation-archive-windows-sync-V2.0.2.zip` 到任意目录，例如 `C:\AIArchiveSync`。
 3. 在 Web 后台的设备页面生成 `OpenClaw/Codex 同步代理` 配对码。
 4. 双击 `sync-local-windows.bat`，首次运行时输入配对码。
 5. 脚本会自动安装并启动后台任务；以后不用再保留命令行窗口。

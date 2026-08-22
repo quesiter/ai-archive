@@ -109,6 +109,9 @@ services:
       timeout: 5s
       retries: 5
     mem_limit: 512m
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -135,6 +138,9 @@ services:
       app:
         condition: service_healthy
     mem_limit: 512m
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     security_opt:
       - no-new-privileges:true
     cap_drop:

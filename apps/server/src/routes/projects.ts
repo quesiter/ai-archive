@@ -28,7 +28,7 @@ import {
   type ConversationExportFormat,
 } from "../services/conversation-export.js";
 import { mergeProjectIntoProject } from "../services/project-merge.js";
-import { writeOperationLog } from "../services/operation-log.js";
+import { safeStoredError, writeOperationLog } from "../services/operation-log.js";
 
 const ProjectInputSchema = z.object({
   name: z.string().min(1).max(200),
@@ -326,7 +326,10 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
             },
           });
         await enqueueConversationClassification(conversation.id).catch((error) =>
-          request.log.warn({ error }, "Failed to queue AI classification"),
+          request.log.warn(
+            { error: safeStoredError(error) },
+            "Failed to queue AI classification",
+          ),
         );
         return { ok: true, lockedByUser: false };
       }

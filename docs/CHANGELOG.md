@@ -2,6 +2,19 @@
 
 本文件合并原 `docs/UPDATE-*.md` 的版本说明。具体部署、升级、备份和排错步骤统一查看 [运维手册](OPERATIONS.md)。
 
+## 2026-08-22 V2.0.2：全量安全审计与运行时加固
+
+- 完成工作区依赖、敏感信息、认证授权、输入与文件处理、外部网络请求、日志、浏览器渲染和 Docker 配置的全量安全复核；`pnpm audit` 未发现已知依赖漏洞，当前及历史 Git 记录未发现测试夹具之外的密钥文件或高置信凭据。
+- 所有 API 与健康检查响应增加 `Cache-Control: no-store`；生产环境增加 HSTS，统一补充 Permissions Policy、Cross-Origin Opener Policy 和现代浏览器安全响应头。
+- 操作日志与后台任务异常摘要进一步打码数据库连接串、带认证 URL、私钥、SSH/SFTP 登录命令及带空格的引号密码；模型测试、备份流、任务恢复和分类入队异常不再原样输出错误对象。
+- app 与 worker 容器启用只读根文件系统，只保留导入数据卷和受限 `/tmp` 临时目录可写；继续使用非 root、`no-new-privileges` 和移除全部 Linux capabilities。
+- 统一生产镜像内生产依赖、编译产物、迁移清单、Web 静态资源与发布包的读取权限，保证非 root 进程在只读根文件系统下可以完成数据库迁移和启动。
+- 生产镜像改为仅安装服务端运行依赖，并移除 npm/corepack；镜像从约 224.6 MB 降至 98.1 MB，Trivy 复扫的可修复 High/Critical 漏洞由 53 个降为 0，镜像秘密扫描结果为 0。
+- 修正文档中的 macOS 远程同步示例，明确非本机地址必须使用 HTTPS。
+- 服务端、Web、Chrome 插件、Windows/macOS 同步代理和共享协议同步升级为 `V2.0.2`。
+
+发布包：`release/ai-conversation-archive-nas-V2.0.2-clean-install.tar.gz`、`release/ai-archiveextension-V2.0.2-chrome.zip`、`release/ai-conversation-archive-windows-sync-V2.0.2.zip`、`release/ai-conversation-archive-macos-sync-V2.0.2.tar.gz`。
+
 ## 2026-08-22 V2.0.1：更新记录排版与历史记录整理
 
 - 修正更新时间线中版本号、发布日期与更新摘要的文字基线，使三者在同一水平线上准确对齐。

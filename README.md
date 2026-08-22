@@ -4,7 +4,7 @@
 
 “知言归藏”是个人自托管的跨平台 AI 会话归档与项目知识系统。它把网页 AI 平台和本地 AI 编程工具中的会话统一保存到 PostgreSQL，并在不影响原始归档的前提下提供项目归类、中文知识沉淀、周报、月报、检索、导出和备份恢复。
 
-当前发布版本：服务端、Web、Chrome 插件与本地同步代理统一为 `V2.0.1`。后续发布继续按补丁号递增。
+当前发布版本：服务端、Web、Chrome 插件与本地同步代理统一为 `V2.0.2`。后续发布继续按补丁号递增。
 
 ## 已实现能力
 
@@ -16,7 +16,7 @@
 - 项目知识：从已归类会话提炼中文决策、需求、事实、想法、任务、风险、资源和待解问题，保留原始会话、修订及消息序号作为依据；支持项目级合并、去重和重建。
 - 报告：生成上一完整周和上一自然月的报告，周报使用准确的起止日期；报告页分别只展示最新一次周报和月报生成状态。
 - AI 额度治理：所有结构化 AI 调用共用可配置节流；识别 MiniMax Token Plan/速率限制，优先读取实际刷新时间，增加 10 分钟缓冲后自动续跑，无法读取时一小时后重试；每天 22:00 可自动串行执行增量归类和知识分析。
-- 安全：单用户密码与 TOTP 登录、设备配对与撤销、HTTPS/同源检查、敏感设置加密、网络目标校验、上传限额和速率限制。
+- 安全：单用户密码与 TOTP 登录、设备配对与撤销、HTTPS/同源检查、敏感设置加密、网络目标校验、上传限额和速率限制；认证 API 禁止缓存，生产响应启用 HSTS 与浏览器权限策略，运行容器使用只读根文件系统，生产镜像不包含构建工具与 npm/corepack。
 - 脱敏：密码、API Token、Authorization、私钥、数据库连接串、带认证 URL 和 SSH/SFTP 登录信息在消息入库前不可逆打码；支持自定义规则、一键安全规则包、规则预览和历史数据清理。
 - 运维：Docker Compose 部署、自动迁移、健康检查、业务备份导入导出、PostgreSQL 脚本备份恢复、操作日志和 API 冒烟测试；设置页通过只读 cgroup 汇总本项目容器的 CPU、内存和 Swap，并展示数据库与导入文件的实际项目存储占用、趋势、告警和 PostgreSQL 状态。
 
@@ -26,10 +26,10 @@
 
 | 包 | 路径 |
 | --- | --- |
-| NAS 服务端源码包 | `release/ai-conversation-archive-nas-V2.0.1-clean-install.tar.gz` |
-| Chrome 插件 | `release/ai-archiveextension-V2.0.1-chrome.zip` |
-| Windows 同步代理 | `release/ai-conversation-archive-windows-sync-V2.0.1.zip` |
-| macOS 同步代理 | `release/ai-conversation-archive-macos-sync-V2.0.1.tar.gz` |
+| NAS 服务端源码包 | `release/ai-conversation-archive-nas-V2.0.2-clean-install.tar.gz` |
+| Chrome 插件 | `release/ai-archiveextension-V2.0.2-chrome.zip` |
+| Windows 同步代理 | `release/ai-conversation-archive-windows-sync-V2.0.2.zip` |
+| macOS 同步代理 | `release/ai-conversation-archive-macos-sync-V2.0.2.tar.gz` |
 
 既有英文目录名、包名、环境变量和备份格式名属于兼容性标识，本次品牌更新不改变这些接口。
 
@@ -37,7 +37,7 @@ NAS 更新：
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.1-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.2-clean-install.tar.gz
 ```
 
 ## 文档

@@ -66,11 +66,20 @@ export async function buildApp(): Promise<FastifyInstance> {
     limits: { fileSize: 2 * 1024 * 1024 * 1024, files: 1 },
   });
 
-  app.addHook("onRequest", async (_request, reply) => {
+  app.addHook("onRequest", async (request, reply) => {
     reply.header("X-AI-Archive-Version", APP_VERSION);
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("Referrer-Policy", "same-origin");
     reply.header("X-Frame-Options", "DENY");
+    reply.header("X-XSS-Protection", "0");
+    reply.header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
+    reply.header("Cross-Origin-Opener-Policy", "same-origin");
+    if (config.NODE_ENV === "production") {
+      reply.header("Strict-Transport-Security", "max-age=31536000");
+    }
+    if (request.url.startsWith("/api/") || request.url === "/healthz") {
+      reply.header("Cache-Control", "no-store");
+    }
     reply.header(
       "Content-Security-Policy",
       "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'",

@@ -94,13 +94,13 @@ curl -fsS http://127.0.0.1:18080/healthz
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.1-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.2-clean-install.tar.gz
 ```
 
 测试环境可跳过升级前数据库备份：
 
 ```sh
-SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.1-clean-install.tar.gz
+SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.2-clean-install.tar.gz
 ```
 
 升级后检查：
@@ -112,14 +112,14 @@ docker compose --env-file .env logs --tail=120 host-monitor app worker
 curl -fsS http://127.0.0.1:18080/healthz
 ```
 
-`/healthz` 应返回当前版本 `V2.0.1`。如果健康检查版本仍是旧号，通常是 Docker 镜像缓存、反向代理指向旧容器，或没有强制重建 host-monitor/app/worker。升级脚本兼容直接 Docker 权限和免交互 `sudo docker`；当宿主账户不能进入 UID 1000 的导入目录时，会通过本机应用镜像维护目录权限。
+`/healthz` 应返回当前版本 `V2.0.2`。如果健康检查版本仍是旧号，通常是 Docker 镜像缓存、反向代理指向旧容器，或没有强制重建 host-monitor/app/worker。升级脚本兼容直接 Docker 权限和免交互 `sudo docker`；当宿主账户不能进入 UID 1000 的导入目录时，会通过本机应用镜像维护目录权限。
 
 ## 6. Chrome 插件运维
 
 最新插件包：
 
 ```text
-release/ai-archiveextension-V2.0.1-chrome.zip
+release/ai-archiveextension-V2.0.2-chrome.zip
 ```
 
 升级插件：
@@ -137,7 +137,7 @@ Chrome 的无痕模式和工具栏固定不能由普通插件自动打开。插�
 Windows 便携包：
 
 ```text
-release/ai-conversation-archive-windows-sync-V2.0.1.zip
+release/ai-conversation-archive-windows-sync-V2.0.2.zip
 ```
 
 Windows 后台运行：
@@ -152,7 +152,7 @@ sync-local-windows.bat uninstall
 macOS 同步包：
 
 ```text
-release/ai-conversation-archive-macos-sync-V2.0.1.tar.gz
+release/ai-conversation-archive-macos-sync-V2.0.2.tar.gz
 ```
 
 默认配置文件：
@@ -309,13 +309,14 @@ docker compose --env-file .env logs --tail=200 postgres
 11. `TRUST_PROXY` 只填写实际可信的代理跳数，不使用无边界的 `true`。
 12. `EXTENSION_ORIGINS` 只包含当前发布扩展的固定 ID。
 13. 除可信内网模型/SMTP 外，保持 `ALLOW_PRIVATE_NETWORK_TARGETS=false`。
-14. app/worker 使用非 root 用户运行，导入数据目录只授予 UID 1000 所需读写权限；PostgreSQL 仅恢复官方入口脚本启动所需的 `CHOWN`、`DAC_OVERRIDE`、`FOWNER`、`SETGID`、`SETUID` 能力。
+14. app/worker 使用非 root 和只读根文件系统运行，只有导入卷与受限 `/tmp` 可写；导入数据目录只授予 UID 1000 所需读写权限。生产镜像不包含 npm/corepack、esbuild、Vite、TypeScript 和测试工具。PostgreSQL 仅恢复官方入口脚本启动所需的 `CHOWN`、`DAC_OVERRIDE`、`FOWNER`、`SETGID`、`SETUID` 能力。
 15. 在设置页启用安全规则包，并在首次启用前完成数据库备份；历史清理完成后检查任务失败数为 0。
 16. host-monitor 不映射宿主端口、不挂载 Docker Socket，保持只读根文件系统、只读指标挂载和全部 capabilities 移除。
+17. 发布镜像执行依赖与镜像 CVE 扫描；High/Critical 可修复漏洞不为 0 时不得部署。
 
 ## 14. 发布包检查
 
-当前产品版本基线为 `V2.0.1`。后续每次发布只增加补丁号，即 `V2.0.2`、`V2.0.3`……；根包、服务端、Web、共享协议、Chrome Manifest 和同步代理版本必须在同一次发布中保持一致。每次发布都应在 `docs/CHANGELOG.md` 顶部新增日期、版本、主题和客观变更，该文件会直接构建到 Web 的独立更新记录页。
+当前产品版本基线为 `V2.0.2`。后续每次发布只增加补丁号，即 `V2.0.3`、`V2.0.4`……；根包、服务端、Web、共享协议、Chrome Manifest 和同步代理版本必须在同一次发布中保持一致。每次发布都应在 `docs/CHANGELOG.md` 顶部新增日期、版本、主题和客观变更，该文件会直接构建到 Web 的独立更新记录页。
 
 每次交付至少包含：
 

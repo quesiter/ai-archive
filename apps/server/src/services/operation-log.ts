@@ -14,6 +14,22 @@ const SENSITIVE_KEY = /(?:authorization|cookie|password|passwd|secret|token|api[
 
 export function redactLogText(value: string): string {
   return value
+    .replace(
+      /-----BEGIN ((?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY)-----[\s\S]*?-----END \1-----/gi,
+      "[PRIVATE_KEY]",
+    )
+    .replace(
+      /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqps?|mssql):\/\/[^\s"'<>]+/gi,
+      "[DATABASE_URL]",
+    )
+    .replace(
+      /\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^@\s/]+@[^\s"'<>]+/gi,
+      "[AUTHENTICATED_URL]",
+    )
+    .replace(
+      /\b(?:ssh|sftp)\s+(?:(?:-[A-Za-z]\s+\S+|-[A-Za-z]+)\s+)*[A-Za-z0-9._-]+@[A-Za-z0-9.:[\]-]+[^\r\n]*/gi,
+      "[SSH_LOGIN]",
+    )
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer [REDACTED]")
     .replace(/\b(?:sk|api|key|token)[-_][A-Za-z0-9_-]{12,}\b/gi, "[REDACTED]")
     .replace(
@@ -21,7 +37,7 @@ export function redactLogText(value: string): string {
       "$1[REDACTED]",
     )
     .replace(
-      /((?:authorization|password|secret|token|api[_-]?key)\s*[:=]\s*)["']?[^\s,"'}]+/gi,
+      /((?:authorization|password|secret|token|api[_-]?key)\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;，；&#]+)/gi,
       "$1[REDACTED]",
     );
 }
@@ -95,10 +111,7 @@ export async function writeOperationLog(input: OperationLogInput): Promise<void>
       metadata: normalizeLogMetadata(input.metadata ?? {}) as Record<string, unknown>,
     });
   } catch (error) {
-    console.warn(
-      "Failed to write operation log:",
-      error instanceof Error ? error.message : error,
-    );
+    console.warn("Failed to write operation log:", safeStoredError(error));
   }
 }
 

@@ -1,17 +1,17 @@
 # 知言归藏部署文档
 
-本文面向群晖 NAS、Chrome 插件、Windows/macOS 本地同步代理和数据备份恢复。当前服务端、Web、Chrome 插件和同步代理统一为 `V2.0.1`。
+本文面向群晖 NAS、Chrome 插件、Windows/macOS 本地同步代理和数据备份恢复。当前服务端、Web、Chrome 插件和同步代理统一为 `V2.0.2`。
 
 ## 0. 当前发布包校验值
 
-以下 SHA-256 对应 2026-08-22 从 `main` 提交 `a5867f4` 构建并完成部署核验的 V2.0.1 交付物。复制或上传后应先核对摘要，再执行安装或升级。
+以下 SHA-256 对应 2026-08-22 构建并完成内容核验的 V2.0.2 交付物。复制或上传后应先核对摘要，再执行安装或升级。
 
 | 交付物 | SHA-256 |
 | --- | --- |
-| `ai-conversation-archive-nas-V2.0.1-clean-install.tar.gz` | `61691A1D143A349D748E8A1B66368B6BD926D6AA29F41C142B4C9753916868D9` |
-| `ai-archiveextension-V2.0.1-chrome.zip` | `C74AACF24764A3EFC5C894F4B4175C6327A415E7F0D654ED7E8B429961B5297F` |
-| `ai-conversation-archive-windows-sync-V2.0.1.zip` | `2238863A17F9E3E7DD1F4FB3B3B0368D404B776EAD2C70EE9A5F76FFEBC37E75` |
-| `ai-conversation-archive-macos-sync-V2.0.1.tar.gz` | `049AB36CBA3FF23DB2310562A012AD730FD3CB34169350F4AE4FC65B355F7A3E` |
+| `ai-conversation-archive-nas-V2.0.2-clean-install.tar.gz` | `501EC7755E12B9B13D3B96EE77856EE9A625C622FA16C80DB3D33888235B03C1` |
+| `ai-archiveextension-V2.0.2-chrome.zip` | `2A3D739821A3194042880F4484F019E3D583B9FC705BC63027EAB63EBE9D9558` |
+| `ai-conversation-archive-windows-sync-V2.0.2.zip` | `A1E058F2E54D362FE1805F139577E1AF56F331E907D8EB8C61D133FDBC62F34B` |
+| `ai-conversation-archive-macos-sync-V2.0.2.tar.gz` | `1741BC54D44B1A729F52A7026668C09A45847C812526F2E8BEBE7F7ABCAE8465` |
 
 ## 1. 群晖 NAS 全新安装
 
@@ -20,7 +20,7 @@
 1. 上传源码包到 NAS：
 
 ```sh
-/volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.1-clean-install.tar.gz
+/volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.2-clean-install.tar.gz
 ```
 
 2. 创建源码目录和数据目录：
@@ -34,7 +34,7 @@ mkdir -p /volume1/docker/ai-conversation-archive/data/imports/failed
 chown -R 1000:1000 /volume1/docker/ai-conversation-archive/data/imports
 chmod -R u+rwX,go-rwx /volume1/docker/ai-conversation-archive/data/imports
 cd /volume1/docker/ai-conversation-archive/source
-tar -xzf /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.1-clean-install.tar.gz
+tar -xzf /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.2-clean-install.tar.gz
 ```
 
 3. 生成配置文件、数据库密码和主密钥：
@@ -54,7 +54,7 @@ sed -i "s|^APP_MASTER_KEY=.*|APP_MASTER_KEY=$APP_MASTER_KEY|" deploy/.env
 - `TRUST_PROXY` 默认 `false`。只有应用确实位于可信反向代理后时，才设置代理跳数，例如 `1`；不要直接设置为 `true` 信任任意转发头。
 - `EXTENSION_ORIGINS` 默认只允许官方固定 ID `chrome-extension://daolmhnfgimkgnnadojnmhkkjdolplfi`。自行重签 Chrome 扩展时，必须改为新扩展 ID；多个来源用英文逗号分隔。
 - `ALLOW_PRIVATE_NETWORK_TARGETS` 默认 `false`，此时 LLM 和 SMTP 会阻止回环、内网、链路本地、云元数据和保留地址，并将连接固定到已验证 DNS 结果。只有明确使用可信内网模型或 SMTP 时才设为 `true`。
-- app 和 worker 镜像以非 root 用户运行。NAS 上已有的 `data/imports` 目录必须允许容器中的 Node 用户（UID 1000）读写；如出现 `EACCES`，请在宿主机调整该目录权限后再启动。
+- app 和 worker 镜像以非 root 用户和只读根文件系统运行，只允许导入数据卷与受限 `/tmp` 写入；运行层只包含生产依赖，不包含 npm/corepack 和构建测试工具。构建过程会统一生产依赖、编译产物、迁移清单、Web 静态资源和发布包的只读访问权限，确保非 root 进程可读取。NAS 上已有的 `data/imports` 目录必须允许容器中的 Node 用户（UID 1000）读写；如出现 `EACCES`，请在宿主机调整该目录权限后再启动。
 - `host-monitor` 以非 root、只读根文件系统运行，仅只读挂载宿主 `/proc` 与 `/sys/fs/cgroup`，不挂载 Docker Socket、不读取 NAS 数据卷容量，也不发布宿主端口。不要为它额外增加特权或端口映射。
 - `ARCHIVE_CGROUP_PARENT` 默认 `ai-conversation-archive`，用于把本项目四个容器放入同一父 cgroup 并汇总实际资源用量。所有服务必须使用相同值。
 - `ARCHIVE_STORAGE_BUDGET_GB` 是可选的项目数据软预算。留空时页面只显示数据库与导入文件的实际用量，不计算容量百分比；填写正数后才启用项目存储预算告警。
@@ -69,7 +69,7 @@ docker compose --env-file .env ps
 curl -fsS http://127.0.0.1:18080/healthz
 ```
 
-健康响应中的 `version` 应为 `V2.0.1`；app、host-monitor 与 postgres 应为 healthy，worker 应保持运行。
+健康响应中的 `version` 应为 `V2.0.2`；app、host-monitor 与 postgres 应为 healthy，worker 应保持运行。
 
 5. 首次访问 Web 后台，创建管理员账号。系统会显示 TOTP Secret/URI，请立即加入验证器，之后用密码和六位验证码登录。
 
@@ -96,7 +96,7 @@ curl -fsS http://127.0.0.1:18080/healthz
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.1-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.2-clean-install.tar.gz
 ```
 
 脚本会保留现有 `deploy/.env`，创建必要数据目录，尝试数据库备份，解压新版源码包，构建镜像，切换源码目录，强制重建 app、worker 与 host-monitor 容器，并检查 `/healthz` 返回的版本号。脚本会先尝试直接访问 Docker；若 NAS 账户只能执行免交互的 `sudo docker`，则自动切换到该方式。数据目录无法由宿主账户直接维护时，会复用本机已有的应用镜像以 root 容器完成 UID 1000 所需的目录创建和授权。
@@ -105,7 +105,7 @@ sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversat
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.1-clean-install.tar.gz
+SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.2-clean-install.tar.gz
 ```
 
 如果已经手动把源码覆盖到 `source` 目录，可以原地构建重启：
@@ -120,7 +120,7 @@ sh scripts/update-server.sh
 最新插件包：
 
 ```text
-release/ai-archiveextension-V2.0.1-chrome.zip
+release/ai-archiveextension-V2.0.2-chrome.zip
 ```
 
 安装方式：
@@ -160,7 +160,7 @@ Chrome 不允许普通扩展自动固定到工具栏，也不允许扩展自行�
 公司 Windows 电脑推荐使用便携包：
 
 ```text
-release/ai-conversation-archive-windows-sync-V2.0.1.zip
+release/ai-conversation-archive-windows-sync-V2.0.2.zip
 ```
 
 解压到任意目录后先双击 `sync-local-windows.bat` 完成首次配对。首次运行输入 Web 后台生成的 `OpenClaw/Codex 同步代理` 配对码。默认模式只导入近期安全范围并持续监听新增会话。
@@ -194,7 +194,7 @@ sync-local-windows.bat rebuild-only
 MacBook 上使用最新 macOS 同步包：
 
 ```text
-release/ai-conversation-archive-macos-sync-V2.0.1.tar.gz
+release/ai-conversation-archive-macos-sync-V2.0.2.tar.gz
 ```
 
 解压后双击 `AI-Archive-Sync.command`。首次运行输入 Web 后台生成的 `OpenClaw/Codex 同步代理` 配对码；配对成功后脚本会询问是否安装后台同步。输入 `Y` 后会自动安装并启动 macOS LaunchAgent，之后登录系统会隐藏运行。

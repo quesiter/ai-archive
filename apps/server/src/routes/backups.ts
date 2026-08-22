@@ -5,6 +5,7 @@ import {
   restoreBackupArchive,
 } from "../services/backup.js";
 import { writeOperationLog } from "../services/operation-log.js";
+import { safeStoredError } from "../services/operation-log.js";
 import { MAX_BACKUP_COMPRESSED_BYTES } from "../services/backup.js";
 
 async function readFilePart(part: { file: AsyncIterable<Buffer | Uint8Array | string> }): Promise<Buffer> {
@@ -20,7 +21,10 @@ export async function backupRoutes(app: FastifyInstance): Promise<void> {
     if (!(await requireWebUser(request, reply))) return;
     const archive = await createBackupArchiveStream();
     archive.stream.once("error", (error) => {
-      request.log.error({ error }, "backup export stream failed");
+      request.log.error(
+        { error: safeStoredError(error) },
+        "backup export stream failed",
+      );
     });
     await writeOperationLog({
       scope: "system",
