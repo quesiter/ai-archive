@@ -1722,7 +1722,7 @@ function Projects() {
               ))}
             </div>
           )}
-          {classificationTask.error && !classificationDeferredMessage && (
+          {classificationTask.error && !classificationActive && !classificationDeferredMessage && (
             <p className="progress-error">{classificationTask.error}</p>
           )}
           {failureSamples.length > 0 && (

@@ -1,5 +1,5 @@
 import { and, desc, eq, inArray, lte, sql } from "drizzle-orm";
-import { db } from "../db.js";
+import { db, sqlClient } from "../db.js";
 import { backgroundTasks } from "../schema.js";
 import { safeStoredError, writeOperationLog } from "./operation-log.js";
 
@@ -8,6 +8,7 @@ export type BackgroundTaskKind = BackgroundTask["kind"];
 export type BackgroundTaskStatus = BackgroundTask["status"];
 
 const DEFAULT_STALE_BACKGROUND_TASK_MS = 30 * 60_000;
+const ACTIVE_BACKGROUND_TASK_STATUSES: BackgroundTaskStatus[] = ["queued", "running"];
 
 interface BackgroundTaskUpdate {
   status?: BackgroundTaskStatus;
@@ -23,6 +24,7 @@ interface BackgroundTaskUpdate {
 
 interface BackgroundTaskUpdateOptions {
   log?: boolean;
+  allowedStatuses?: BackgroundTaskStatus[];
 }
 
 function operationScope(kind: BackgroundTaskKind) {
@@ -55,10 +57,13 @@ export async function updateBackgroundTask(
   values: BackgroundTaskUpdate,
   options: BackgroundTaskUpdateOptions = {},
 ): Promise<BackgroundTask | null> {
+  const statusFilter = options.allowedStatuses?.length
+    ? inArray(backgroundTasks.status, options.allowedStatuses)
+    : undefined;
   const [task] = await db
     .update(backgroundTasks)
     .set({ ...values, updatedAt: new Date() })
-    .where(eq(backgroundTasks.id, id))
+    .where(statusFilter ? and(eq(backgroundTasks.id, id), statusFilter) : eq(backgroundTasks.id, id))
     .returning();
   if (task && options.log !== false && (values.status || values.message || values.error)) {
     await writeOperationLog({
@@ -77,6 +82,20 @@ export async function updateBackgroundTask(
     });
   }
   return task ?? null;
+}
+
+export async function touchBackgroundTask(id: string): Promise<boolean> {
+  const [task] = await db
+    .update(backgroundTasks)
+    .set({ updatedAt: new Date() })
+    .where(
+      and(
+        eq(backgroundTasks.id, id),
+        inArray(backgroundTasks.status, ACTIVE_BACKGROUND_TASK_STATUSES),
+      ),
+    )
+    .returning({ id: backgroundTasks.id });
+  return Boolean(task);
 }
 
 export async function getBackgroundTask(id: string): Promise<BackgroundTask | null> {
@@ -111,26 +130,64 @@ export async function failStaleBackgroundTasks(
 ): Promise<BackgroundTask[]> {
   const now = new Date();
   const cutoff = new Date(now.getTime() - olderThanMs);
-  const staleTasks = await db
-    .update(backgroundTasks)
-    .set({
-      status: "failed",
-      message: "任务运行超时或 Worker 已重启，已自动标记失败。",
-      error: "任务长时间没有进度更新，请重新运行。",
-      completedAt: now,
-      updatedAt: now,
-    })
+  const staleCandidates = await db
+    .select()
+    .from(backgroundTasks)
     .where(
       and(
         eq(backgroundTasks.kind, kind),
-        inArray(backgroundTasks.status, ["queued", "running"]),
+        inArray(backgroundTasks.status, ACTIVE_BACKGROUND_TASK_STATUSES),
         lte(backgroundTasks.updatedAt, cutoff),
         sql`coalesce(${backgroundTasks.stats}->>'stage', '') <> 'deferred'`,
       ),
-    )
-    .returning();
+    );
+  if (!staleCandidates.length) return [];
+
+  let liveTaskIds: Set<string>;
+  try {
+    const liveJobs = await sqlClient`
+      select distinct data->>'taskId' as task_id
+      from pgboss.job
+      where state in ('created', 'retry', 'active')
+        and data->>'taskId' is not null
+    `;
+    liveTaskIds = new Set(
+      (liveJobs as Array<{ task_id?: unknown }>)
+        .map((job) => job.task_id)
+        .filter((taskId): taskId is string => typeof taskId === "string" && taskId.length > 0),
+    );
+  } catch {
+    // If queue state cannot be verified, keep the task recoverable instead of
+    // risking a false terminal transition while its Worker job is still alive.
+    return [];
+  }
+
+  const staleTasks: BackgroundTask[] = [];
+  for (const candidate of staleCandidates) {
+    if (liveTaskIds.has(candidate.id)) continue;
+    const [task] = await db
+      .update(backgroundTasks)
+      .set({
+        status: "failed",
+        message: "任务运行超时或 Worker 已重启，已自动标记失败。",
+        error: "任务长时间没有进度更新，请重新运行。",
+        completedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(backgroundTasks.id, candidate.id),
+          inArray(backgroundTasks.status, ACTIVE_BACKGROUND_TASK_STATUSES),
+          lte(backgroundTasks.updatedAt, cutoff),
+          sql`coalesce(${backgroundTasks.stats}->>'stage', '') <> 'deferred'`,
+        ),
+      )
+      .returning();
+    if (task) staleTasks.push(task);
+  }
 
   for (const task of staleTasks) {
+    const candidate = staleCandidates.find((item) => item.id === task.id);
     await writeOperationLog({
       scope: operationScope(task.kind),
       level: "error",
@@ -143,7 +200,7 @@ export async function failStaleBackgroundTasks(
         processedCount: task.processedCount,
         succeededCount: task.succeededCount,
         failedCount: task.failedCount,
-        staleUpdatedAt: task.updatedAt.toISOString(),
+        staleUpdatedAt: (candidate?.updatedAt ?? task.updatedAt).toISOString(),
       },
     });
   }
@@ -156,38 +213,51 @@ export async function startBackgroundTask(
   totalCount: number,
   message: string,
 ): Promise<BackgroundTask | null> {
-  return updateBackgroundTask(id, {
-    status: "running",
-    totalCount,
-    processedCount: 0,
-    succeededCount: 0,
-    failedCount: 0,
-    message,
-    error: null,
-    stats: {},
-    completedAt: null,
-  });
+  return updateBackgroundTask(
+    id,
+    {
+      status: "running",
+      totalCount,
+      processedCount: 0,
+      succeededCount: 0,
+      failedCount: 0,
+      message,
+      error: null,
+      stats: {},
+      completedAt: null,
+    },
+    { allowedStatuses: ACTIVE_BACKGROUND_TASK_STATUSES },
+  );
 }
 
 export async function completeBackgroundTask(
   id: string,
   values: Omit<BackgroundTaskUpdate, "status" | "completedAt">,
 ): Promise<BackgroundTask | null> {
-  return updateBackgroundTask(id, {
-    ...values,
-    status: "completed",
-    completedAt: new Date(),
-  });
+  return updateBackgroundTask(
+    id,
+    {
+      ...values,
+      status: "completed",
+      error: null,
+      completedAt: new Date(),
+    },
+    { allowedStatuses: ACTIVE_BACKGROUND_TASK_STATUSES },
+  );
 }
 
 export async function failBackgroundTask(
   id: string,
   error: string,
 ): Promise<BackgroundTask | null> {
-  return updateBackgroundTask(id, {
-    status: "failed",
-    error: safeStoredError(error),
-    message: "任务失败",
-    completedAt: new Date(),
-  });
+  return updateBackgroundTask(
+    id,
+    {
+      status: "failed",
+      error: safeStoredError(error),
+      message: "任务失败",
+      completedAt: new Date(),
+    },
+    { allowedStatuses: ACTIVE_BACKGROUND_TASK_STATUSES },
+  );
 }

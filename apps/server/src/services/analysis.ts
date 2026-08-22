@@ -27,6 +27,7 @@ import {
   failBackgroundTask,
   getBackgroundTask,
   startBackgroundTask,
+  touchBackgroundTask,
   updateBackgroundTask,
 } from "./background-tasks.js";
 import {
@@ -988,15 +989,22 @@ export async function reclassifyUnlockedConversations(
   let failed = priorTask?.failedCount ?? 0;
   let classified = Number(priorTask?.stats?.classified ?? 0);
   let tagAssignments = Number(priorTask?.stats?.tagAssignments ?? 0);
+  const currentResult = () => ({
+    attempted: candidates.length,
+    classified,
+    failed,
+    tagAssignments,
+  });
   if (taskId && processed === 0) {
-    await startBackgroundTask(
+    const started = await startBackgroundTask(
       taskId,
       candidates.length,
       candidates.length
         ? "正在整理会话的主项目与标签"
         : "没有需要处理的新增或变化会话",
     );
-    await updateBackgroundTask(
+    if (!started) return currentResult();
+    const initialized = await updateBackgroundTask(
       taskId,
       {
         stats: {
@@ -1007,8 +1015,9 @@ export async function reclassifyUnlockedConversations(
           mode: options.mode,
         },
       },
-      { log: false },
+      { log: false, allowedStatuses: ["queued", "running"] },
     );
+    if (!initialized) return currentResult();
   }
   const chunkEnd = taskId
     ? Math.min(candidates.length, processed + RECLASSIFICATION_CHUNK_MAX_ITEMS)
@@ -1016,6 +1025,7 @@ export async function reclassifyUnlockedConversations(
   for (let index = processed; index < chunkEnd; index += 1) {
     const row = candidates[index];
     if (!row) break;
+    if (taskId && !(await touchBackgroundTask(taskId))) return currentResult();
     try {
       const result = await classifyConversation(row.id, options.mode);
       if (!result.skipped) {
@@ -1028,24 +1038,30 @@ export async function reclassifyUnlockedConversations(
       if (isRetryableRateLimitError(error)) {
         const schedule = await resolveAiRetrySchedule(error);
         if (taskId) {
-          await updateBackgroundTask(taskId, {
-            status: "queued",
-            totalCount: candidates.length,
-            processedCount: processed,
-            succeededCount: succeeded,
-            failedCount: failed,
-            error: safeStoredError(error),
-            message: deferredAiMessage(schedule),
-            stats: {
-              classified,
-              tagAssignments,
-              candidateReasons,
-              scope,
-              mode: options.mode,
-              resumeOffset: processed,
-              ...deferredAiStats(schedule),
+          const deferred = await updateBackgroundTask(
+            taskId,
+            {
+              status: "queued",
+              totalCount: candidates.length,
+              processedCount: processed,
+              succeededCount: succeeded,
+              failedCount: failed,
+              error: safeStoredError(error),
+              message: deferredAiMessage(schedule),
+              completedAt: null,
+              stats: {
+                classified,
+                tagAssignments,
+                candidateReasons,
+                scope,
+                mode: options.mode,
+                resumeOffset: processed,
+                ...deferredAiStats(schedule),
+              },
             },
-          });
+            { allowedStatuses: ["queued", "running"] },
+          );
+          if (!deferred) return currentResult();
         }
         throw new DeferredAiRateLimitError(error, schedule);
       }
@@ -1053,7 +1069,7 @@ export async function reclassifyUnlockedConversations(
       processed += 1;
     }
     if (taskId && (processed % 5 === 0 || processed === chunkEnd)) {
-      await updateBackgroundTask(
+      const progressTask = await updateBackgroundTask(
         taskId,
         {
           status: "running",
@@ -1062,6 +1078,8 @@ export async function reclassifyUnlockedConversations(
           succeededCount: succeeded,
           failedCount: failed,
           message: `项目与标签整理进度 ${processed}/${candidates.length}`,
+          error: null,
+          completedAt: null,
           stats: {
             classified,
             tagAssignments,
@@ -1070,8 +1088,9 @@ export async function reclassifyUnlockedConversations(
             mode: options.mode,
           },
         },
-        { log: false },
+        { log: false, allowedStatuses: ["queued", "running"] },
       );
+      if (!progressTask) return currentResult();
     }
   }
   if (taskId && processed < candidates.length) {
@@ -1101,7 +1120,7 @@ export async function reclassifyUnlockedConversations(
       },
     });
   }
-  return { attempted: candidates.length, classified, failed, tagAssignments };
+  return currentResult();
 }
 
 export function analysisWindow(

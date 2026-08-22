@@ -11,6 +11,7 @@ import {
 import { sendReportEmailById } from "./services/email.js";
 import {
   NIGHTLY_AI_MAINTENANCE_HOUR,
+  ensureOrganizationTask,
   nightlyAiRunKey,
   runNightlyAiMaintenance,
 } from "./services/nightly-ai.js";
@@ -178,7 +179,7 @@ const reclassificationCron = new Cron(
   { timezone: config.TZ, protect: true },
   async () => {
     if (await getBooleanSetting("classification.autoReclassify", false)) {
-      await enqueueUnlockedReclassification();
+      await ensureOrganizationTask("每周日 06:15 自动增量整理项目与标签");
     }
   },
 );

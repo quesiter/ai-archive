@@ -33,7 +33,9 @@ async function scheduleNext(input: NightlyAiMaintenanceJobData): Promise<void> {
   if (!jobId) throw new Error("夜间维护后续检查没有成功进入队列");
 }
 
-async function ensureOrganizationTask(): Promise<string> {
+export async function ensureOrganizationTask(
+  queuedMessage = "每日 22:00 夜间维护：等待增量整理项目与标签",
+): Promise<string> {
   await failStaleBackgroundTasks("classification_rebuild");
   const active = await getLatestBackgroundTask("classification_rebuild", [
     "queued",
@@ -42,7 +44,7 @@ async function ensureOrganizationTask(): Promise<string> {
   if (active) return active.id;
   const task = await createBackgroundTask(
     "classification_rebuild",
-    "每日 22:00 夜间维护：等待增量整理项目与标签",
+    queuedMessage,
   );
   const jobId = await enqueueUnlockedReclassification({
     taskId: task.id,
