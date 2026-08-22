@@ -127,6 +127,17 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .list-row, .project-row, .device-row { display: flex; align-items: center; justify-content: space-between; gap: .8rem; border-top: 1px solid rgba(52,118,117,.1); padding: .76rem 0; }
 .list-row:first-child, .project-row:first-child, .device-row:first-child { border-top: 0; }
 .list-row code { overflow: hidden; text-overflow: ellipsis; color: #739096; font-size: .72rem; }
+.redaction-rule-row > div:first-child { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: .24rem; }
+.redaction-rule-row > div:first-child span { color: var(--muted); font-size: .74rem; }
+.redaction-rule-row code { display: block; max-width: 100%; white-space: nowrap; }
+.redaction-cleanup-status { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .35rem .8rem; align-items: center; margin: .8rem 0; padding: .8rem; border: 1px solid rgba(52,118,117,.14); border-radius: 10px; background: rgba(236,249,246,.5); }
+.redaction-cleanup-status > div { display: flex; flex-direction: column; gap: .2rem; }
+.redaction-cleanup-status span, .redaction-cleanup-status small { color: var(--muted); }
+.redaction-cleanup-status small { grid-column: 1 / -1; }
+.redaction-test { display: flex; flex-direction: column; gap: .7rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid rgba(52,118,117,.1); }
+.redaction-test textarea { width: 100%; min-height: 130px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.redaction-test > button { align-self: flex-start; }
+.redaction-preview { margin: 0; padding: .85rem; max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 8px; background: #14242b; color: #d9f6ed; }
 .status-row, .button-group, .toolbar, .inline-form { display: flex; align-items: center; gap: .65rem; flex-wrap: wrap; }
 .toolbar { margin-bottom: .68rem; padding: .55rem; border-radius: 8px; background: #fff; border: 1px solid rgba(52,118,117,.09); }
 .toolbar input, .toolbar select { padding: .58rem .72rem; }

@@ -298,7 +298,9 @@ export const backgroundTasks = pgTable(
   "background_tasks",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    kind: text("kind").$type<"classification_rebuild" | "knowledge_rebuild">().notNull(),
+    kind: text("kind")
+      .$type<"classification_rebuild" | "knowledge_rebuild" | "storage_redaction">()
+      .notNull(),
     status: text("status")
       .$type<"queued" | "running" | "completed" | "failed">()
       .notNull(),

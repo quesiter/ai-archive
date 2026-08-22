@@ -10,7 +10,19 @@ import {
   setSettings,
 } from "../services/settings.js";
 import { testLlmConnection } from "../services/llm.js";
-import safeRegex from "safe-regex2";
+import {
+  SECURITY_RULE_PACK,
+  redactForCloud,
+  redactForStorage,
+  validateCustomRedactionPattern,
+} from "../services/redaction.js";
+import {
+  createBackgroundTask,
+  failBackgroundTask,
+  failStaleBackgroundTasks,
+  getLatestBackgroundTask,
+} from "../services/background-tasks.js";
+import { enqueueStorageRedaction } from "../services/queue.js";
 
 const ALLOWED_SETTINGS = new Set([
   "llm.baseUrl",
@@ -40,10 +52,15 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     if (!(await requireWebUser(request, reply))) return;
     return {
       settings: await getPublicSettings(),
-      redactionRules: await db
+      redactionRules: (await db
         .select()
         .from(redactionRules)
-        .orderBy(asc(redactionRules.createdAt)),
+        .orderBy(asc(redactionRules.createdAt))).map((rule) => ({
+          ...rule,
+          name:
+            SECURITY_RULE_PACK.find((template) => template.pattern === rule.pattern)
+              ?.name ?? null,
+        })),
     };
   });
 
@@ -92,12 +109,14 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       })
       .parse(request.body);
     try {
-      new RegExp(input.pattern, "gu");
-      if (!safeRegex(input.pattern)) {
-        return reply.code(400).send({ error: "Regular expression is too complex" });
-      }
-    } catch {
-      return reply.code(400).send({ error: "Invalid regular expression" });
+      validateCustomRedactionPattern(input.pattern);
+    } catch (error) {
+      return reply.code(400).send({
+        error:
+          error instanceof Error && error.message.includes("too complex")
+            ? "正则表达式过于复杂"
+            : "无效的正则表达式",
+      });
     }
     const [rule] = await db.insert(redactionRules).values(input).returning();
     return reply.code(201).send(rule);
@@ -130,4 +149,86 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(204).send();
     },
   );
+
+  app.post("/api/v1/redaction-rules/test", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    const input = z
+      .object({
+        text: z.string().min(1).max(20_000),
+        target: z.enum(["storage", "cloud"]).default("storage"),
+      })
+      .parse(request.body ?? {});
+    const result =
+      input.target === "cloud"
+        ? await redactForCloud(input.text)
+        : await redactForStorage(input.text);
+    return { ok: true, ...result };
+  });
+
+  async function queueStorageCleanup() {
+    await failStaleBackgroundTasks("storage_redaction", 24 * 60 * 60_000);
+    const active = await getLatestBackgroundTask("storage_redaction", [
+      "queued",
+      "running",
+    ]);
+    if (active) return { task: active, jobId: null, reused: true };
+    const task = await createBackgroundTask(
+      "storage_redaction",
+      "已有归档敏感信息清理已入队",
+    );
+    const jobId = await enqueueStorageRedaction(task.id);
+    if (!jobId) {
+      await failBackgroundTask(task.id, "敏感信息清理任务入队失败");
+      throw new Error("敏感信息清理任务入队失败");
+    }
+    return { task, jobId, reused: false };
+  }
+
+  app.post("/api/v1/redaction-rules/security-pack", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    for (const template of SECURITY_RULE_PACK) {
+      validateCustomRedactionPattern(template.pattern);
+    }
+    const existing = await db.select().from(redactionRules);
+    let added = 0;
+    let enabled = 0;
+    for (const template of SECURITY_RULE_PACK) {
+      const match = existing.find((rule) => rule.pattern === template.pattern);
+      if (match) {
+        await db
+          .update(redactionRules)
+          .set({ enabled: true, replacement: template.replacement })
+          .where(eq(redactionRules.id, match.id));
+        enabled += 1;
+      } else {
+        await db.insert(redactionRules).values({
+          pattern: template.pattern,
+          replacement: template.replacement,
+          enabled: true,
+        });
+        added += 1;
+      }
+    }
+    const cleanup = await queueStorageCleanup();
+    return reply.code(202).send({
+      ok: true,
+      added,
+      enabled,
+      total: SECURITY_RULE_PACK.length,
+      cleanup,
+    });
+  });
+
+  app.post("/api/v1/redaction/storage-cleanup", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    return reply.code(202).send(await queueStorageCleanup());
+  });
+
+  app.get("/api/v1/redaction/storage-cleanup", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    await failStaleBackgroundTasks("storage_redaction", 24 * 60 * 60_000);
+    return {
+      task: await getLatestBackgroundTask("storage_redaction"),
+    };
+  });
 }

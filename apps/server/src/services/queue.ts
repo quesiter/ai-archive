@@ -15,6 +15,7 @@ export const queueNames = {
   nightlyAiMaintenance: "nightly-ai-maintenance",
   importArchive: "import-archive",
   emailReport: "email-report",
+  redactStorage: "redact-storage",
 } as const;
 
 export interface ReclassificationJobData {
@@ -218,6 +219,22 @@ export async function enqueueReportEmail(reportId: string): Promise<string | nul
       retryDelay: 60,
       retryBackoff: true,
       singletonKey: reportId,
+    },
+  );
+}
+
+export async function enqueueStorageRedaction(taskId: string): Promise<string | null> {
+  const boss = await getBoss();
+  return boss.send(
+    queueNames.redactStorage,
+    { taskId, requestedAt: new Date().toISOString() },
+    {
+      // pg-boss 10 rejects an expiration value equal to its 24-hour ceiling.
+      expireInHours: 23,
+      retryLimit: 2,
+      retryDelay: 60,
+      retryBackoff: true,
+      singletonKey: taskId,
     },
   );
 }

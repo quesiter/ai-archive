@@ -2,7 +2,11 @@ import { promisify } from "node:util";
 import { gzip } from "node:zlib";
 import { afterAll, describe, expect, it } from "vitest";
 import { closeDatabase } from "../src/db.js";
-import { BACKUP_FORMAT, parseBackupArchive } from "../src/services/backup.js";
+import {
+  BACKUP_FORMAT,
+  parseBackupArchive,
+  sanitizeRestoredBackupTables,
+} from "../src/services/backup.js";
 
 const gzipAsync = promisify(gzip);
 
@@ -73,5 +77,30 @@ describe("backup archive parsing", () => {
     await expect(
       parseBackupArchive("backup.json", Buffer.from(JSON.stringify(invalid))),
     ).rejects.toThrow(/Unknown backup table/);
+  });
+
+  it("redacts archived message secrets before backup rows are restored", () => {
+    const sanitized = sanitizeRestoredBackupTables({
+      redactionRules: [],
+      messageSegments: [
+        {
+          id: "11111111-1111-1111-1111-111111111111",
+          content: "password=DemoOnly_123",
+          href: "https://example.com/path?api_key=DemoOnlyKey",
+        },
+      ],
+      conversationRevisions: [
+        {
+          id: "22222222-2222-2222-2222-222222222222",
+          searchText: "Authorization: Bearer DemoOnlyTokenValue",
+        },
+      ],
+    });
+
+    expect(sanitized.messageSegments?.[0]?.content).not.toContain("DemoOnly_123");
+    expect(sanitized.messageSegments?.[0]?.href).not.toContain("DemoOnlyKey");
+    expect(sanitized.conversationRevisions?.[0]?.searchText).not.toContain(
+      "DemoOnlyTokenValue",
+    );
   });
 });

@@ -23,6 +23,13 @@ import {
 } from "../schema.js";
 import { sanitizeDatabaseText, truncateDatabaseText } from "./text-safety.js";
 import { loadCaptureRevisionMessages } from "./revision-storage.js";
+import {
+  type CompiledCustomRedactionRule,
+  loadEnabledCustomRedactionRules,
+  redactSensitiveTextForStorage,
+  redactSensitiveTextSequenceForStorage,
+  redactSensitiveUrlForStorage,
+} from "./redaction.js";
 
 export class IncrementalBaseMismatchError extends Error {
   readonly code = "incremental_base_mismatch";
@@ -171,7 +178,9 @@ export function buildRevisionSearchText(messages: CaptureMessage[]): string {
 }
 
 export function databaseSafeSegmentContent(segment: CaptureMessage["segments"][number]): string {
-  const normalized = sanitizeDatabaseText(segment.content).replace(/\r\n/g, "\n");
+  const normalized = redactSensitiveTextForStorage(
+    sanitizeDatabaseText(segment.content),
+  ).text.replace(/\r\n/g, "\n");
   const limit =
     segment.type === "tool_status"
       ? TOOL_SEGMENT_CONTENT_LIMIT
@@ -179,6 +188,73 @@ export function databaseSafeSegmentContent(segment: CaptureMessage["segments"][n
         ? REASONING_SEGMENT_CONTENT_LIMIT
         : MESSAGE_SEGMENT_CONTENT_LIMIT;
   return truncateDatabaseText(normalized, limit, `${segment.type} segment`);
+}
+
+function sanitizeCaptureMessageForStorage(
+  message: CaptureMessage,
+  customRules: readonly CompiledCustomRedactionRule[],
+): CaptureMessage {
+  const redactedContents = redactSensitiveTextSequenceForStorage(
+    message.segments.map((segment) => segment.content),
+    customRules,
+  ).texts;
+  return {
+    ...message,
+    segments: message.segments.map((segment, index) => ({
+      ...segment,
+      content: redactedContents[index] ?? "",
+      ...(segment.href
+        ? { href: redactSensitiveUrlForStorage(segment.href, customRules).text }
+        : {}),
+    })),
+  };
+}
+
+export function sanitizeCapturePayloadForStorage(
+  payload: CapturePayloadV1,
+  customRules: readonly CompiledCustomRedactionRule[] = [],
+): CapturePayloadV1 {
+  const common = {
+    ...payload,
+    ...(payload.title
+      ? { title: redactSensitiveTextForStorage(payload.title, customRules).text }
+      : {}),
+    ...(payload.canonicalUrl
+      ? {
+          canonicalUrl: redactSensitiveUrlForStorage(
+            payload.canonicalUrl,
+            customRules,
+          ).text,
+        }
+      : {}),
+  };
+  if ("appendedMessages" in payload) {
+    const delta = payload;
+    return {
+      ...common,
+      appendedMessages: delta.appendedMessages.map((message) =>
+        sanitizeCaptureMessageForStorage(message, customRules),
+      ),
+    } as CaptureDeltaV1;
+  }
+  const snapshot = payload as CaptureSnapshotV1;
+  return {
+    ...common,
+    completeness: {
+      ...snapshot.completeness,
+      ...(snapshot.completeness.reason
+        ? {
+            reason: redactSensitiveTextForStorage(
+              snapshot.completeness.reason,
+              customRules,
+            ).text,
+          }
+        : {}),
+    },
+    messages: snapshot.messages.map((message) =>
+      sanitizeCaptureMessageForStorage(message, customRules),
+    ),
+  } as CaptureSnapshotV1;
 }
 
 async function latestBranchRevision(
@@ -416,6 +492,8 @@ export function validateDeltaBase(input: {
     throw new IncrementalBaseMismatchError("Incremental base last message ID does not match");
   }
   if (
+    !input.delta.baseLastMessageId &&
+    !input.delta.baseRevisionId &&
     input.delta.baseLastMessageTextHash &&
     input.delta.baseLastMessageTextHash !== messageFingerprint(last)
   ) {
@@ -471,9 +549,8 @@ export function revisionStorageBody(
   storedMessages: CaptureMessage[];
   storageKind: "snapshot" | "delta";
 } {
-  const delta = CaptureDeltaV1Schema.safeParse(payload);
-  return delta.success
-    ? { storedMessages: delta.data.appendedMessages, storageKind: "delta" }
+  return "appendedMessages" in payload
+    ? { storedMessages: payload.appendedMessages, storageKind: "delta" }
     : { storedMessages: snapshot.messages, storageKind: "snapshot" };
 }
 
@@ -485,8 +562,8 @@ async function snapshotFromPayload(
   storedMessages: CaptureMessage[];
   storageKind: "snapshot" | "delta";
 }> {
-  if (CaptureDeltaV1Schema.safeParse(payload).success) {
-    const delta = CaptureDeltaV1Schema.parse(payload);
+  if ("appendedMessages" in payload) {
+    const delta = payload;
     const [conversation] = await tx
       .select({ id: conversations.id })
       .from(conversations)
@@ -526,7 +603,11 @@ export async function ingestCapture(
   captureMode: CaptureMode;
   triggerReason: CaptureTriggerReason | null;
 }> {
-  const payload = CapturePayloadV1Schema.parse(rawPayload);
+  const parsedPayload = CapturePayloadV1Schema.parse(rawPayload);
+  const payload = sanitizeCapturePayloadForStorage(
+    parsedPayload,
+    await loadEnabledCustomRedactionRules(),
+  );
 
   return db.transaction(async (tx) => {
     const provider = payload.provider;
@@ -694,7 +775,11 @@ export async function recordCaptureFailure(input: {
     captureMode: input.captureMode ?? "full",
     triggerReason: input.triggerReason ?? null,
     status: "failed",
-    error: truncateDatabaseText(input.error, 10_000, "capture error"),
+    error: truncateDatabaseText(
+      redactSensitiveTextForStorage(input.error).text,
+      10_000,
+      "capture error",
+    ),
     capturedAt: input.capturedAt,
   }).onConflictDoNothing();
 }

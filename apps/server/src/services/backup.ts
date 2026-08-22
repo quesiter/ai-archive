@@ -28,6 +28,11 @@ import {
   settings,
 } from "../schema.js";
 import { APP_VERSION } from "../version.js";
+import {
+  compileCustomRedactionRules,
+  redactSensitiveTextForStorage,
+  redactSensitiveUrlForStorage,
+} from "./redaction.js";
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -202,6 +207,86 @@ function reviveDates(row: BackupRow, fields: string[]): BackupRow {
   return revived;
 }
 
+function sanitizeBackupValue(
+  value: unknown,
+  rules: ReturnType<typeof compileCustomRedactionRules>,
+): unknown {
+  if (typeof value === "string") {
+    return redactSensitiveTextForStorage(value, rules).text;
+  }
+  if (Array.isArray(value)) return value.map((item) => sanitizeBackupValue(item, rules));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, sanitizeBackupValue(item, rules)]),
+    );
+  }
+  return value;
+}
+
+export function sanitizeRestoredBackupTables(tables: BackupTables): BackupTables {
+  const customRules = compileCustomRedactionRules(
+    (tables.redactionRules ?? []).flatMap((row) =>
+      typeof row.pattern === "string" && typeof row.replacement === "string"
+        ? [{
+            pattern: row.pattern,
+            replacement: row.replacement,
+            enabled: row.enabled !== false,
+          }]
+        : [],
+    ),
+  );
+  const sanitized: BackupTables = { ...tables };
+  const textFields: Record<string, string[]> = {
+    conversations: ["title"],
+    conversationRevisions: ["searchText", "completenessReason"],
+    messageSegments: ["content"],
+    captureRuns: ["error"],
+    projects: ["name", "description"],
+    conversationProjects: ["suggestedName"],
+    knowledgeItems: ["title", "body"],
+    analysisRuns: ["error"],
+    backgroundTasks: ["message", "error"],
+    reports: ["title", "summary", "bodyMarkdown"],
+    importJobs: ["error"],
+    operationLogs: ["message"],
+  };
+  for (const [table, fields] of Object.entries(textFields)) {
+    sanitized[table] = (tables[table] ?? []).map((row) => {
+      const next = { ...row };
+      for (const field of fields) {
+        if (typeof next[field] === "string") {
+          next[field] = redactSensitiveTextForStorage(next[field], customRules).text;
+        }
+      }
+      return next;
+    });
+  }
+  sanitized.conversations = (sanitized.conversations ?? []).map((row) => ({
+    ...row,
+    ...(typeof row.canonicalUrl === "string"
+      ? { canonicalUrl: redactSensitiveUrlForStorage(row.canonicalUrl, customRules).text }
+      : {}),
+  }));
+  sanitized.messageSegments = (sanitized.messageSegments ?? []).map((row) => ({
+    ...row,
+    ...(typeof row.href === "string"
+      ? { href: redactSensitiveUrlForStorage(row.href, customRules).text }
+      : {}),
+  }));
+  for (const table of ["analysisRuns", "backgroundTasks", "operationLogs"]) {
+    sanitized[table] = (sanitized[table] ?? []).map((row) => ({
+      ...row,
+      ...(row.stats !== undefined
+        ? { stats: sanitizeBackupValue(row.stats, customRules) }
+        : {}),
+      ...(row.metadata !== undefined
+        ? { metadata: sanitizeBackupValue(row.metadata, customRules) }
+        : {}),
+    }));
+  }
+  return sanitized;
+}
+
 function isGzip(buffer: Buffer, filename: string): boolean {
   return (
     filename.toLowerCase().endsWith(".gz") ||
@@ -267,7 +352,7 @@ export async function restoreBackupArchive(
 ): Promise<BackupImportResult> {
   const backup = await parseBackupArchive(filename, buffer);
   const warnings: string[] = [];
-  const tables: BackupTables = { ...backup.tables };
+  let tables: BackupTables = { ...backup.tables };
   const requiredTables = ["conversations", "conversationRevisions", "messages", "messageSegments"];
   const missingRequiredTables = requiredTables.filter(
     (key) => !Object.prototype.hasOwnProperty.call(tables, key),
@@ -289,6 +374,7 @@ export async function restoreBackupArchive(
       );
     }
   }
+  tables = sanitizeRestoredBackupTables(tables);
 
   const counts: Record<string, number> = {};
   await db.transaction(async (tx) => {

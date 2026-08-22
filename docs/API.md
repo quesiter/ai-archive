@@ -1024,6 +1024,39 @@ Content-Type: application/json
 DELETE /api/v1/redaction-rules/:id
 ```
 
+### 11.7 测试脱敏规则
+
+```http
+POST /api/v1/redaction-rules/test
+Content-Type: application/json
+```
+
+```json
+{
+  "target": "storage",
+  "text": "password=DemoOnly_123"
+}
+```
+
+`target` 可选 `storage`（数据库入库效果）或 `cloud`（发送 AI 前效果）。测试文本只在内存中处理，不写入数据库、不调用模型。
+
+### 11.8 一键启用安全规则包
+
+```http
+POST /api/v1/redaction-rules/security-pack
+```
+
+启用或补齐安全规则后，同时创建已有归档清理任务。
+
+### 11.9 清理已有归档
+
+```http
+POST /api/v1/redaction/storage-cleanup
+GET /api/v1/redaction/storage-cleanup
+```
+
+清理在 Worker 中异步执行。该操作会永久替换消息正文、搜索索引、知识、报告和日志中匹配到的敏感文本。
+
 ## 12. 状态码约定
 
 | 状态码 | 说明 |

@@ -25,7 +25,7 @@ import {
 import { api, ApiError, jsonBody } from "./api.js";
 
 type UnknownRecord = Record<string, any>;
-const WEB_VERSION = "V260822-2";
+const WEB_VERSION = "V260822-3";
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -181,6 +181,21 @@ function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: st
 
 function isActiveStatus(status: unknown): boolean {
   return status === "queued" || status === "running" || status === "processing";
+}
+
+const reportDateFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function reportPeriodLabel(periodStart: unknown, periodEnd: unknown): string {
+  const start = new Date(String(periodStart));
+  const exclusiveEnd = new Date(String(periodEnd));
+  if (Number.isNaN(start.getTime()) || Number.isNaN(exclusiveEnd.getTime())) return "日期未知";
+  const inclusiveEnd = new Date(exclusiveEnd.getTime() - 1);
+  return `${reportDateFormatter.format(start)} — ${reportDateFormatter.format(inclusiveEnd)}`;
 }
 
 function statusLabel(status: unknown): string {
@@ -1992,7 +2007,19 @@ function KnowledgePage() {
 
 function Reports() {
   const state = useLoad(() => api<UnknownRecord[]>("/api/v1/reports"), []);
-  const runsState = useLoad(() => api<UnknownRecord[]>("/api/v1/analysis/runs"), []);
+  const runsState = useLoad(
+    () =>
+      Promise.all([
+        api<UnknownRecord[]>("/api/v1/analysis/runs?kind=weekly&limit=1"),
+        api<UnknownRecord[]>("/api/v1/analysis/runs?kind=monthly&limit=1"),
+      ]).then(([weekly, monthly]) =>
+        [...weekly, ...monthly].sort(
+          (left, right) =>
+            new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime(),
+        ),
+      ),
+    [],
+  );
   const [reportMessage, setReportMessage] = useState("");
   const activeRuns = runsState.data?.filter((run) => isActiveStatus(run.status)) ?? [];
   const reportClock = useTaskClock(activeRuns.length > 0);
@@ -2052,6 +2079,7 @@ function Reports() {
       {reportMessage && <div className="alert success">{reportMessage}</div>}
       <section className="panel">
         <h2>生成状态</h2>
+        <p className="panel-subtitle">仅显示最新一次周报和最新一次月报的生成状态。</p>
         {runsState.loading ? (
           <Loading label="加载运行状态中…" />
         ) : runsState.error ? (
@@ -2070,8 +2098,7 @@ function Reports() {
                       {run.kind === "weekly" ? "周报" : "月报"} · {statusLabel(run.status)}
                     </strong>
                     <span>
-                      {new Date(run.windowStart).toLocaleDateString()} —{" "}
-                      {new Date(run.windowEnd).toLocaleDateString()}
+                      {reportPeriodLabel(run.windowStart, run.windowEnd)}
                     </span>
                   </div>
                   <div className="run-progress">
@@ -2127,7 +2154,7 @@ function Reports() {
 }
 
 function ReportDetail() {
-  const { id } = useParams(); const state = useLoad(() => api<UnknownRecord>(`/api/v1/reports/${id}`), [id]); if (state.loading) return <Loading />; if (state.error) return <ErrorBanner message={state.error} />; const report=state.data!; return <><PageHeader title={report.title} subtitle={`${report.kind} · ${new Date(report.periodStart).toLocaleDateString()} — ${new Date(report.periodEnd).toLocaleDateString()}`} /><article className="report-body"><p className="report-summary">{report.summary}</p><ReactMarkdown skipHtml components={{ a: ({ href, children }) => { const safeHref = safeExternalHref(href); return safeHref ? <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>; }, img: ({ alt }) => <span>{alt ?? "[图片已隐藏]"}</span> }}>{String(report.bodyMarkdown ?? "")}</ReactMarkdown></article></>;
+  const { id } = useParams(); const state = useLoad(() => api<UnknownRecord>(`/api/v1/reports/${id}`), [id]); if (state.loading) return <Loading />; if (state.error) return <ErrorBanner message={state.error} />; const report=state.data!; return <><PageHeader title={report.title} subtitle={`${report.kind} · ${reportPeriodLabel(report.periodStart, report.periodEnd)}`} /><article className="report-body"><p className="report-summary">{report.summary}</p><ReactMarkdown skipHtml components={{ a: ({ href, children }) => { const safeHref = safeExternalHref(href); return safeHref ? <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>; }, img: ({ alt }) => <span>{alt ?? "[图片已隐藏]"}</span> }}>{String(report.bodyMarkdown ?? "")}</ReactMarkdown></article></>;
 }
 
 function importJobPercent(job: UnknownRecord): number {
@@ -2365,12 +2392,27 @@ function Devices() {
 
 function Settings() {
   const state = useLoad(() => api<UnknownRecord>("/api/v1/settings"), []);
+  const cleanupState = useLoad(
+    () => api<UnknownRecord>("/api/v1/redaction/storage-cleanup"),
+    [],
+  );
   const formRef = useRef<HTMLFormElement>(null);
   const [message, setMessage] = useState("");
   const [llmTestMessage, setLlmTestMessage] = useState("");
   const [testingLlm, setTestingLlm] = useState(false);
   const [backupMessage, setBackupMessage] = useState("");
   const [backupBusy, setBackupBusy] = useState(false);
+  const [redactionMessage, setRedactionMessage] = useState("");
+  const [redactionBusy, setRedactionBusy] = useState(false);
+  const [redactionPreview, setRedactionPreview] = useState<UnknownRecord | null>(null);
+  const cleanupTask = cleanupState.data?.task;
+  const cleanupActive = cleanupTask && isActiveStatus(cleanupTask.status);
+
+  useEffect(() => {
+    if (!cleanupActive) return;
+    const timer = window.setInterval(() => cleanupState.reload(), 2500);
+    return () => window.clearInterval(timer);
+  }, [cleanupActive, cleanupState.reload]);
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2413,15 +2455,99 @@ function Settings() {
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
-    await api("/api/v1/redaction-rules", {
-      method: "POST",
-      ...jsonBody({
-        pattern: form.get("pattern"),
-        replacement: form.get("replacement"),
-      }),
-    });
-    formElement.reset();
-    state.reload();
+    setRedactionMessage("");
+    try {
+      await api("/api/v1/redaction-rules", {
+        method: "POST",
+        ...jsonBody({
+          pattern: form.get("pattern"),
+          replacement: form.get("replacement"),
+        }),
+      });
+      formElement.reset();
+      setRedactionMessage("脱敏规则已添加，并将用于云端发送和后续数据库入库。");
+      state.reload();
+    } catch (reason) {
+      setRedactionMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function toggleRule(rule: UnknownRecord) {
+    setRedactionMessage("");
+    try {
+      await api(`/api/v1/redaction-rules/${rule.id}`, {
+        method: "PATCH",
+        ...jsonBody({ enabled: !rule.enabled }),
+      });
+      state.reload();
+    } catch (reason) {
+      setRedactionMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function deleteRule(rule: UnknownRecord) {
+    if (!window.confirm(`确认删除脱敏规则“${rule.name || rule.replacement}”？`)) return;
+    setRedactionMessage("");
+    try {
+      await api(`/api/v1/redaction-rules/${rule.id}`, { method: "DELETE" });
+      setRedactionMessage("脱敏规则已删除。已经打码的数据库内容不会恢复。");
+      state.reload();
+    } catch (reason) {
+      setRedactionMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function enableSecurityPack() {
+    setRedactionBusy(true);
+    setRedactionMessage("正在启用安全规则包并安排已有归档清理…");
+    try {
+      const result = await api<UnknownRecord>("/api/v1/redaction-rules/security-pack", {
+        method: "POST",
+      });
+      setRedactionMessage(
+        `安全规则包已启用：新增 ${result.added ?? 0} 条、启用 ${result.enabled ?? 0} 条；已有归档清理已进入队列。`,
+      );
+      state.reload();
+      cleanupState.reload();
+    } catch (reason) {
+      setRedactionMessage(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRedactionBusy(false);
+    }
+  }
+
+  async function runStorageCleanup() {
+    if (!window.confirm("该操作会永久替换已有归档中匹配到的密码、密钥和登录信息，无法从系统内恢复。确认继续？")) return;
+    setRedactionBusy(true);
+    setRedactionMessage("已有归档敏感信息清理正在加入队列…");
+    try {
+      await api("/api/v1/redaction/storage-cleanup", { method: "POST" });
+      setRedactionMessage("已有归档敏感信息清理已进入队列。");
+      cleanupState.reload();
+    } catch (reason) {
+      setRedactionMessage(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRedactionBusy(false);
+    }
+  }
+
+  async function testRedaction(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setRedactionBusy(true);
+    setRedactionPreview(null);
+    try {
+      setRedactionPreview(
+        await api<UnknownRecord>("/api/v1/redaction-rules/test", {
+          method: "POST",
+          ...jsonBody({ text: form.get("text"), target: form.get("target") }),
+        }),
+      );
+    } catch (reason) {
+      setRedactionMessage(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRedactionBusy(false);
+    }
   }
 
   function downloadBackup() {
@@ -2669,21 +2795,110 @@ function Settings() {
         </p>
       </section>
       <section className="panel">
-        <h2>自定义脱敏规则</h2>
+        <div className="section-title-row">
+          <div>
+            <h2>自定义脱敏规则</h2>
+            <p className="panel-subtitle">
+              启用规则同时作用于发往 AI 的文本和后续采集入库。密码、密钥、私钥、数据库连接串和 SSH 登录信息另有内置强制防护。
+            </p>
+          </div>
+          <div className="button-group">
+            <button
+              type="button"
+              disabled={redactionBusy || cleanupActive}
+              onClick={() => void enableSecurityPack()}
+            >
+              {redactionBusy ? "处理中" : "一键启用安全规则包"}
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              disabled={redactionBusy || cleanupActive}
+              onClick={() => void runStorageCleanup()}
+            >
+              {cleanupActive ? "正在清理已有归档" : "清理已有归档"}
+            </button>
+          </div>
+        </div>
+        <div className="alert warning">
+          数据库入库脱敏不可逆。请使用字段特征正则，不要把真实密码或密钥直接写进正则表达式；系统配置中的模型 API Key 和 SMTP 密码仍会单独加密保存。
+        </div>
+        {redactionMessage && <div className="alert success">{redactionMessage}</div>}
+        {cleanupTask && (
+          <div className="redaction-cleanup-status">
+            <div>
+              <strong>已有归档清理 · {statusLabel(cleanupTask.status)}</strong>
+              <span>{cleanupTask.message || "等待处理"}</span>
+            </div>
+            <span className={`pill ${statusClass(cleanupTask.status)}`}>
+              {statusLabel(cleanupTask.status)}
+            </span>
+            <small>
+              已扫描 {Number(cleanupTask.processedCount ?? 0).toLocaleString()} / {Number(cleanupTask.totalCount ?? 0).toLocaleString()} 条
+              {typeof cleanupTask.stats?.replacements === "number"
+                ? ` · 已打码 ${Number(cleanupTask.stats.replacements).toLocaleString()} 处`
+                : ""}
+            </small>
+          </div>
+        )}
         <form className="inline-form" onSubmit={addRule}>
           <input name="pattern" placeholder="正则表达式" required />
           <input name="replacement" defaultValue="[CUSTOM_REDACTED]" required />
           <button>添加</button>
         </form>
         {state.data!.redactionRules.map((rule: UnknownRecord) => (
-          <div className="list-row" key={rule.id}>
-            <code>{rule.pattern}</code>
-            <span>→ {rule.replacement}</span>
+          <div className="list-row redaction-rule-row" key={rule.id}>
+            <div>
+              <strong>{rule.name || "自定义规则"}</strong>
+              <code title={rule.pattern}>{rule.pattern}</code>
+              <span>替换为 {rule.replacement}</span>
+            </div>
             <span className={`pill ${rule.enabled ? "complete" : "partial"}`}>
               {rule.enabled ? "启用" : "停用"}
             </span>
+            <div className="button-group">
+              <button
+                type="button"
+                className="secondary small"
+                onClick={() => void toggleRule(rule)}
+              >
+                {rule.enabled ? "停用" : "启用"}
+              </button>
+              <button
+                type="button"
+                className="danger small"
+                onClick={() => void deleteRule(rule)}
+              >
+                删除
+              </button>
+            </div>
           </div>
         ))}
+        <form className="redaction-test" onSubmit={testRedaction}>
+          <div className="section-title-row">
+            <div>
+              <h3>规则测试</h3>
+              <p className="panel-subtitle">只在本机服务端预览，不会发送给 AI，也不会保存测试文本。建议只使用虚构样例。</p>
+            </div>
+            <select name="target" defaultValue="storage">
+              <option value="storage">数据库入库效果</option>
+              <option value="cloud">发送 AI 前效果</option>
+            </select>
+          </div>
+          <textarea
+            name="text"
+            rows={6}
+            required
+            defaultValue={"password=DemoOnly_123\nssh demo@192.0.2.10 -p 22\nAuthorization: Bearer demo-token-value"}
+          />
+          <button disabled={redactionBusy}>{redactionBusy ? "测试中" : "测试脱敏"}</button>
+          {redactionPreview && (
+            <pre className="redaction-preview">{String(redactionPreview.text ?? "")}</pre>
+          )}
+          {redactionPreview && (
+            <small>共匹配并替换 {Number(redactionPreview.replacements ?? 0)} 处。</small>
+          )}
+        </form>
       </section>
     </>
   );

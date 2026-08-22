@@ -35,6 +35,7 @@ import {
 } from "./services/llm.js";
 import { failStaleBackgroundTasks } from "./services/background-tasks.js";
 import { getBooleanSetting, getSetting } from "./services/settings.js";
+import { redactStoredArchive } from "./services/storage-redaction.js";
 
 const boss = await getBoss();
 
@@ -55,6 +56,9 @@ await failStaleBackgroundTasks("classification_rebuild").catch((error) => {
 });
 await failStaleBackgroundTasks("knowledge_rebuild").catch((error) => {
   console.warn("Failed to mark stale knowledge tasks", error);
+});
+await failStaleBackgroundTasks("storage_redaction", 24 * 60 * 60_000).catch((error) => {
+  console.warn("Failed to mark stale storage redaction tasks", error);
 });
 
 await boss.work(queueNames.weekly, async () => runAnalysisJob("weekly"));
@@ -163,6 +167,11 @@ await boss.work(queueNames.emailReport, async (jobs) => {
   const reportId = (jobs[0]?.data as { reportId?: unknown } | undefined)?.reportId;
   if (typeof reportId !== "string") throw new Error("Email report ID is missing");
   await sendReportEmailById(reportId);
+});
+await boss.work(queueNames.redactStorage, async (jobs) => {
+  const taskId = (jobs[0]?.data as { taskId?: unknown } | undefined)?.taskId;
+  if (typeof taskId !== "string") throw new Error("Storage redaction task ID is missing");
+  return redactStoredArchive(taskId);
 });
 
 const weeklyCron = new Cron(

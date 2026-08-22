@@ -78,6 +78,13 @@
       "when": 1787011200000,
       "tag": "0010_incremental_revision_storage",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1787361000000,
+      "tag": "0011_exact_weekly_report_periods",
+      "breakpoints": true
     }
   ]
 }

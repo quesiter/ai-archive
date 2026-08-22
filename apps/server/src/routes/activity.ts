@@ -114,8 +114,13 @@ export async function activityRoutes(app: FastifyInstance): Promise<void> {
     const items = [
       ...tasks.map((task) => ({
         id: task.id,
-        type: "classification",
-        title: "智能归类",
+        type: task.kind === "storage_redaction" ? "system" : "classification",
+        title:
+          task.kind === "storage_redaction"
+            ? "敏感信息清理"
+            : task.kind === "knowledge_rebuild"
+              ? "项目知识分析"
+              : "智能归类",
         status: task.status,
         severity: task.status === "failed" ? "error" : "normal",
         message: task.message ?? task.error ?? "",
@@ -125,7 +130,7 @@ export async function activityRoutes(app: FastifyInstance): Promise<void> {
         completedAt: task.completedAt,
         error: task.error,
         stats: task.stats,
-        href: "/projects",
+        href: task.kind === "storage_redaction" ? "/settings" : "/projects",
       })),
       ...runs.map((run) => {
         const stats = run.stats ?? {};

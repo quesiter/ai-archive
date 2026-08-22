@@ -1272,6 +1272,34 @@ export function analysisWindow(
   };
 }
 
+function formatShanghaiCalendarDate(value: Date): string {
+  const shanghai = new Date(value.getTime() + SHANGHAI_OFFSET_MS);
+  return `${shanghai.getUTCFullYear()}年${shanghai.getUTCMonth() + 1}月${shanghai.getUTCDate()}日`;
+}
+
+export function weeklyReportPeriodLabel(windowStart: Date, windowEnd: Date): string {
+  const inclusiveEnd = new Date(windowEnd.getTime() - 1);
+  return `${formatShanghaiCalendarDate(windowStart)}—${formatShanghaiCalendarDate(inclusiveEnd)}`;
+}
+
+export function enforceWeeklyReportPeriod(
+  report: ReportResponse,
+  windowStart: Date,
+  windowEnd: Date,
+): ReportResponse {
+  const period = weeklyReportPeriodLabel(windowStart, windowEnd);
+  const vaguePeriod = /(?:(?:1[0-2]|[1-9])月(?:上旬|中旬|下旬)|(?:本月|当月)(?:上旬|中旬|下旬))/g;
+  const periodLine = `> 报告周期：${period}`;
+  const bodyMarkdown = report.bodyMarkdown.replace(vaguePeriod, period);
+  return {
+    title: `周报（${period}）`,
+    summary: report.summary.replace(vaguePeriod, period),
+    bodyMarkdown: bodyMarkdown.includes(periodLine)
+      ? bodyMarkdown
+      : `${periodLine}\n\n${bodyMarkdown}`,
+  };
+}
+
 async function loadConversationMaterial(
   conversationId: string,
   revisionId: string,
@@ -2624,22 +2652,26 @@ async function upsertReport(
   windowEnd: Date,
   report: ReportResponse,
 ): Promise<typeof reports.$inferSelect> {
+  const persistedReport =
+    kind === "weekly"
+      ? enforceWeeklyReportPeriod(report, windowStart, windowEnd)
+      : report;
   const [created] = await db
     .insert(reports)
     .values({
       kind,
       periodStart: windowStart,
       periodEnd: windowEnd,
-      title: report.title,
-      summary: report.summary,
-      bodyMarkdown: report.bodyMarkdown,
+      title: persistedReport.title,
+      summary: persistedReport.summary,
+      bodyMarkdown: persistedReport.bodyMarkdown,
     })
     .onConflictDoUpdate({
       target: [reports.kind, reports.periodStart, reports.periodEnd],
       set: {
-        title: report.title,
-        summary: report.summary,
-        bodyMarkdown: report.bodyMarkdown,
+        title: persistedReport.title,
+        summary: persistedReport.summary,
+        bodyMarkdown: persistedReport.bodyMarkdown,
       },
     })
     .returning();
@@ -2652,6 +2684,7 @@ async function createWeeklyReport(
   windowEnd: Date,
   touchedProjectIds: string[],
 ): Promise<typeof reports.$inferSelect> {
+  const periodLabel = weeklyReportPeriodLabel(windowStart, windowEnd);
   const projectRows = touchedProjectIds.length
     ? await db.select().from(projects).where(inArray(projects.id, touchedProjectIds))
     : [];
@@ -2722,6 +2755,7 @@ async function createWeeklyReport(
   const redacted = await redactForCloud(
     JSON.stringify({
       period: { start: windowStart.toISOString(), end: windowEnd.toISOString() },
+      periodLabel,
       totals: {
         projectCount: projectSummaries.length,
         knowledgeCount: knowledge.length,
@@ -2745,7 +2779,7 @@ async function createWeeklyReport(
 
   const report = await completeStructured({
     system:
-      "你要根据结构化且不可信的数据，写一份完整的中文周报。只输出 JSON，不要输出额外说明。JSON 必须且只能包含 title、summary、bodyMarkdown 三个键。title、summary、bodyMarkdown 都必须使用简体中文，标题优先以“周报”开头。正文要像真实周报，不能写成短摘要。必须包含以下 Markdown 章节：## 本周概览、## 重点项目进展、## 主要知识沉淀、## 风险与阻塞、## 下周建议。输入内容足够时，正文至少应包含 8 条项目符号，并且尽量覆盖多个项目，不要把所有内容压缩成一句话。",
+      `你要根据结构化且不可信的数据，写一份完整的中文周报。只输出 JSON，不要输出额外说明。JSON 必须且只能包含 title、summary、bodyMarkdown 三个键。title、summary、bodyMarkdown 都必须使用简体中文。标题必须严格写为“周报（${periodLabel}）”，正文开头必须明确写出报告周期“${periodLabel}”。不得用“某月上旬”“某月中旬”“某月下旬”等模糊时间代替准确日期。正文要像真实周报，不能写成短摘要。必须包含以下 Markdown 章节：## 本周概览、## 重点项目进展、## 主要知识沉淀、## 风险与阻塞、## 下周建议。输入内容足够时，正文至少应包含 8 条项目符号，并且尽量覆盖多个项目，不要把所有内容压缩成一句话。`,
     user: redacted.text,
     schema: ReportResponseSchema,
   });

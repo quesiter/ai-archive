@@ -139,6 +139,49 @@ describe("incremental capture validation", () => {
     });
   });
 
+  it("redacts secrets from captured content and URLs before hashing or storage", async () => {
+    const { sanitizeCapturePayloadForStorage } = await import(
+      "../src/services/capture.js"
+    );
+    const snapshot: CaptureSnapshotV1 = {
+      schemaVersion: 1,
+      provider: "codex",
+      sessionId: "secret-session",
+      branchFingerprint: "branch-fingerprint-secret",
+      title: "Deploy password=DemoOnly_123",
+      canonicalUrl: "https://example.com/task?access_token=DemoOnlyToken",
+      adapterVersion: "codex-jsonl-v2",
+      capturedAt: "2026-08-22T04:00:00.000Z",
+      captureMode: "import",
+      completeness: {
+        status: "complete",
+        topReached: true,
+        bottomReached: true,
+        stable: true,
+      },
+      messages: [
+        {
+          ordinal: 0,
+          role: "user",
+          segments: [
+            {
+              type: "text",
+              content: "password=DemoOnly_123",
+              href: "https://example.com/log?api_key=DemoOnlyKey",
+            },
+          ],
+        },
+      ],
+    };
+
+    const sanitized = sanitizeCapturePayloadForStorage(snapshot) as CaptureSnapshotV1;
+
+    expect(sanitized.title).not.toContain("DemoOnly_123");
+    expect(sanitized.canonicalUrl).not.toContain("DemoOnlyToken");
+    expect(sanitized.messages[0]?.segments[0]?.content).not.toContain("DemoOnly_123");
+    expect(sanitized.messages[0]?.segments[0]?.href).not.toContain("DemoOnlyKey");
+  });
+
   it("bounds revision search text without dropping the archived messages", async () => {
     const {
       buildRevisionSearchText,
