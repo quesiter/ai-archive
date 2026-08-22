@@ -2,6 +2,15 @@
 
 本文件合并原 `docs/UPDATE-*.md` 的版本说明。具体部署、升级、备份和排错步骤统一查看 [运维手册](OPERATIONS.md)。
 
+## 2026-08-22 V260822-6：项目级资源与存储统计
+
+- 修正系统状态的监测口径：不再把整台 NAS 的 CPU、内存、Swap、磁盘和 inode 当作本项目用量。
+- app、worker、PostgreSQL 和 host-monitor 进入专用父 cgroup；host-monitor 通过只读 `/sys/fs/cgroup` 汇总项目容器的实际 CPU、内存和 Swap，不挂载 Docker Socket。
+- “项目存储”改为 PostgreSQL 数据库实际大小加导入文件实际大小。默认只展示已用量；只有配置 `ARCHIVE_STORAGE_BUDGET_GB` 后才计算容量百分比和 85%/95% 告警。
+- 服务端和 Web 版本更新为 `V260822-6`；Chrome 插件与 Windows/macOS 同步代理继续使用 `V260822-4`。
+
+发布包：`release/ai-conversation-archive-nas-V260822-6-clean-install.tar.gz`。
+
 ## 2026-08-22 V260822-5：设置二级菜单与主机运行监测
 
 - 设置页重构为左侧二级菜单和右侧当前功能面板，按模型与额度、智能归类、邮件与报告、备份恢复、脱敏安全、系统状态拆分；窄屏自动切换为顶部网格菜单。

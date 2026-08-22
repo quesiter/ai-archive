@@ -48,6 +48,10 @@ const EnvSchema = z
     IMPORT_FAILED: z.string().default("./data/imports/failed"),
     COMPONENT_RELEASE_DIR: z.string().default(defaultComponentReleaseDirectory()),
     HOST_MONITOR_URL: z.string().url().or(z.literal("")).default(""),
+    ARCHIVE_STORAGE_BUDGET_GB: z.preprocess(
+      (value) => value === undefined || value === "" ? undefined : value,
+      z.coerce.number().positive().optional(),
+    ),
     TZ: z.string().default("Asia/Shanghai"),
     LOG_LEVEL: z.string().default("info"),
     WEB_DIST: z.string().default("../web/dist"),

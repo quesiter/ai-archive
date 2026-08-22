@@ -7,17 +7,20 @@ services:
       context: ..
       dockerfile: Dockerfile
     restart: unless-stopped
+    cgroup: host
+    cgroup_parent: ${ARCHIVE_CGROUP_PARENT:-ai-conversation-archive}
     command: ["node", "dist/host-monitor.js"]
     environment:
       HOST_MONITOR_PORT: 9091
       HOST_PROC_ROOT: /host/proc
-      HOST_STORAGE_ROOT: /host/storage
+      HOST_CGROUP_ROOT: /host/cgroup
+      HOST_PROJECT_CGROUP: ${ARCHIVE_CGROUP_PARENT:-ai-conversation-archive}
       HOST_SAMPLE_INTERVAL_MS: ${HOST_SAMPLE_INTERVAL_MS:-10000}
       HOST_HISTORY_LIMIT: ${HOST_HISTORY_LIMIT:-27}
       TZ: Asia/Shanghai
     volumes:
       - /proc:/host/proc:ro
-      - ${ARCHIVE_DATA_DIR:-./data}:/host/storage:ro
+      - /sys/fs/cgroup:/host/cgroup:ro
     expose:
       - "9091"
     healthcheck:
@@ -37,6 +40,7 @@ services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
+    cgroup_parent: ${ARCHIVE_CGROUP_PARENT:-ai-conversation-archive}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-archive}
       POSTGRES_USER: ${POSTGRES_USER:-archive}
@@ -71,6 +75,7 @@ services:
       context: ..
       dockerfile: Dockerfile
     restart: unless-stopped
+    cgroup_parent: ${ARCHIVE_CGROUP_PARENT:-ai-conversation-archive}
     command: ["sh", "-c", "node dist/migrate.js && node dist/index.js"]
     environment:
       NODE_ENV: production
@@ -87,6 +92,7 @@ services:
       IMPORT_FAILED: /data/imports/failed
       COMPONENT_RELEASE_DIR: /app/release
       HOST_MONITOR_URL: http://host-monitor:9091
+      ARCHIVE_STORAGE_BUDGET_GB: ${ARCHIVE_STORAGE_BUDGET_GB:-}
       TZ: Asia/Shanghai
       LOG_LEVEL: ${LOG_LEVEL:-info}
       WEB_DIST: /app/apps/web/dist
@@ -111,6 +117,7 @@ services:
   worker:
     image: ${ARCHIVE_IMAGE:-ai-conversation-archive:latest}
     restart: unless-stopped
+    cgroup_parent: ${ARCHIVE_CGROUP_PARENT:-ai-conversation-archive}
     command: ["node", "dist/worker.js"]
     environment:
       NODE_ENV: production

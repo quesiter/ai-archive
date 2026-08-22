@@ -1,24 +1,30 @@
 import { createServer } from "node:http";
 import {
   collectHostMetrics,
-  readCpuCounters,
+  readProjectCpuCounters,
   type HostMetricSnapshot,
 } from "./services/host-metrics.js";
 
 const port = Number(process.env.HOST_MONITOR_PORT ?? 9091);
 const procRoot = process.env.HOST_PROC_ROOT ?? "/host/proc";
-const storageRoot = process.env.HOST_STORAGE_ROOT ?? "/host/storage";
+const cgroupRoot = process.env.HOST_CGROUP_ROOT ?? "/host/cgroup";
+const expectedParent = process.env.HOST_PROJECT_CGROUP ?? "ai-conversation-archive";
 const sampleIntervalMs = Math.max(5_000, Number(process.env.HOST_SAMPLE_INTERVAL_MS ?? 10_000));
 const historyLimit = Math.max(10, Math.min(120, Number(process.env.HOST_HISTORY_LIMIT ?? 27)));
 
 let latest: HostMetricSnapshot | null = null;
 let history: Array<Pick<HostMetricSnapshot, "collectedAt" | "cpuPercent"> & { memoryPercent: number }> = [];
 let lastError = "";
-let previousCpu = await readCpuCounters(procRoot);
+let previousCpu = await readProjectCpuCounters({ procRoot, cgroupRoot, expectedParent });
 
 async function sample(): Promise<void> {
   try {
-    const result = await collectHostMetrics({ procRoot, storageRoot, previousCpu });
+    const result = await collectHostMetrics({
+      procRoot,
+      cgroupRoot,
+      expectedParent,
+      previousCpu,
+    });
     previousCpu = result.cpu;
     latest = result.snapshot;
     history = [

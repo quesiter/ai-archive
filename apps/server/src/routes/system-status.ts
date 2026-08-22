@@ -3,7 +3,8 @@ import { z } from "zod";
 import { config } from "../config.js";
 import { sqlClient } from "../db.js";
 import { requireWebUser } from "../http.js";
-import { systemAlerts } from "../services/system-status.js";
+import { measureImportStorage, type DirectoryUsage } from "../services/project-storage.js";
+import { projectStorageAlert, systemAlerts } from "../services/system-status.js";
 import { APP_VERSION } from "../version.js";
 
 const ResourceSchema = z.object({
@@ -17,17 +18,9 @@ const HostPayloadSchema = z.object({
   ok: z.literal(true),
   host: z.object({
     collectedAt: z.string().datetime(),
-    uptimeSeconds: z.number().nonnegative(),
-    load: z.tuple([z.number(), z.number(), z.number()]),
     cpuPercent: z.number().min(0).max(100),
     memory: ResourceSchema,
     swap: ResourceSchema,
-    storage: ResourceSchema.extend({
-      inodesTotal: z.number().nonnegative(),
-      inodesUsed: z.number().nonnegative(),
-      inodesAvailable: z.number().nonnegative(),
-      inodePercent: z.number().min(0).max(100),
-    }),
   }),
   history: z.array(z.object({
     collectedAt: z.string().datetime(),
@@ -36,9 +29,30 @@ const HostPayloadSchema = z.object({
   })).max(120),
 });
 
+let importStorageCache: { measuredAt: number; usage: DirectoryUsage } | null = null;
+let importStoragePending: Promise<DirectoryUsage> | null = null;
+
+async function importStorageStatus(): Promise<DirectoryUsage> {
+  if (importStorageCache && Date.now() - importStorageCache.measuredAt < 60_000) {
+    return importStorageCache.usage;
+  }
+  if (importStoragePending) return importStoragePending;
+  importStoragePending = measureImportStorage([
+    config.IMPORT_INBOX,
+    config.IMPORT_PROCESSED,
+    config.IMPORT_FAILED,
+  ]).then((usage) => {
+    importStorageCache = { measuredAt: Date.now(), usage };
+    return usage;
+  }).finally(() => {
+    importStoragePending = null;
+  });
+  return importStoragePending;
+}
+
 async function hostStatus() {
   if (!config.HOST_MONITOR_URL) {
-    return { available: false as const, error: "主机监测容器未配置" };
+    return { available: false as const, error: "项目容器监测未配置" };
   }
   try {
     const response = await fetch(`${config.HOST_MONITOR_URL.replace(/\/$/, "")}/metrics`, {
@@ -54,7 +68,7 @@ async function hostStatus() {
       alerts: systemAlerts(payload.host),
     };
   } catch {
-    return { available: false as const, error: "主机监测容器暂不可用" };
+    return { available: false as const, error: "项目容器监测暂不可用" };
   }
 }
 
@@ -107,7 +121,18 @@ async function databaseStatus() {
 export async function systemStatusRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/v1/system/status", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
-    const [host, database] = await Promise.all([hostStatus(), databaseStatus()]);
+    const [host, database, imports] = await Promise.all([
+      hostStatus(),
+      databaseStatus(),
+      importStorageStatus(),
+    ]);
+    const storageUsedBytes = database.sizeBytes + imports.bytes;
+    const storageBudgetBytes = config.ARCHIVE_STORAGE_BUDGET_GB
+      ? Math.round(config.ARCHIVE_STORAGE_BUDGET_GB * 1024 ** 3)
+      : null;
+    const storagePercent = storageBudgetBytes
+      ? Math.min(100, Math.round((storageUsedBytes / storageBudgetBytes) * 1_000) / 10)
+      : null;
     return {
       collectedAt: new Date().toISOString(),
       services: {
@@ -116,6 +141,19 @@ export async function systemStatusRoutes(app: FastifyInstance): Promise<void> {
         postgres: { online: true },
       },
       host,
+      projectStorage: {
+        usedBytes: storageUsedBytes,
+        databaseBytes: database.sizeBytes,
+        importBytes: imports.bytes,
+        importFiles: imports.files,
+        budgetBytes: storageBudgetBytes,
+        availableBytes: storageBudgetBytes === null
+          ? null
+          : Math.max(0, storageBudgetBytes - storageUsedBytes),
+        percent: storagePercent,
+        incomplete: imports.incomplete,
+        alert: projectStorageAlert(storagePercent),
+      },
       database,
     };
   });

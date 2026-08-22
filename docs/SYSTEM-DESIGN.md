@@ -65,7 +65,7 @@ flowchart LR
 
 | 模块 | 职责 |
 | --- | --- |
-| `apps/server` | API、认证、设备配对、采集入库、导入、备份恢复、队列、AI 分析、邮件、日志、数据库迁移和主机指标采集进程。 |
+| `apps/server` | API、认证、设备配对、采集入库、导入、备份恢复、队列、AI 分析、邮件、日志、数据库迁移和项目容器指标采集进程。 |
 | `apps/web` | 管理后台 UI，包括仪表盘、会话、项目、报告、导入、设备、日志、二级设置和系统状态。 |
 | `apps/extension` | Chrome 插件，完成网页适配、轻量变化检测、完整/增量采集、本地 outbox、压缩上传、悬浮状态窗。 |
 | `apps/openclaw-sync` | CLI/常驻代理，读取 OpenClaw、Codex、Claude Code 本地 JSONL 文件并上传完整导入或增量。 |
@@ -371,13 +371,15 @@ analysis, capture, classification, device, import, system
 info, warning, error
 ```
 
-### 4.12 主机与数据库监测
+### 4.12 项目容器、项目存储与数据库监测
 
-`host-monitor` 使用与 app/worker 相同的运行镜像，但只执行 `dist/host-monitor.js`。Compose 只读挂载宿主机 `/proc` 和 `ARCHIVE_DATA_DIR` 对应的文件系统，不挂载 Docker Socket、不映射宿主端口、移除全部 Linux capabilities，并启用只读根文件系统。
+`host-monitor` 使用与 app/worker 相同的运行镜像，但只执行 `dist/host-monitor.js`。app、worker、PostgreSQL 和 host-monitor 进入同一个专用父 cgroup；监测容器只读挂载宿主 `/proc` 与 `/sys/fs/cgroup`，不挂载 Docker Socket、不读取 NAS 数据卷容量、不映射宿主端口、移除全部 Linux capabilities，并启用只读根文件系统。
 
-监测进程默认每 10 秒读取 CPU 累积计数、内存、Swap、Uptime、Load、磁盘容量和 inode，内存中只保留最近 27 个 CPU/内存趋势点。首次 CPU 百分比通过两个采样点的差值计算。app 通过 Docker 内部地址读取指标，并与 PostgreSQL 的数据库大小、连接、最长活跃查询、运行时间和 Web 备份操作日志合并为 `GET /api/v1/system/status`。监测数据不写入业务数据库；容器重启后趋势重新开始。
+监测进程默认每 10 秒从父 cgroup 汇总项目容器的 CPU 累积用量、内存和 Swap；CPU 按宿主逻辑 CPU 数换算为项目占宿主总算力的比例，内存与 Swap 按各容器 Compose 限额之和计算使用率。内存中只保留最近 27 个 CPU/内存趋势点，首次 CPU 百分比通过两个采样点的差值计算。
 
-资源使用率达到 85% 生成 Warning，达到 95% 生成 Critical。主机监测不可用时，状态接口仍返回应用和数据库结果，前端单独提示监测容器异常。
+app 另外用 `pg_database_size` 读取归档数据库实际大小，并递归统计 inbox、processed、failed 三个导入目录的普通文件大小，两者之和构成“项目存储”。系统不把底层 NAS 存储卷容量当作项目容量；只有运维人员设置 `ARCHIVE_STORAGE_BUDGET_GB` 后才计算项目存储百分比和告警。以上结果与数据库连接、最长活跃查询、运行时间和 Web 备份操作日志合并为 `GET /api/v1/system/status`。
+
+资源使用率达到 85% 生成 Warning，达到 95% 生成 Critical。容器监测不可用时，状态接口仍返回应用、项目存储和数据库结果，前端单独提示监测容器异常。监测数据不写入业务数据库；容器重启后趋势重新开始。
 
 ### 4.13 前端页面
 
@@ -393,7 +395,7 @@ info, warning, error
 | 导入 | `/imports` | 上传 ZIP、查看导入任务状态。 |
 | 设备 | `/devices` | 创建设备配对码、编辑设备名、撤销和删除设备。 |
 | 日志 | `/logs` | 操作日志过滤与排错。 |
-| 设置 | `/settings` | 二级菜单管理 LLM 与额度、SMTP 与报告、分类策略、脱敏、备份恢复，以及主机和 PostgreSQL 系统状态。 |
+| 设置 | `/settings` | 二级菜单管理 LLM 与额度、SMTP 与报告、分类策略、脱敏、备份恢复，以及项目容器、项目存储和 PostgreSQL 系统状态。 |
 
 ## 5. 安全设计
 
@@ -421,7 +423,7 @@ flowchart LR
   Worker --> Postgres
 ```
 
-推荐只对外暴露 HTTPS 入口，不直接暴露 PostgreSQL、host-monitor、DSM 管理口或内部应用端口。host-monitor 只读访问主机 `/proc` 和归档数据所在文件系统，不访问 Docker Socket。
+推荐只对外暴露 HTTPS 入口，不直接暴露 PostgreSQL、host-monitor、DSM 管理口或内部应用端口。host-monitor 只读访问 `/proc` 和 `/sys/fs/cgroup`，不访问 Docker Socket，也不读取 NAS 数据卷容量。
 
 ## 7. 失败处理
 

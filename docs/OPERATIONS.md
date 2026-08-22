@@ -32,8 +32,10 @@
 | `IMPORT_PROCESSED` | `./data/imports/processed` | 导入成功归档目录。 |
 | `IMPORT_FAILED` | `./data/imports/failed` | 导入失败归档目录。 |
 | `COMPONENT_RELEASE_DIR` | 自动发现 `release` | 设备页可下载客户端组件的发布目录。 |
-| `HOST_MONITOR_URL` | 空 | app 读取主机监测指标的内部地址；Compose 固定为 `http://host-monitor:9091`。 |
-| `HOST_SAMPLE_INTERVAL_MS` | `10000` | Compose 主机监测采样间隔，最低有效值 5000 毫秒。 |
+| `HOST_MONITOR_URL` | 空 | app 读取项目容器监测指标的内部地址；Compose 固定为 `http://host-monitor:9091`。 |
+| `ARCHIVE_CGROUP_PARENT` | `ai-conversation-archive` | 项目各容器共享的父 cgroup；所有服务必须保持一致。 |
+| `ARCHIVE_STORAGE_BUDGET_GB` | 空 | 可选项目数据软预算；留空时不计算存储百分比和容量告警。 |
+| `HOST_SAMPLE_INTERVAL_MS` | `10000` | Compose 项目容器监测采样间隔，最低有效值 5000 毫秒。 |
 | `HOST_HISTORY_LIMIT` | `27` | 内存趋势采样点数量，服务端限制为 10–120。 |
 | `TZ` | `Asia/Shanghai` | Worker 定时任务时区。 |
 | `LOG_LEVEL` | `info` | 服务日志级别。 |
@@ -84,7 +86,7 @@ docker compose --env-file .env ps
 curl -fsS http://127.0.0.1:18080/healthz
 ```
 
-正常状态为 app、postgres、host-monitor 均为 healthy，worker 为 Up。`host-monitor` 不应显示宿主端口；它只在 Compose 内部网络监听 9091。Web 登录后可在“设置 → 系统状态”核对主机和数据库指标。
+正常状态为 app、postgres、host-monitor 均为 healthy，worker 为 Up。`host-monitor` 不应显示宿主端口；它只在 Compose 内部网络监听 9091。Web 登录后可在“设置 → 系统状态”核对项目容器、项目存储和数据库指标。
 
 ## 5. 升级流程
 
@@ -92,13 +94,13 @@ curl -fsS http://127.0.0.1:18080/healthz
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-5-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-6-clean-install.tar.gz
 ```
 
 测试环境可跳过升级前数据库备份：
 
 ```sh
-SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-5-clean-install.tar.gz
+SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-6-clean-install.tar.gz
 ```
 
 升级后检查：
@@ -110,7 +112,7 @@ docker compose --env-file .env logs --tail=120 host-monitor app worker
 curl -fsS http://127.0.0.1:18080/healthz
 ```
 
-`/healthz` 应返回当前版本 `V260822-5`。如果健康检查版本仍是旧号，通常是 Docker 镜像缓存、反向代理指向旧容器，或没有强制重建 host-monitor/app/worker。升级脚本兼容直接 Docker 权限和免交互 `sudo docker`；当宿主账户不能进入 UID 1000 的导入目录时，会通过本机应用镜像维护目录权限。
+`/healthz` 应返回当前版本 `V260822-6`。如果健康检查版本仍是旧号，通常是 Docker 镜像缓存、反向代理指向旧容器，或没有强制重建 host-monitor/app/worker。升级脚本兼容直接 Docker 权限和免交互 `sudo docker`；当宿主账户不能进入 UID 1000 的导入目录时，会通过本机应用镜像维护目录权限。
 
 ## 6. Chrome 插件运维
 
@@ -288,7 +290,7 @@ docker compose --env-file .env logs --tail=200 postgres
 - 周报/月报失败：检查模型测试、报告运行状态、项目知识数量和 `scope=analysis level=error` 日志。
 - 导入任务不动：检查 Worker、ZIP 大小、重复导入、导入目录权限和 `scope=import` 日志。
 - Token Plan 等待过久：查看任务统计中的 `source`、`quotaResetAt` 和 `retryAt`；`source=fallback` 表示额度接口不可用，按一小时兜底。
-- 系统状态无主机指标：检查 `host-monitor` 是否 healthy，以及 `/proc` 与 `ARCHIVE_DATA_DIR` 只读挂载是否存在；不要通过暴露 9091 或挂载 Docker Socket绕过问题。
+- 系统状态无项目容器指标：检查 `host-monitor` 是否 healthy，`/proc` 与 `/sys/fs/cgroup` 只读挂载是否存在，并确认所有服务使用相同的 `ARCHIVE_CGROUP_PARENT`；不要通过暴露 9091 或挂载 Docker Socket 绕过问题。
 
 ## 13. 安全检查清单
 

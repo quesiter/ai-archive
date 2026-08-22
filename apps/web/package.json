@@ -1,6 +1,6 @@
 {
   "name": "@ai-archive/web",
-  "version": "2026.8.22-5",
+  "version": "2026.8.22-6",
   "private": true,
   "type": "module",
   "scripts": {

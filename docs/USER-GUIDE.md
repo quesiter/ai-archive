@@ -23,7 +23,7 @@
 | 导入 | `/imports` | 上传 ChatGPT、Gemini Takeout 或 Chat Memo ZIP，查看导入进度。 |
 | 设备 | `/devices` | 创建配对码、查看设备、重命名、撤销、删除。 |
 | 日志 | `/logs` | 按范围、级别、状态和关键词排查问题。 |
-| 设置 | `/settings` | 通过二级菜单配置模型、SMTP、分类策略、报告、脱敏和备份，并查看主机与 PostgreSQL 状态。 |
+| 设置 | `/settings` | 通过二级菜单配置模型、SMTP、分类策略、报告、脱敏和备份，并查看项目容器、项目存储与 PostgreSQL 状态。 |
 
 ## 3. 配对 Chrome 插件
 
@@ -337,12 +337,13 @@ Web 备份适合“清空生产环境、重新部署网站、再把业务数据�
 
 打开“设置 → 系统状态”。页面每 10 秒自动刷新，也可以点击“立即刷新”。
 
-- “运行环境”显示应用服务、主机监测容器和 PostgreSQL 是否正常。
-- “主机资源”显示 Uptime、Load、CPU、内存、Swap、归档数据所在磁盘和 inode，并保留最近 27 个 CPU/内存趋势点。
-- 使用率达到 85% 时显示 Warning，达到 95% 时显示 Critical。若文件系统不提供可靠 inode 数据，页面会明确显示不可用，不会伪造百分比。
+- “运行环境”显示应用服务、项目容器监测和 PostgreSQL 是否正常。
+- “项目容器资源”汇总本项目 app、worker、PostgreSQL 和监测容器的 CPU、内存、Swap，并保留最近 27 个 CPU/内存趋势点；不会把整台 NAS 的负载显示为项目用量。
+- “项目存储”由归档数据库大小和导入文件大小组成。未配置存储预算时只显示已用容量，不显示百分比或磁盘告警；设置 `ARCHIVE_STORAGE_BUDGET_GB` 后才按预算计算。
+- 项目资源或已配置的存储预算达到 85% 时显示 Warning，达到 95% 时显示 Critical。
 - “PostgreSQL”显示数据库大小、连接数、活跃连接、最长查询，以及通过 Web 下载备份产生的最近记录。
 
-页面不保存长期监控历史。若主机指标显示不可用，先在 NAS 上运行 `docker compose --env-file .env ps`，确认 `host-monitor` 为 healthy；该容器不应映射到宿主机或公网端口。
+页面不保存长期监控历史。若容器指标显示不可用，先在 NAS 上运行 `docker compose --env-file .env ps`，确认所有项目服务已使用同一个 `ARCHIVE_CGROUP_PARENT` 且 `host-monitor` 为 healthy；该容器不应映射到宿主机或公网端口。
 
 ## 11. 本地同步代理
 

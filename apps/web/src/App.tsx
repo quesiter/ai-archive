@@ -25,7 +25,7 @@ import {
 import { api, ApiError, jsonBody } from "./api.js";
 
 type UnknownRecord = Record<string, any>;
-const WEB_VERSION = "V260822-5";
+const WEB_VERSION = "V260822-6";
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -2402,7 +2402,7 @@ const settingsSections = [
   { id: "email", label: "邮件与报告", hint: "SMTP、周报与月报", icon: "✉" },
   { id: "backup", label: "备份与恢复", hint: "业务数据导入与导出", icon: "▤" },
   { id: "redaction", label: "脱敏与安全", hint: "安全规则与历史清理", icon: "⌁" },
-  { id: "system", label: "系统状态", hint: "主机资源与 PostgreSQL", icon: "⌁" },
+  { id: "system", label: "系统状态", hint: "项目资源与 PostgreSQL", icon: "⌁" },
 ] as const;
 
 type SettingsSection = (typeof settingsSections)[number]["id"];
@@ -2463,8 +2463,13 @@ function SystemStatus() {
   const data = state.data;
   const host = data?.host;
   const database = data?.database;
+  const projectStorage = data?.projectStorage;
   const history = Array.isArray(host?.history) ? host.history : [];
   const services = data?.services ?? {};
+  const alerts = [
+    ...(Array.isArray(host?.alerts) ? host.alerts : []),
+    ...(projectStorage?.alert ? [projectStorage.alert] : []),
+  ];
 
   return (
     <>
@@ -2482,7 +2487,7 @@ function SystemStatus() {
         <div className="service-status-grid">
           {[
             ["应用服务", services.app?.online, services.app?.version || "API"],
-            ["主机监测", services.hostMonitor?.online, services.hostMonitor?.online ? "Docker 内部服务" : "连接异常"],
+            ["容器监测", services.hostMonitor?.online, services.hostMonitor?.online ? "Docker 内部服务" : "连接异常"],
             ["PostgreSQL", services.postgres?.online, services.postgres?.online ? "数据库可用" : "连接异常"],
           ].map(([label, online, detail]) => (
             <div className="service-status" key={String(label)}>
@@ -2494,42 +2499,41 @@ function SystemStatus() {
         </div>
       </section>
 
+      {alerts.length > 0 && (
+        <section className="panel system-alert-panel">
+          <h2>资源告警</h2>
+          {alerts.map((alert: UnknownRecord) => (
+            <div className={`system-alert ${alert.level}`} key={`${alert.metric}-${alert.message}`}>
+              <strong>{alert.level === "critical" ? "CRITICAL" : "WARNING"} · {alert.metric}</strong>
+              <span>{alert.message}</span>
+              <small>检查于 {new Date(data?.collectedAt).toLocaleString()}</small>
+            </div>
+          ))}
+        </section>
+      )}
+
       {!host?.available ? (
-        <div className="alert warning">{host?.error || "暂时无法读取主机指标，请检查 host-monitor 容器。"}</div>
+        <div className="alert warning">{host?.error || "暂时无法读取项目容器指标，请检查 host-monitor 容器。"}</div>
       ) : (
         <>
-          {Array.isArray(host.alerts) && host.alerts.length > 0 && (
-            <section className="panel system-alert-panel">
-              <h2>资源告警</h2>
-              {host.alerts.map((alert: UnknownRecord) => (
-                <div className={`system-alert ${alert.level}`} key={`${alert.metric}-${alert.message}`}>
-                  <strong>{alert.level === "critical" ? "CRITICAL" : "WARNING"} · {alert.metric}</strong>
-                  <span>{alert.message}</span>
-                  <small>采样于 {new Date(host.collectedAt).toLocaleString()}</small>
-                </div>
-              ))}
-            </section>
-          )}
           <section className="panel host-resource-panel">
             <div className="section-title-row">
               <div>
-                <h2>主机资源</h2>
+                <h2>项目容器资源</h2>
                 <p className="panel-subtitle">
-                  已运行 {formatDuration(host.uptimeSeconds)} · Load {host.load.map((value: number) => Number(value).toFixed(2)).join(" / ")}
+                  应用已运行 {formatDuration(services.app?.uptimeSeconds)} · 汇总本项目 app、worker、PostgreSQL 和监测容器
                 </p>
               </div>
               <span className="status-sampled-at">采样 {new Date(host.collectedAt).toLocaleTimeString()}</span>
             </div>
             <div className="resource-gauge-grid">
-              <ResourceGauge label="CPU" percent={host.cpuPercent} detail={`当前负载 ${Number(host.load[0]).toFixed(2)}`} />
-              <ResourceGauge label="内存" percent={host.memory.percent} detail={`${formatBytes(host.memory.usedBytes)} / ${formatBytes(host.memory.totalBytes)}`} />
-              <ResourceGauge label="Swap" percent={host.swap.percent} detail={host.swap.totalBytes ? `${formatBytes(host.swap.usedBytes)} / ${formatBytes(host.swap.totalBytes)}` : "主机未配置 Swap"} />
-              <ResourceGauge label="磁盘" percent={host.storage.percent} detail={`${formatBytes(host.storage.usedBytes)} / ${formatBytes(host.storage.totalBytes)}`} />
-              <ResourceGauge label="inode" percent={host.storage.inodePercent} detail={host.storage.inodesTotal ? `${Number(host.storage.inodesUsed).toLocaleString()} / ${Number(host.storage.inodesTotal).toLocaleString()}` : "文件系统未提供 inode 统计"} />
+              <ResourceGauge label="CPU" percent={host.cpuPercent} detail="本项目占宿主机总 CPU 算力" />
+              <ResourceGauge label="内存" percent={host.memory.percent} detail={`${formatBytes(host.memory.usedBytes)} / ${formatBytes(host.memory.totalBytes)} 项目容器额度`} />
+              <ResourceGauge label="Swap" percent={host.swap.percent} detail={host.swap.totalBytes ? `${formatBytes(host.swap.usedBytes)} / ${formatBytes(host.swap.totalBytes)} 项目容器额度` : "项目容器未配置 Swap 额度"} />
             </div>
             <div className="system-trend">
-              <div className="system-trend-title"><strong>最近趋势</strong><span>CPU / 内存 · 最近 {history.length} 个采样点</span></div>
-              <div className="system-trend-chart" aria-label="CPU 与内存最近趋势">
+              <div className="system-trend-title"><strong>最近趋势</strong><span>项目 CPU / 项目内存 · 最近 {history.length} 个采样点</span></div>
+              <div className="system-trend-chart" aria-label="项目 CPU 与项目内存最近趋势">
                 {history.map((sample: UnknownRecord) => (
                   <div className="system-trend-sample" key={String(sample.collectedAt)} title={`${new Date(sample.collectedAt).toLocaleTimeString()} · CPU ${Number(sample.cpuPercent).toFixed(1)}% · 内存 ${Number(sample.memoryPercent).toFixed(1)}%`}>
                     <span className="cpu" style={{ height: `${Math.max(2, Number(sample.cpuPercent))}%` }} />
@@ -2540,6 +2544,39 @@ function SystemStatus() {
             </div>
           </section>
         </>
+      )}
+
+      {projectStorage && (
+        <section className="panel project-storage-panel">
+          <div className="section-title-row">
+            <div>
+              <h2>项目存储</h2>
+              <p className="panel-subtitle">只统计归档数据库和导入文件的实际占用，不使用 NAS 整盘容量。</p>
+            </div>
+            <span className="pill complete">实际项目数据</span>
+          </div>
+          {projectStorage.budgetBytes ? (
+            <div className="resource-gauge-grid project-storage-gauge">
+              <ResourceGauge
+                label="存储预算"
+                percent={projectStorage.percent}
+                detail={`${formatBytes(projectStorage.usedBytes)} / ${formatBytes(projectStorage.budgetBytes)}`}
+              />
+            </div>
+          ) : (
+            <article className="project-storage-total">
+              <span>项目数据已用</span>
+              <strong>{formatBytes(projectStorage.usedBytes)}</strong>
+              <small>未配置项目存储预算，因此不显示虚假的容量百分比，也不产生磁盘容量告警。</small>
+            </article>
+          )}
+          <div className="database-metric-grid">
+            <div><span>PostgreSQL 数据库</span><strong>{formatBytes(projectStorage.databaseBytes)}</strong></div>
+            <div><span>待处理与留存导入文件</span><strong>{formatBytes(projectStorage.importBytes)}</strong></div>
+            <div><span>导入文件数</span><strong>{Number(projectStorage.importFiles).toLocaleString()}</strong></div>
+          </div>
+          {projectStorage.incomplete && <div className="alert warning">部分导入目录暂时无法读取，本次项目存储统计可能偏小。</div>}
+        </section>
       )}
 
       {database && (

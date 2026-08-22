@@ -783,6 +783,10 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .resource-gauge.warning .resource-gauge-track span { background: #cf9134; }
 .resource-gauge.critical .resource-gauge-track span { background: var(--rose); }
 .resource-gauge small { color: var(--muted); font-size: .68rem; }
+.project-storage-gauge { grid-template-columns: minmax(0, 1fr); margin-bottom: .45rem; }
+.project-storage-total { display: flex; flex-direction: column; gap: .3rem; margin-bottom: .45rem; padding: .92rem; border: 1px solid rgba(52,118,117,.14); border-radius: 8px; background: #fbfdfd; }
+.project-storage-total span, .project-storage-total small { color: var(--muted); font-size: .68rem; }
+.project-storage-total strong { color: #243941; font-size: 1.25rem; }
 .system-trend { margin-top: .78rem; padding: .82rem; border: 1px solid rgba(52,118,117,.14); border-radius: 8px; }
 .system-trend-title { display: flex; justify-content: space-between; gap: .8rem; margin-bottom: .65rem; }
 .system-trend-title strong { color: #253b44; font-size: .74rem; }

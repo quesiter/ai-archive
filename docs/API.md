@@ -42,7 +42,7 @@ Web 写操作同时受严格同源、SameSite Cookie 和全局速率限制保护
 GET /healthz
 ```
 
-不需要认证。数据库可用时返回 `{"ok":true,"version":"V260822-5","time":"..."}`，不可用时返回 503 和 `ok:false`；所有响应同时设置 `X-AI-Archive-Version`。该接口不在 `/api/v1` 基础路径下。
+不需要认证。数据库可用时返回 `{"ok":true,"version":"V260822-6","time":"..."}`，不可用时返回 503 和 `ok:false`；所有响应同时设置 `X-AI-Archive-Version`。该接口不在 `/api/v1` 基础路径下。
 
 ## 2. 认证接口
 
@@ -1120,13 +1120,13 @@ GET /api/v1/redaction/storage-cleanup
 
 ## 12. 系统状态
 
-### 12.1 获取主机与数据库运行状态
+### 12.1 获取项目容器、项目存储与数据库运行状态
 
 ```http
 GET /api/v1/system/status
 ```
 
-需要 Web 登录。服务端并行读取 Docker 内部 `host-monitor` 指标和 PostgreSQL 状态。主机监测不可用时接口仍返回 200，`host.available` 为 `false`，便于页面继续展示应用和数据库状态。
+需要 Web 登录。服务端并行读取 Docker 内部 `host-monitor` 的项目 cgroup 指标、PostgreSQL 状态和导入目录文件大小。容器监测不可用时接口仍返回 200，`host.available` 为 `false`，便于页面继续展示应用、项目存储和数据库状态。
 
 响应示例：
 
@@ -1134,20 +1134,28 @@ GET /api/v1/system/status
 {
   "collectedAt": "2026-08-22T05:30:00.000Z",
   "services": {
-    "app": { "online": true, "version": "V260822-5", "uptimeSeconds": 3600 },
+    "app": { "online": true, "version": "V260822-6", "uptimeSeconds": 3600 },
     "hostMonitor": { "online": true },
     "postgres": { "online": true }
   },
   "host": {
     "available": true,
-    "uptimeSeconds": 691200,
-    "load": [0.31, 0.37, 0.25],
-    "cpuPercent": 6.4,
-    "memory": { "totalBytes": 4294967296, "usedBytes": 2147483648, "availableBytes": 2147483648, "percent": 50 },
-    "swap": { "totalBytes": 2147483648, "usedBytes": 104857600, "availableBytes": 2042626048, "percent": 4.9 },
-    "storage": { "totalBytes": 4398046511104, "usedBytes": 3518437208883, "availableBytes": 879609302221, "percent": 80, "inodesTotal": 10000000, "inodesUsed": 1200000, "inodesAvailable": 8800000, "inodePercent": 12 },
+    "cpuPercent": 1.8,
+    "memory": { "totalBytes": 1979711488, "usedBytes": 419430400, "availableBytes": 1560281088, "percent": 21.2 },
+    "swap": { "totalBytes": 1979711488, "usedBytes": 10485760, "availableBytes": 1969225728, "percent": 0.5 },
     "history": [],
     "alerts": []
+  },
+  "projectStorage": {
+    "usedBytes": 283115520,
+    "databaseBytes": 268435456,
+    "importBytes": 14680064,
+    "importFiles": 12,
+    "budgetBytes": null,
+    "availableBytes": null,
+    "percent": null,
+    "incomplete": false,
+    "alert": null
   },
   "database": {
     "online": true,
@@ -1163,7 +1171,9 @@ GET /api/v1/system/status
 }
 ```
 
-`history` 最多返回监测容器内存中的最近 120 个采样点，Compose 默认保留 27 个；监测数据不写入业务数据库。资源使用率达到 85% 返回 `warning` 告警，达到 95% 返回 `critical` 告警。文件系统不提供可靠 inode 数据时，inode 总量和使用率返回 0。
+`host` 的 CPU、内存和 Swap 均为 Compose 项目共享父 cgroup 下各容器的汇总值，不是整台 NAS 的使用率。CPU 百分比表示项目占宿主机总 CPU 算力的比例；内存和 Swap 的分母为各项目容器的 Compose 限额之和。`history` 最多返回监测容器内存中的最近 120 个采样点，Compose 默认保留 27 个。
+
+`projectStorage.usedBytes` 只由 PostgreSQL 当前数据库大小与待处理/留存导入文件大小相加，不使用数据目录所在 NAS 存储卷的总容量。`ARCHIVE_STORAGE_BUDGET_GB` 未配置时，预算、可用量、百分比和存储告警均为 `null`；配置后才按软预算计算。项目资源达到 85% 返回 `warning`，达到 95% 返回 `critical`。监测数据不写入业务数据库。
 
 ## 13. 状态码约定
 

@@ -428,6 +428,8 @@ const summary = {
     app: systemStatus.services?.app?.online,
     postgres: systemStatus.services?.postgres?.online,
     hostMonitor: systemStatus.services?.hostMonitor?.online,
+    projectStorageBytes: systemStatus.projectStorage?.usedBytes,
+    projectStorageBudget: systemStatus.projectStorage?.budgetBytes,
   },
   webServed: rootResponse.status === 200 && rootHtml.includes("知言归藏"),
   revokedStatus: revokedResponse.status,
@@ -467,6 +469,8 @@ if (
   allConversations.length !== 3 ||
   systemStatus.services?.app?.online !== true ||
   systemStatus.services?.postgres?.online !== true ||
+  !Number.isFinite(systemStatus.projectStorage?.usedBytes) ||
+  systemStatus.projectStorage.usedBytes < systemStatus.database.sizeBytes ||
   !summary.webServed ||
   revokedResponse.status !== 401
 ) {
