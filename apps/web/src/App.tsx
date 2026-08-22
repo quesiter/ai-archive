@@ -144,7 +144,8 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
 const navigation = [
   ["/", "总览", "⌂"],
   ["/conversations", "会话", "◫"],
-  ["/projects", "项目与标签", "◇"],
+  ["/projects", "项目", "◇"],
+  ["/tags", "标签", "#"],
   ["/reports", "报告", "▤"],
   ["/imports", "导入", "⇧"],
   ["/devices", "设备", "⌘"],
@@ -566,7 +567,7 @@ function Dashboard() {
                  {formatCount(categoryStats.length)} 个项目，近 7 日新增或更新 {formatCount(categoryTotals.growth7d)} 条会话
               </p>
             </div>
-            <Link className="button-link secondary small" to="/projects">查看项目与标签</Link>
+            <Link className="button-link secondary small" to="/projects">查看项目</Link>
           </div>
           {topCategories.length ? (
             <div className="category-dashboard-list">
@@ -597,7 +598,7 @@ function Dashboard() {
               })}
             </div>
           ) : (
-            <p className="muted">还没有项目数据，可在“项目与标签”运行一次整理。</p>
+            <p className="muted">还没有项目数据，可在“项目”页运行一次整理。</p>
           )}
         </article>
         <article className="panel archive-value-panel">
@@ -610,6 +611,7 @@ function Dashboard() {
           <p className="muted">需要继续工作时，可从项目时间线打开原文，或生成 PROJECT-CONTEXT.md 交给其他 AI。</p>
           <div className="button-group">
             <Link className="button-link secondary small" to="/projects">浏览项目</Link>
+            <Link className="button-link secondary small" to="/tags">浏览标签</Link>
             <Link className="button-link secondary small" to="/conversations">搜索历史</Link>
           </div>
         </article>
@@ -1642,8 +1644,8 @@ function Projects() {
   return (
     <>
       <PageHeader
-        title="项目与标签"
-        subtitle="用一个主项目与多个稳定标签组织归档会话。"
+        title="项目"
+        subtitle="用一个主项目组织每段归档会话；跨项目主题请前往独立标签页。"
         actions={
           <div className="button-group">
             <select
@@ -1987,34 +1989,71 @@ function Projects() {
         )}
       </section>
 
-      <TagManager />
-
     </>
   );
 }
 
-function TagManager() {
+function tagCloudWeight(count: unknown, maximum: number): number {
+  const value = Math.max(0, Number(count ?? 0));
+  if (maximum <= 0) return 0;
+  return Math.sqrt(value) / Math.sqrt(maximum);
+}
+
+function Tags() {
   const state = useLoad(() => api<UnknownRecord[]>("/api/v1/tags"), []);
   const [query, setQuery] = useState("");
   const [message, setMessage] = useState("");
-  const tags = (state.data ?? []).filter((tag) =>
-    String(tag.name ?? "").toLocaleLowerCase().includes(query.toLocaleLowerCase()),
+  const [messageTone, setMessageTone] = useState<"success" | "error">("success");
+  const [selectedTagId, setSelectedTagId] = useState("");
+  const allTags = state.data ?? [];
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const tags = allTags
+    .filter((tag) =>
+      String(tag.name ?? "").toLocaleLowerCase().includes(normalizedQuery),
+    )
+    .sort(
+      (left, right) =>
+        Number(right.conversationCount ?? 0) - Number(left.conversationCount ?? 0) ||
+        String(left.name ?? "").localeCompare(String(right.name ?? ""), "zh-CN"),
+    );
+  const selectedTag = tags.find((tag) => String(tag.id) === selectedTagId) ?? null;
+  const maximumConversationCount = Math.max(
+    0,
+    ...tags.map((tag) => Number(tag.conversationCount ?? 0)),
   );
+  const usedTagCount = allTags.filter((tag) => Number(tag.conversationCount ?? 0) > 0).length;
+  const totalAssignments = allTags.reduce(
+    (sum, tag) => sum + Number(tag.conversationCount ?? 0),
+    0,
+  );
+
+  useEffect(() => {
+    if (!tags.length) {
+      setSelectedTagId("");
+      return;
+    }
+    if (!tags.some((tag) => String(tag.id) === selectedTagId)) {
+      setSelectedTagId(String(tags[0]?.id ?? ""));
+    }
+  }, [query, state.data, selectedTagId]);
 
   async function createTag(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     try {
-      await api("/api/v1/tags", {
+      const created = await api<UnknownRecord>("/api/v1/tags", {
         method: "POST",
         ...jsonBody({ name: form.get("name") }),
       });
       formElement.reset();
+      setSelectedTagId(String(created.id ?? ""));
       state.reload();
       setMessage("标签已创建");
+      setMessageTone("success");
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : String(reason));
+      setMessageTone("error");
     }
   }
 
@@ -2027,19 +2066,23 @@ function TagManager() {
         ...jsonBody({ name: name.trim() }),
       });
       state.reload();
+      setMessage("标签已重命名");
+      setMessageTone("success");
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : String(reason));
+      setMessageTone("error");
     }
   }
 
   async function mergeTag(tag: UnknownRecord) {
     const targetName = window.prompt("合并到哪个标签？请输入目标标签的完整名称");
     if (!targetName) return;
-    const target = (state.data ?? []).find(
+    const target = allTags.find(
       (item) => String(item.name).toLocaleLowerCase() === targetName.trim().toLocaleLowerCase(),
     );
     if (!target || target.id === tag.id) {
       setMessage("没有找到可用的目标标签");
+      setMessageTone("error");
       return;
     }
     try {
@@ -2047,10 +2090,13 @@ function TagManager() {
         method: "POST",
         ...jsonBody({ targetTagId: target.id }),
       });
+      setSelectedTagId(String(target.id));
       state.reload();
       setMessage(`已合并到 ${target.name}`);
+      setMessageTone("success");
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : String(reason));
+      setMessageTone("error");
     }
   }
 
@@ -2058,46 +2104,105 @@ function TagManager() {
     if (!window.confirm(`删除标签“${tag.name}”？只会删除标签关联，不会删除会话。`)) return;
     try {
       await api(`/api/v1/tags/${tag.id}`, { method: "DELETE" });
+      setSelectedTagId("");
       state.reload();
+      setMessage("标签已删除，会话内容未受影响");
+      setMessageTone("success");
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : String(reason));
+      setMessageTone("error");
     }
   }
 
   return (
-    <section className="project-board tag-manager">
-      <div className="section-title-row">
-        <div>
-          <h2>标签</h2>
-          <p className="panel-subtitle">搜索、重命名、合并或删除标签；删除标签不会删除 Conversation。</p>
+    <>
+      <PageHeader
+        title="标签"
+        subtitle="用词云看见高频主题，点击标签后可查看会话或集中管理。"
+        actions={<span className="pill">{allTags.length} 个标签</span>}
+      />
+      <section className="tag-metrics">
+        <article className="metric">
+          <span>标签总数</span>
+          <strong>{allTags.length}</strong>
+          <small>当前标签库</small>
+        </article>
+        <article className="metric">
+          <span>已使用标签</span>
+          <strong>{usedTagCount}</strong>
+          <small>{allTags.length - usedTagCount} 个尚未关联会话</small>
+        </article>
+        <article className="metric">
+          <span>标签关联</span>
+          <strong>{totalAssignments}</strong>
+          <small>同一会话可关联多个标签</small>
+        </article>
+      </section>
+      <section className="panel tag-workspace">
+        <div className="tag-workspace-header">
+          <div>
+            <h2>主题词云</h2>
+            <p className="panel-subtitle">字号按关联会话数计算；搜索结果会即时收拢。</p>
+          </div>
+          <form className="tag-create-form" onSubmit={createTag}>
+            <input name="name" aria-label="新标签名称" placeholder="新标签" required />
+            <button>创建</button>
+          </form>
         </div>
-        <span className="pill">{state.data?.length ?? 0} 个</span>
-      </div>
-      <div className="toolbar">
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索标签…" />
-        <form className="inline-form" onSubmit={createTag}>
-          <input name="name" placeholder="新标签" required />
-          <button>创建</button>
-        </form>
-      </div>
-      {message && <div className="alert success">{message}</div>}
-      {state.loading ? <Loading label="加载标签中…" /> : state.error ? <ErrorBanner message={state.error} /> : (
-        <div className="tag-admin-list">
-          {tags.map((tag) => (
-            <div className="list-row" key={tag.id}>
-              <Link to={`/conversations?tagIds=${tag.id}`}><strong>{tag.name}</strong></Link>
-              <span>{tag.conversationCount ?? 0} 个会话</span>
-              <div className="button-group">
-                <button className="secondary small" onClick={() => void renameTag(tag)}>重命名</button>
-                <button className="secondary small" onClick={() => void mergeTag(tag)}>合并</button>
-                <button className="danger small" onClick={() => void deleteTag(tag)}>删除</button>
-              </div>
-            </div>
-          ))}
-          {!tags.length && <p className="muted">没有匹配的标签。</p>}
+        <div className="tag-search-row">
+          <input
+            aria-label="搜索标签"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索标签…"
+          />
+          <span>{normalizedQuery ? `找到 ${tags.length} 个` : `展示全部 ${tags.length} 个`}</span>
         </div>
+        {message && <div className={`alert ${messageTone}`}>{message}</div>}
+        {state.loading ? <Loading label="加载标签中…" /> : state.error ? <ErrorBanner message={state.error} /> : tags.length ? (
+          <div className="tag-cloud" aria-label="标签词云">
+            {tags.map((tag) => {
+              const count = Number(tag.conversationCount ?? 0);
+              const weight = tagCloudWeight(count, maximumConversationCount);
+              return (
+                <button
+                  className={`tag-cloud-item ${String(tag.id) === selectedTagId ? "selected" : ""}`}
+                  key={tag.id}
+                  style={{ fontSize: `${(0.86 + weight * 1.25).toFixed(2)}rem` }}
+                  aria-pressed={String(tag.id) === selectedTagId}
+                  aria-label={`${tag.name}，${count} 个会话`}
+                  onClick={() => setSelectedTagId(String(tag.id))}
+                >
+                  <strong>{tag.name}</strong>
+                  <small>{count}</small>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="tag-cloud-empty">
+            <strong>{allTags.length ? "没有匹配的标签" : "还没有标签"}</strong>
+            <span>{allTags.length ? "换个关键词试试。" : "可以在上方创建第一个标签。"}</span>
+          </div>
+        )}
+      </section>
+      {selectedTag && (
+        <section className="panel tag-selection-panel">
+          <div className="tag-selection-copy">
+            <span>当前标签</span>
+            <strong>{selectedTag.name}</strong>
+            <small>{selectedTag.conversationCount ?? 0} 个关联会话</small>
+          </div>
+          <div className="button-group">
+            <Link className="button-link" to={`/conversations?tagIds=${selectedTag.id}`}>查看相关会话</Link>
+            <button className="secondary" onClick={() => void renameTag(selectedTag)}>重命名</button>
+            <button className="secondary" onClick={() => void mergeTag(selectedTag)}>合并</button>
+            <button className="danger" onClick={() => void deleteTag(selectedTag)}>删除</button>
+          </div>
+        </section>
       )}
-    </section>
+      <p className="tag-safety-note">删除标签只会解除标签关联，不会删除任何会话。</p>
+    </>
   );
 }
 
@@ -3136,5 +3241,5 @@ function Settings() {
 export default function App() {
   const [authenticated,setAuthenticated]=useState<boolean|null>(null);const navigate=useNavigate();useEffect(()=>{void api("/api/v1/auth/me").then(()=>setAuthenticated(true)).catch((reason)=>setAuthenticated(reason instanceof ApiError&&reason.status===401?false:false));},[]);async function logout(){await api("/api/v1/auth/logout",{method:"POST"});setAuthenticated(false);navigate("/");}
   if(authenticated===null)return<Loading/>;if(!authenticated)return<AuthScreen onAuthenticated={()=>setAuthenticated(true)}/>;
-  return <Shell onLogout={()=>void logout()}><Routes><Route path="/" element={<Dashboard/>}/><Route path="/conversations" element={<Conversations/>}/><Route path="/conversations/:id" element={<ConversationDetail/>}/><Route path="/projects" element={<Projects/>}/><Route path="/classification" element={<Navigate to="/projects" replace/>}/><Route path="/reports" element={<Reports/>}/><Route path="/reports/:id" element={<ReportDetail/>}/><Route path="/imports" element={<Imports/>}/><Route path="/devices" element={<Devices/>}/><Route path="/logs" element={<Logs/>}/><Route path="/settings" element={<Settings/>}/><Route path="/changelog" element={<ChangelogPage/>}/><Route path="*" element={<Navigate to="/" replace/>}/></Routes></Shell>;
+  return <Shell onLogout={()=>void logout()}><Routes><Route path="/" element={<Dashboard/>}/><Route path="/conversations" element={<Conversations/>}/><Route path="/conversations/:id" element={<ConversationDetail/>}/><Route path="/projects" element={<Projects/>}/><Route path="/tags" element={<Tags/>}/><Route path="/classification" element={<Navigate to="/projects" replace/>}/><Route path="/reports" element={<Reports/>}/><Route path="/reports/:id" element={<ReportDetail/>}/><Route path="/imports" element={<Imports/>}/><Route path="/devices" element={<Devices/>}/><Route path="/logs" element={<Logs/>}/><Route path="/settings" element={<Settings/>}/><Route path="/changelog" element={<ChangelogPage/>}/><Route path="*" element={<Navigate to="/" replace/>}/></Routes></Shell>;
 }
