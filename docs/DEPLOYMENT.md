@@ -1,6 +1,6 @@
 # 知言归藏 V2.1 部署文档
 
-本文面向群晖 NAS、Chrome 插件和 Windows/macOS 同步代理。当前源码组件版本统一为 V2.1.0。构建交付包后应以实际发布的 SHA-256 清单为准；不要沿用旧版本摘要验证新包。
+本文面向群晖 NAS、Chrome 插件和 Windows/macOS 同步代理。服务端、Web 与同步代理当前为 V2.1.0，Chrome 插件为 V2.1.1。构建交付包后应以实际发布的 SHA-256 清单为准；不要沿用旧版本摘要验证新包。
 
 ## 1. 群晖 NAS 全新安装
 
@@ -92,7 +92,7 @@ Migration 0012 会：
 
 ## 5. Chrome 插件
 
-构建 V2.1.0 插件：
+构建 V2.1.1 插件：
 
 ~~~powershell
 pnpm --filter @ai-archive/extension build

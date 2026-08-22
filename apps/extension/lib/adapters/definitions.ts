@@ -3,7 +3,7 @@ import type { AdapterDefinition } from "./types";
 export const adapterDefinitions: AdapterDefinition[] = [
   {
     provider: "chatgpt",
-    version: "1.2.1",
+    version: "1.2.2",
     hosts: ["chatgpt.com", "chat.openai.com"],
     sessionPatterns: [/\/c\/([^/?#]+)/, /\/g\/[^/]+\/c\/([^/?#]+)/],
     conversationRootSelector: "main",

@@ -587,7 +587,9 @@ export default defineContentScript({
         triggerReason: reason,
         captureMode: "full",
         messageCount: light.messageCount,
-        message: reason === "new_session" ? "正在执行首次完整归档" : "正在执行完整校验扫描",
+        message: reason === "new_session"
+          ? "正在回溯会话开头并加载历史消息"
+          : "正在执行完整校验扫描",
       });
       const snapshot = await scanConversation(adapter, { triggerReason: reason });
       const result = await enqueuePayload(snapshot);

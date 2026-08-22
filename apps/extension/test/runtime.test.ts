@@ -9,6 +9,7 @@ import {
   lightweightConversationFingerprint,
   mergeVisible,
   messageTextFingerprint,
+  reachConversationTop,
   scanAppendedMessages,
 } from "../lib/scanner";
 
@@ -249,6 +250,97 @@ describe("segment and virtual-list behavior", () => {
       "message-1",
       "message-2",
     ]);
+  });
+
+  it("waits for delayed ChatGPT history before confirming the real top", async () => {
+    document.body.innerHTML = "";
+    const container = document.createElement("section");
+    const element = document.createElement("article");
+    container.style.overflowY = "auto";
+    container.append(element);
+    document.body.append(container);
+    let scrollHeight = 1_200;
+    Object.defineProperties(container, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+      scrollTop: { configurable: true, writable: true, value: 600 },
+    });
+    const definition = adapterDefinitions.find((item) => item.provider === "chatgpt")!;
+    const adapter = createAdapterRuntime(definition);
+    adapter.getConversationRoot = () => container;
+    let earliestMessageId = "user-later";
+    let extractionCount = 0;
+    adapter.extractVisibleMessages = () => {
+      extractionCount += 1;
+      // The older batch arrives after the old two-pass height check would
+      // already have declared the list complete.
+      if (extractionCount === 5) {
+        earliestMessageId = "user-first";
+        scrollHeight = 1_800;
+        container.scrollTop = 240;
+      }
+      return [{
+        key: earliestMessageId,
+        externalMessageId: earliestMessageId,
+        element,
+        ordinal: 0,
+        role: "user",
+        segments: [{ type: "text", content: earliestMessageId }],
+      }];
+    };
+
+    const result = await reachConversationTop(container, adapter, {
+      maxIterations: 30,
+      wait: async () => undefined,
+    });
+
+    expect(result.reached).toBe(true);
+    expect(result.container).toBe(container);
+    expect(extractionCount).toBeGreaterThanOrEqual(17);
+    expect(earliestMessageId).toBe("user-first");
+    expect(container.scrollTop).toBe(0);
+  });
+
+  it("continues top loading when ChatGPT remounts its scroll container", async () => {
+    document.body.innerHTML = "";
+    const firstContainer = document.createElement("section");
+    const secondContainer = document.createElement("section");
+    const element = document.createElement("article");
+    for (const container of [firstContainer, secondContainer]) {
+      container.style.overflowY = "auto";
+      Object.defineProperties(container, {
+        clientHeight: { configurable: true, value: 400 },
+        scrollHeight: { configurable: true, value: 1_400 },
+        scrollTop: { configurable: true, writable: true, value: 700 },
+      });
+      document.body.append(container);
+    }
+    firstContainer.append(element);
+    const definition = adapterDefinitions.find((item) => item.provider === "chatgpt")!;
+    const adapter = createAdapterRuntime(definition);
+    let extractionCount = 0;
+    adapter.extractVisibleMessages = () => {
+      extractionCount += 1;
+      if (extractionCount === 3) secondContainer.append(element);
+      return [{
+        key: "user-first",
+        externalMessageId: "user-first",
+        element,
+        ordinal: 0,
+        role: "user",
+        segments: [{ type: "text", content: "First question" }],
+      }];
+    };
+
+    const result = await reachConversationTop(firstContainer, adapter, {
+      stablePasses: 2,
+      maxIterations: 12,
+      wait: async () => undefined,
+    });
+
+    expect(result).toEqual({ container: secondContainer, reached: true });
+    expect(firstContainer.scrollTop).toBe(0);
+    expect(secondContainer.scrollTop).toBe(0);
   });
 
   it("removes provider speaker chrome from the archived message text", () => {

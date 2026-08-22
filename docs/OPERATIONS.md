@@ -172,4 +172,4 @@ sh /volume1/docker/ai-conversation-archive/source/scripts/restore.sh
 
 ## 13. 发布一致性
 
-根包、server、web、contracts、Chrome Manifest 和同步代理必须同时为 2.1.0/V2.1.0。CHANGELOG 顶部新增本次事实，不改写历史版本。交付包不得包含 node_modules、.env、数据库、导入临时文件、本地日志、浏览器状态或旧 release 目录。
+产品版本发布时，根包、server、web、contracts 和同步代理保持一致；Chrome 组件补丁版可独立发布，但 Manifest、package.json、CHANGELOG 与最新 Chrome 发布包版本必须一致。CHANGELOG 顶部新增本次事实，不改写历史版本。交付包不得包含 node_modules、.env、数据库、导入临时文件、本地日志、浏览器状态或旧 release 目录。

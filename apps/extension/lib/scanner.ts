@@ -47,25 +47,95 @@ async function waitForGeneration(adapter: AdapterRuntime): Promise<boolean> {
   return false;
 }
 
-async function reachTop(
+export interface ReachConversationTopOptions {
+  maxIterations?: number;
+  stablePasses?: number;
+  delayMs?: number;
+  wait?: (milliseconds: number) => Promise<void>;
+}
+
+export interface ReachConversationTopResult {
+  container: HTMLElement;
+  reached: boolean;
+}
+
+function scrollContainerForMessages(
+  messages: ExtractedMessage[],
+  fallback: HTMLElement,
+): HTMLElement {
+  const firstConnected = messages.find((message) => message.element.isConnected);
+  if (!firstConnected) return fallback;
+  const candidate = elementScrollContainer(firstConnected.element);
+  return candidate.isConnected ? candidate : fallback;
+}
+
+function forceScrollToTop(
   container: HTMLElement,
+  firstMessage: ExtractedMessage | undefined,
+): void {
+  if (
+    firstMessage?.element.isConnected &&
+    typeof firstMessage.element.scrollIntoView === "function"
+  ) {
+    firstMessage.element.scrollIntoView({
+      block: "start",
+      inline: "nearest",
+      behavior: "auto",
+    });
+  }
+  container.scrollTop = 0;
+}
+
+function topLoadEvidence(
+  container: HTMLElement,
+  messages: ExtractedMessage[],
+): string {
+  const first = messages[0];
+  return [
+    container.scrollHeight,
+    messages.length,
+    first?.externalMessageId ?? first?.key ?? "",
+  ].join(":");
+}
+
+export async function reachConversationTop(
+  initialContainer: HTMLElement,
   adapter: AdapterRuntime,
-): Promise<boolean> {
+  options: ReachConversationTopOptions = {},
+): Promise<ReachConversationTopResult> {
+  const chatGptHistory = adapter.definition.provider === "chatgpt";
+  const stablePasses = options.stablePasses ?? (chatGptHistory ? 12 : 2);
+  const delayMs = options.delayMs ?? (chatGptHistory ? 650 : 450);
+  const maxIterations = options.maxIterations ?? (chatGptHistory ? 160 : 100);
+  const wait = options.wait ?? sleep;
+  let container = initialContainer;
   let stableHeightPasses = 0;
-  let previousHeight = -1;
-  for (let iteration = 0; iteration < 100; iteration += 1) {
-    container.scrollTop = 0;
-    await sleep(450);
-    adapter.extractVisibleMessages();
-    if (atTop(container) && container.scrollHeight === previousHeight) {
+  let previousEvidence = "";
+  let visibleMessages = adapter.extractVisibleMessages();
+  for (let iteration = 0; iteration < maxIterations; iteration += 1) {
+    forceScrollToTop(container, visibleMessages[0]);
+    await wait(delayMs);
+    visibleMessages = adapter.extractVisibleMessages();
+    const currentContainer = scrollContainerForMessages(visibleMessages, container);
+    if (currentContainer !== container) {
+      container = currentContainer;
+      stableHeightPasses = 0;
+      previousEvidence = "";
+      forceScrollToTop(container, visibleMessages[0]);
+      continue;
+    }
+    const evidence = topLoadEvidence(container, visibleMessages);
+    if (atTop(container) && evidence === previousEvidence) {
       stableHeightPasses += 1;
     } else {
       stableHeightPasses = 0;
     }
-    previousHeight = container.scrollHeight;
-    if (stableHeightPasses >= 2) return true;
+    previousEvidence = evidence;
+    if (stableHeightPasses >= stablePasses) {
+      return { container, reached: true };
+    }
   }
-  return false;
+  return { container, reached: false };
 }
 
 export function mergeVisible(
@@ -102,21 +172,33 @@ export function mergeVisible(
 }
 
 async function scanToBottom(
-  container: HTMLElement,
+  initialContainer: HTMLElement,
   adapter: AdapterRuntime,
-): Promise<{ messages: ExtractedMessage[]; bottomReached: boolean }> {
+): Promise<{
+  messages: ExtractedMessage[];
+  bottomReached: boolean;
+  container: HTMLElement;
+}> {
   const ordered: ExtractedMessage[] = [];
+  let container = initialContainer;
   let stableBottomPasses = 0;
   let previousHeight = -1;
   for (let iteration = 0; iteration < 2_000; iteration += 1) {
-    mergeVisible(ordered, adapter.extractVisibleMessages());
+    const visibleMessages = adapter.extractVisibleMessages();
+    const currentContainer = scrollContainerForMessages(visibleMessages, container);
+    if (currentContainer !== container) {
+      container = currentContainer;
+      stableBottomPasses = 0;
+      previousHeight = -1;
+    }
+    mergeVisible(ordered, visibleMessages);
     if (atBottom(container)) {
       if (container.scrollHeight === previousHeight) stableBottomPasses += 1;
       else stableBottomPasses = 0;
       previousHeight = container.scrollHeight;
       if (stableBottomPasses >= 2) {
         mergeVisible(ordered, adapter.extractVisibleMessages());
-        return { messages: ordered, bottomReached: true };
+        return { messages: ordered, bottomReached: true, container };
       }
     }
     const step = Math.max(Math.floor(container.clientHeight * 0.75), 320);
@@ -126,7 +208,7 @@ async function scanToBottom(
     );
     await sleep(180);
   }
-  return { messages: ordered, bottomReached: atBottom(container) };
+  return { messages: ordered, bottomReached: atBottom(container), container };
 }
 
 async function sha256(value: string): Promise<string> {
@@ -228,18 +310,21 @@ export async function scanConversation(
   const generationStable = await waitForGeneration(adapter);
   const initialMessages = adapter.extractVisibleMessages();
   if (initialMessages.length < 1) throw new Error("未识别到对话消息");
-  const container = elementScrollContainer(initialMessages[0]!.element);
-  const originalTop = container.scrollTop;
-  const originalHeight = container.scrollHeight;
-  const topReached = await reachTop(container, adapter);
-  const scanned = await scanToBottom(container, adapter);
+  const initialContainer = elementScrollContainer(initialMessages[0]!.element);
+  const originalTop = initialContainer.scrollTop;
+  const originalHeight = initialContainer.scrollHeight;
+  const topResult = await reachConversationTop(initialContainer, adapter);
+  const scanned = await scanToBottom(topResult.container, adapter);
   const finalStable = generationStable && !adapter.isStreaming();
-  const restoreRatio = originalHeight > container.clientHeight
-    ? originalTop / (originalHeight - container.clientHeight)
+  const restoreRatio = originalHeight > initialContainer.clientHeight
+    ? originalTop / (originalHeight - initialContainer.clientHeight)
     : 0;
-  container.scrollTop = Math.max(
+  scanned.container.scrollTop = Math.max(
     0,
-    restoreRatio * Math.max(0, container.scrollHeight - container.clientHeight),
+    restoreRatio * Math.max(
+      0,
+      scanned.container.scrollHeight - scanned.container.clientHeight,
+    ),
   );
 
   const messages: CaptureMessage[] = scanned.messages.map(
@@ -250,7 +335,7 @@ export async function scanConversation(
   );
   const roles = new Set(messages.map((message) => message.role));
   const rolesValid = roles.has("user") && roles.has("assistant");
-  const complete = topReached && scanned.bottomReached && finalStable && rolesValid;
+  const complete = topResult.reached && scanned.bottomReached && finalStable && rolesValid;
   const fingerprintInput = messages
     .map((message) =>
       `${message.role}:${message.segments
@@ -272,12 +357,12 @@ export async function scanConversation(
     ...(options.triggerReason ? { triggerReason: options.triggerReason } : {}),
     completeness: {
       status: complete ? "complete" : "partial",
-      topReached,
+      topReached: topResult.reached,
       bottomReached: scanned.bottomReached,
       stable: finalStable,
       ...(!complete
         ? {
-            reason: !topReached
+            reason: !topResult.reached
               ? "未能确认首轮"
               : !scanned.bottomReached
                 ? "未能确认末轮"
