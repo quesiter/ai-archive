@@ -146,6 +146,7 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .progress-breakdown { display: flex; gap: .45rem; flex-wrap: wrap; margin-top: .55rem; }
 .progress-breakdown span { border-radius: 999px; background: #eef5f3; color: #4e6970; padding: .18rem .5rem; font-weight: 750; }
 .progress-error { margin: .62rem 0 0; color: #a53b4c; font-size: .82rem; }
+.ai-deferred-notice { margin: .68rem 0 0; padding: .62rem .72rem; border-radius: 8px; background: #fff8e8; color: #865d0d; border: 1px solid #f0d89a; font-size: .82rem; line-height: 1.55; }
 .failure-list { margin-top: .72rem; padding-top: .72rem; border-top: 1px solid rgba(52,118,117,.1); color: #8a4350; font-size: .78rem; }
 .failure-list p { margin: .22rem 0; line-height: 1.55; word-break: break-word; }
 .panel-subtitle { margin: .24rem 0 0; color: var(--muted); font-size: .76rem; }
@@ -239,6 +240,7 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .run-row > div:first-child { display: flex; flex-direction: column; gap: .26rem; min-width: 150px; }
 .run-progress { flex: 1; min-width: 220px; }
 .run-progress .progress-bar { margin: 0 0 .32rem; }
+.run-progress .ai-deferred-inline { color: #865d0d; line-height: 1.5; }
 .import-toolbar { align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .import-run-row {
   display: grid;
@@ -607,14 +609,42 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 }
 .project-row p { margin: .25rem 0; color: var(--muted); }
 .project-row > span { color: var(--muted); font-size: .78rem; }
-.knowledge-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .85rem; }
+.knowledge-definition-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  padding: 1rem 1.2rem;
+}
+.knowledge-definition-panel > div { min-width: 0; }
+.knowledge-definition-panel > div + div { border-left: 1px solid rgba(52,118,117,.12); padding-left: 1rem; }
+.knowledge-definition-panel h2 { margin-bottom: .4rem; }
+.knowledge-definition-panel p { margin: 0; color: var(--muted); font-size: .8rem; line-height: 1.6; }
+.knowledge-toolbar { margin-bottom: 1rem; }
+.knowledge-toolbar select { min-width: 150px; }
+.knowledge-project-list { display: flex; flex-direction: column; gap: 1.35rem; }
+.knowledge-project-section { min-width: 0; }
+.knowledge-project-section + .knowledge-project-section {
+  border-top: 1px solid rgba(52,118,117,.13);
+  padding-top: 1.35rem;
+}
+.knowledge-project-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: .8rem;
+  margin-bottom: .75rem;
+}
+.knowledge-project-header > div { display: flex; flex-direction: column; gap: .16rem; min-width: 0; }
+.knowledge-project-header > div > span { color: var(--muted); font-size: .68rem; font-weight: 750; }
+.knowledge-project-header h3 { margin: 0; color: #214950; font-size: 1.02rem; overflow-wrap: anywhere; }
+.knowledge-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .85rem; }
 .knowledge-card {
   min-width: 0;
   max-width: 100%;
   border: 1px solid rgba(52,118,117,.13);
   border-radius: 8px;
   padding: 1rem;
-  background: #fbfefe;
+  background: #fcfefe;
 }
 .knowledge-card > * { min-width: 0; }
 .knowledge-card header {
@@ -631,6 +661,13 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
   word-break: break-word;
   text-align: right;
 }
+.knowledge-card header time { white-space: nowrap; }
+.knowledge-type { color: #315d60; background: #eaf3f2; }
+.knowledge-type.decision { color: #185e51; background: #ddf2eb; }
+.knowledge-type.requirement { color: #315a8a; background: #e7effa; }
+.knowledge-type.risk { color: #934452; background: #f8e8eb; }
+.knowledge-type.open_question { color: #875d16; background: #f8efdc; }
+.knowledge-type.task { color: #76529a; background: #f0e9f7; }
 .knowledge-card h3 {
   font-size: .95rem;
   margin-bottom: .45rem;
@@ -657,6 +694,9 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+.knowledge-evidence-links { display: flex; flex-wrap: wrap; gap: .28rem .55rem; }
+.knowledge-evidence-links > span { width: 100%; color: #6c858a; font-weight: 700; }
+.knowledge-evidence-links a { color: var(--accent); font-weight: 700; }
 .upload-box { border: 1px dashed rgba(15,118,110,.35); border-radius: 8px; padding: 1.8rem; display: flex; align-items: center; gap: 1rem; background: #f8fbfd; }
 .device-row > div { display: flex; flex-direction: column; gap: .3rem; }
 .device-row > div:last-child { align-items: flex-end; color: var(--muted); font-size: .75rem; }
@@ -694,6 +734,7 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .alert { border-radius: 8px; padding: .82rem; margin: .8rem 0; border: 1px solid transparent; }
 .alert.error { background: #fff0f1; color: #913847; border-color: #f3cbd0; }
 .alert.success { background: #e5faf2; color: #146f5e; border-color: #bce9d9; }
+.alert.warning { background: #fff8e8; color: #865d0d; border-color: #f0d89a; }
 .breakable { display: block; word-break: break-all; margin: .5rem 0; }
 .empty-state { padding: 4rem 1rem; text-align: center; color: var(--muted); }
 
@@ -724,7 +765,9 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 }
 @media (max-width: 680px) {
   .content { padding: 1rem .75rem; }
-  .metric-grid, .project-metrics, .knowledge-grid, .form-grid { grid-template-columns: 1fr; }
+  .metric-grid, .project-metrics, .knowledge-grid, .knowledge-definition-panel, .form-grid { grid-template-columns: 1fr; }
+  .knowledge-definition-panel > div + div { border-left: 0; border-top: 1px solid rgba(52,118,117,.12); padding: 1rem 0 0; }
+  .knowledge-project-header { align-items: flex-start; flex-direction: column; }
   .two-column, .dashboard-main-grid { grid-template-columns: 1fr; }
   .category-dashboard-row { grid-template-columns: minmax(0, 1fr) 64px 64px; }
   .category-dashboard-row > .pill { grid-column: 2 / 4; justify-self: end; }

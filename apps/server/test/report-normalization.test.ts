@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  knowledgeTextNeedsChineseRewrite,
   normalizeConsolidationResponseInput,
   normalizeKnowledgeResponseInput,
   normalizeReportResponseInput,
@@ -98,5 +99,39 @@ describe("knowledge response normalization", () => {
 
     expect(result.items[0]?.type).toBe("risk");
     expect(result.items[0]?.sourceMessageOrdinals).toEqual([0]);
+  });
+
+  it("accepts Chinese knowledge type names", () => {
+    const result = normalizeKnowledgeResponseInput({
+      items: [
+        {
+          category: "决策",
+          title: "采用增量采集",
+          body: "已有完整基线后优先上传新增回答。",
+          sourceMessageOrdinals: [3],
+        },
+      ],
+    }) as { items: Array<{ type: string }> };
+
+    expect(result.items[0]?.type).toBe("decision");
+  });
+
+  it("detects untranslated English while allowing technical identifiers", () => {
+    expect(
+      knowledgeTextNeedsChineseRewrite(
+        "Warehouse Shelf Management for Laptop Assets",
+        "title",
+      ),
+    ).toBe(true);
+    expect(
+      knowledgeTextNeedsChineseRewrite(
+        "Laptop assets require warehouse shelf location tracking and ordered slots.",
+      ),
+    ).toBe(true);
+    expect(
+      knowledgeTextNeedsChineseRewrite(
+        "出库完成后自动清空 shelfLocation 字段，并保留 deliveryStatus 回调状态。",
+      ),
+    ).toBe(false);
   });
 });

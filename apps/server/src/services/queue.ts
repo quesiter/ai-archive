@@ -1,5 +1,10 @@
 import PgBoss from "pg-boss";
 import { config } from "../config.js";
+import { AI_RATE_LIMIT_RETRY_DELAY_MS } from "./llm.js";
+
+const AI_RETRY_DELAY_SECONDS = Math.round(AI_RATE_LIMIT_RETRY_DELAY_MS / 1_000);
+// Safety retries cover a full weekly quota window if creating a delayed replacement job fails.
+const AI_RETRY_LIMIT = 7 * 24;
 
 export const queueNames = {
   weekly: "analysis-weekly",
@@ -21,6 +26,19 @@ export interface ReclassificationJobData {
 
 export interface KnowledgeRebuildJobData {
   taskId?: string;
+}
+
+export interface AiQueueScheduleOptions {
+  startAfter?: Date | string;
+}
+
+function scheduledSingletonKey(
+  base: string,
+  schedule: AiQueueScheduleOptions | undefined,
+): string {
+  if (!schedule?.startAfter) return base;
+  const timestamp = new Date(schedule.startAfter).getTime();
+  return `${base}:deferred:${Number.isFinite(timestamp) ? timestamp : String(schedule.startAfter)}`;
 }
 
 let bossPromise: Promise<PgBoss> | null = null;
@@ -45,27 +63,33 @@ export function getBoss(): Promise<PgBoss> {
 
 export async function enqueueAnalysis(
   kind: "weekly" | "monthly",
+  schedule?: AiQueueScheduleOptions,
 ): Promise<string | null> {
   const boss = await getBoss();
   return boss.send(
     kind === "weekly" ? queueNames.weekly : queueNames.monthly,
     { requestedAt: new Date().toISOString() },
-    { singletonKey: kind },
+    {
+      ...(schedule?.startAfter ? { startAfter: schedule.startAfter } : {}),
+      singletonKey: scheduledSingletonKey(kind, schedule),
+    },
   );
 }
 
 export async function enqueueConversationClassification(
   conversationId: string,
+  schedule?: AiQueueScheduleOptions,
 ): Promise<string | null> {
   const boss = await getBoss();
   return boss.send(
     queueNames.classifyConversation,
     { conversationId, requestedAt: new Date().toISOString() },
     {
-      retryLimit: 4,
-      retryDelay: 60,
-      retryBackoff: true,
-      singletonKey: conversationId,
+      retryLimit: AI_RETRY_LIMIT,
+      retryDelay: AI_RETRY_DELAY_SECONDS,
+      retryBackoff: false,
+      ...(schedule?.startAfter ? { startAfter: schedule.startAfter } : {}),
+      singletonKey: scheduledSingletonKey(conversationId, schedule),
       singletonSeconds: 30,
     },
   );
@@ -74,6 +98,7 @@ export async function enqueueConversationClassification(
 export async function enqueueUnlockedReclassification(
   input?: string | ReclassificationJobData,
   mode?: "economy" | "full",
+  schedule?: AiQueueScheduleOptions,
 ): Promise<string | null> {
   const boss = await getBoss();
   const data =
@@ -84,39 +109,48 @@ export async function enqueueUnlockedReclassification(
           mode: input?.mode ?? mode,
         };
   const offset = Math.max(0, Math.trunc(data.offset ?? 0));
-  const options = data.taskId
-    ? { singletonKey: `${data.taskId}:${offset}` }
-    : { singletonKey: "all-unlocked", singletonSeconds: 300 };
+  const singletonOptions = data.taskId
+    ? { singletonKey: scheduledSingletonKey(`${data.taskId}:${offset}`, schedule) }
+    : {
+        singletonKey: scheduledSingletonKey("all-unlocked", schedule),
+        singletonSeconds: 300,
+      };
   return boss.send(
     queueNames.reclassifyUnlocked,
     { ...data, offset, requestedAt: new Date().toISOString() },
     {
-      ...options,
+      ...singletonOptions,
+      ...(schedule?.startAfter ? { startAfter: schedule.startAfter } : {}),
       expireInHours: 6,
-      retryLimit: 1,
-      retryDelay: 60,
-      retryBackoff: true,
+      retryLimit: AI_RETRY_LIMIT,
+      retryDelay: AI_RETRY_DELAY_SECONDS,
+      retryBackoff: false,
     },
   );
 }
 
 export async function enqueueKnowledgeRebuild(
   input?: string | KnowledgeRebuildJobData,
+  schedule?: AiQueueScheduleOptions,
 ): Promise<string | null> {
   const boss = await getBoss();
   const data = typeof input === "string" ? { taskId: input } : { ...(input ?? {}) };
-  const options = data.taskId
-    ? { singletonKey: data.taskId }
-    : { singletonKey: "all-knowledge", singletonSeconds: 300 };
+  const singletonOptions = data.taskId
+    ? { singletonKey: scheduledSingletonKey(data.taskId, schedule) }
+    : {
+        singletonKey: scheduledSingletonKey("all-knowledge", schedule),
+        singletonSeconds: 300,
+      };
   return boss.send(
     queueNames.rebuildKnowledge,
     { ...data, requestedAt: new Date().toISOString() },
     {
-      ...options,
+      ...singletonOptions,
+      ...(schedule?.startAfter ? { startAfter: schedule.startAfter } : {}),
       expireInHours: 6,
-      retryLimit: 1,
-      retryDelay: 60,
-      retryBackoff: true,
+      retryLimit: AI_RETRY_LIMIT,
+      retryDelay: AI_RETRY_DELAY_SECONDS,
+      retryBackoff: false,
     },
   );
 }

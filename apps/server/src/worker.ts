@@ -12,6 +12,8 @@ import {
 import { sendReportEmailById } from "./services/email.js";
 import {
   enqueueAnalysis,
+  enqueueConversationClassification,
+  enqueueKnowledgeRebuild,
   enqueueUnlockedReclassification,
   getBoss,
   queueNames,
@@ -19,10 +21,27 @@ import {
   type ReclassificationJobData,
   stopBoss,
 } from "./services/queue.js";
+import {
+  deferredAiRetrySchedule,
+  isRetryableRateLimitError,
+  resolveAiRetrySchedule,
+} from "./services/llm.js";
 import { failStaleBackgroundTasks } from "./services/background-tasks.js";
 import { getBooleanSetting, getSetting } from "./services/settings.js";
 
 const boss = await getBoss();
+
+async function aiRetrySchedule(error: unknown) {
+  return deferredAiRetrySchedule(error) ?? await resolveAiRetrySchedule(error);
+}
+
+async function runAnalysisJob(kind: "weekly" | "monthly") {
+  const result = await runAnalysis(kind);
+  if ("deferred" in result) {
+    await enqueueAnalysis(kind, { startAfter: result.retryAt });
+  }
+  return result;
+}
 
 await failStaleBackgroundTasks("classification_rebuild").catch((error) => {
   console.warn("Failed to mark stale classification tasks", error);
@@ -31,8 +50,8 @@ await failStaleBackgroundTasks("knowledge_rebuild").catch((error) => {
   console.warn("Failed to mark stale knowledge tasks", error);
 });
 
-await boss.work(queueNames.weekly, async () => runAnalysis("weekly"));
-await boss.work(queueNames.monthly, async () => runAnalysis("monthly"));
+await boss.work(queueNames.weekly, async () => runAnalysisJob("weekly"));
+await boss.work(queueNames.monthly, async () => runAnalysisJob("monthly"));
 await boss.work(
   queueNames.classifyConversation,
   { includeMetadata: true },
@@ -43,7 +62,17 @@ await boss.work(
     if (typeof conversationId !== "string") {
       throw new Error("Classification job conversationId is missing");
     }
-    return classifyConversation(conversationId);
+    try {
+      return await classifyConversation(conversationId);
+    } catch (error) {
+      if (!isRetryableRateLimitError(error)) throw error;
+      const schedule = await aiRetrySchedule(error);
+      const jobId = await enqueueConversationClassification(conversationId, {
+        startAfter: schedule.retryAt,
+      });
+      if (!jobId) throw error;
+      return { deferred: true, retryAt: schedule.retryAt };
+    }
   },
 );
 await boss.work(
@@ -71,7 +100,19 @@ await boss.work(
       );
     }
     if (typeof data?.offset === "number") input.offset = data.offset;
-    return reclassifyUnlockedConversations(input);
+    try {
+      return await reclassifyUnlockedConversations(input);
+    } catch (error) {
+      if (!isRetryableRateLimitError(error)) throw error;
+      const schedule = await aiRetrySchedule(error);
+      const jobId = await enqueueUnlockedReclassification(
+        data,
+        undefined,
+        { startAfter: schedule.retryAt },
+      );
+      if (!jobId) throw error;
+      return { deferred: true, retryAt: schedule.retryAt };
+    }
   },
 );
 await boss.work(
@@ -79,7 +120,17 @@ await boss.work(
   { includeMetadata: true },
   async (jobs) => {
     const data = jobs[0]?.data as KnowledgeRebuildJobData | undefined;
-    return rebuildKnowledge(data?.taskId);
+    try {
+      return await rebuildKnowledge(data?.taskId);
+    } catch (error) {
+      if (!isRetryableRateLimitError(error)) throw error;
+      const schedule = await aiRetrySchedule(error);
+      const jobId = await enqueueKnowledgeRebuild(data, {
+        startAfter: schedule.retryAt,
+      });
+      if (!jobId) throw error;
+      return { deferred: true, retryAt: schedule.retryAt };
+    }
   },
 );
 await boss.work(queueNames.importArchive, { includeMetadata: true }, async (jobs) => {

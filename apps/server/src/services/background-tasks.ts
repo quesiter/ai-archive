@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, lte } from "drizzle-orm";
+import { and, desc, eq, inArray, lte, sql } from "drizzle-orm";
 import { db } from "../db.js";
 import { backgroundTasks } from "../schema.js";
 import { safeStoredError, writeOperationLog } from "./operation-log.js";
@@ -124,6 +124,7 @@ export async function failStaleBackgroundTasks(
         eq(backgroundTasks.kind, kind),
         inArray(backgroundTasks.status, ["queued", "running"]),
         lte(backgroundTasks.updatedAt, cutoff),
+        sql`coalesce(${backgroundTasks.stats}->>'stage', '') <> 'deferred'`,
       ),
     )
     .returning();

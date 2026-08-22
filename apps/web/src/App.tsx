@@ -25,6 +25,7 @@ import {
 import { api, ApiError, jsonBody } from "./api.js";
 
 type UnknownRecord = Record<string, any>;
+const WEB_VERSION = "V260822-1";
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -163,6 +164,10 @@ function Shell({ children, onLogout }: { children: ReactNode; onLogout: () => vo
             </NavLink>
           ))}
         </nav>
+        <div className="sidebar-version" aria-label={`系统版本 ${WEB_VERSION}`}>
+          <span>系统版本</span>
+          <strong>{WEB_VERSION}</strong>
+        </div>
         <button className="ghost" onClick={onLogout}>退出登录</button>
       </aside>
       <main className="content">{children}</main>
@@ -260,11 +265,36 @@ function stageLabel(stage: unknown): string {
       importing: "写入归档",
       preparing: "准备数据",
       extracting: "抽取知识",
+      rebuilding: "重建知识",
+      consolidating: "整理知识",
+      deferred: "等待 AI 额度恢复",
       reporting: "生成报告",
       completed: "完成",
     } as Record<string, string>
   )[String(stage)] ?? String(stage ?? "");
 }
+
+const knowledgeTypeLabels: Record<string, string> = {
+  decision: "决策",
+  requirement: "需求",
+  fact: "事实与结论",
+  idea: "已采纳想法",
+  task: "待办任务",
+  risk: "风险",
+  resource: "资源",
+  open_question: "待解问题",
+};
+
+const knowledgeTypeOrder = [
+  "decision",
+  "requirement",
+  "fact",
+  "risk",
+  "open_question",
+  "task",
+  "resource",
+  "idea",
+];
 
 function taskPercent(task: UnknownRecord | null): number {
   if (!task) return 0;
@@ -280,6 +310,47 @@ function formatTaskTime(value: unknown): string {
   if (typeof value !== "string" && !(value instanceof Date)) return "";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
+}
+
+function useTaskClock(enabled: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [enabled]);
+  return now;
+}
+
+function formatRetryCountdown(milliseconds: number): string {
+  if (milliseconds <= 0) return "即将";
+  const totalMinutes = Math.max(1, Math.ceil(milliseconds / 60_000));
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+  return [
+    days ? `${days}天` : "",
+    hours ? `${hours}小时` : "",
+    minutes ? `${minutes}分钟` : "",
+  ].filter(Boolean).join("");
+}
+
+function deferredAiTaskMessage(stats: UnknownRecord, now: number): string {
+  if (stats.stage !== "deferred" || typeof stats.retryAt !== "string") return "";
+  const retryAt = new Date(stats.retryAt);
+  if (Number.isNaN(retryAt.getTime())) return "";
+  const retryWindow = String(stats.retryWindow ?? "rate_limit");
+  const subject =
+    retryWindow === "weekly"
+      ? "当前 Token Plan 周额度已用完"
+      : retryWindow === "five_hour"
+        ? "当前 Token Plan 5 小时额度已用完"
+        : "当前 AI 请求频率受限";
+  const countdown = formatRetryCountdown(retryAt.getTime() - now);
+  const bufferMinutes = Math.round(Number(stats.retryBufferMs ?? 0) / 60_000);
+  const buffer = bufferMinutes > 0 ? `，已包含${bufferMinutes}分钟缓冲` : "";
+  return `${subject}，将在${countdown}后继续该任务（预计 ${retryAt.toLocaleString()}${buffer}）。`;
 }
 
 function toFiniteNumber(value: unknown): number {
@@ -1178,6 +1249,7 @@ function Projects() {
   const [mergeTargetId, setMergeTargetId] = useState("");
   const [mergeMessage, setMergeMessage] = useState("");
   const classificationActive = isActiveStatus(classificationTask?.status);
+  const classificationClock = useTaskClock(classificationActive);
   const overview = overviewState.data ?? {};
   const projectGroups = Array.isArray(overview.projects) ? overview.projects : [];
   const categorizedProjectGroups = projectGroups.filter(
@@ -1315,6 +1387,12 @@ function Projects() {
 
   const percent = taskPercent(classificationTask);
   const stats = taskStats(classificationTask);
+  const classificationDeferredMessage = deferredAiTaskMessage(
+    stats,
+    classificationClock,
+  );
+  const visibleClassificationMessage =
+    classificationDeferredMessage || classificationMessage;
   const failureSamples = taskFailureSamples(classificationTask);
   const candidateReasonEntries = taskCandidateReasonEntries(classificationTask);
   const classificationScopeLabel =
@@ -1345,9 +1423,9 @@ function Projects() {
         }
       />
       <ErrorBanner message={error || overviewState.error} />
-      {classificationMessage && (
-        <div className={`alert ${classificationTask?.status === "failed" ? "error" : "success"}`}>
-          {classificationMessage}
+      {visibleClassificationMessage && (
+        <div className={`alert ${classificationTask?.status === "failed" ? "error" : classificationDeferredMessage ? "warning" : "success"}`}>
+          {visibleClassificationMessage}
         </div>
       )}
       <section className="panel summary-panel">
@@ -1364,7 +1442,10 @@ function Projects() {
         <section className="panel progress-panel">
           <div className="progress-header">
             <div>
-              <strong>智能归类 · {statusLabel(classificationTask.status)}</strong>
+              <strong>
+                智能归类 · {statusLabel(classificationTask.status)}
+                {stats.stage ? ` · ${stageLabel(stats.stage)}` : ""}
+              </strong>
               <span>{formatTaskTime(classificationTask.updatedAt)}</span>
             </div>
             <span>{percent}%</span>
@@ -1384,6 +1465,9 @@ function Projects() {
             <span>跳过 {stats.skipped ?? 0}</span>
             <span>失败 {classificationTask.failedCount ?? 0}</span>
           </div>
+          {classificationDeferredMessage && (
+            <p className="ai-deferred-notice">{classificationDeferredMessage}</p>
+          )}
           {candidateReasonEntries.length > 0 && (
             <div className="progress-breakdown">
               {candidateReasonEntries.map((item) => (
@@ -1393,7 +1477,7 @@ function Projects() {
               ))}
             </div>
           )}
-          {classificationTask.error && (
+          {classificationTask.error && !classificationDeferredMessage && (
             <p className="progress-error">{classificationTask.error}</p>
           )}
           {failureSamples.length > 0 && (
@@ -1596,19 +1680,78 @@ function Projects() {
 }
 
 function KnowledgePage() {
-  const knowledgeState = useLoad(() => api<UnknownRecord[]>("/api/v1/knowledge"), []);
+  const knowledgeState = useLoad(
+    () => api<UnknownRecord[]>("/api/v1/knowledge?status=active"),
+    [],
+  );
   const overviewState = useLoad(() => api<UnknownRecord>("/api/v1/projects/overview"), []);
-  const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [task, setTask] = useState<UnknownRecord | null>(null);
+  const [projectFilter, setProjectFilter] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [query, setQuery] = useState("");
   const active = isActiveStatus(task?.status);
+  const knowledgeClock = useTaskClock(active);
+  const knowledgeTaskStats = taskStats(task);
+  const knowledgeDeferredMessage = deferredAiTaskMessage(
+    knowledgeTaskStats,
+    knowledgeClock,
+  );
+  const visibleKnowledgeMessage = knowledgeDeferredMessage || message;
   const knowledge = knowledgeState.data ?? [];
   const overview = overviewState.data ?? {};
   const projectGroups = Array.isArray(overview.projects) ? overview.projects : [];
   const projectCount = Number(overview.totals?.projectCount ?? projectGroups.length);
-  const knowledgeCount = Number(overview.totals?.knowledgeCount ?? knowledge.length);
+  const knowledgeCount = knowledge.length;
   const activeProjects = Number(overview.totals?.activeProjectCount ?? 0);
   const sourceProjectCount = new Set(knowledge.map((item) => item.projectId)).size;
+  const projectsWithKnowledge = Array.from(
+    new Map(
+      knowledge.map((item) => [String(item.projectId), String(item.projectName)]),
+    ).entries(),
+  ).sort((left, right) => left[1].localeCompare(right[1], "zh-CN"));
+  const availableTypes = [...new Set(knowledge.map((item) => String(item.type)))]
+    .sort((left, right) => {
+      const leftIndex = knowledgeTypeOrder.indexOf(left);
+      const rightIndex = knowledgeTypeOrder.indexOf(right);
+      return (leftIndex < 0 ? 99 : leftIndex) - (rightIndex < 0 ? 99 : rightIndex);
+    });
+  const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
+  const filteredKnowledge = knowledge.filter((item) => {
+    if (projectFilter && item.projectId !== projectFilter) return false;
+    if (typeFilter && item.type !== typeFilter) return false;
+    if (!normalizedQuery) return true;
+    return `${item.title ?? ""}\n${item.body ?? ""}\n${item.projectName ?? ""}`
+      .toLocaleLowerCase("zh-CN")
+      .includes(normalizedQuery);
+  });
+  const knowledgeGroups = new Map<
+    string,
+    { id: string; name: string; items: UnknownRecord[] }
+  >();
+  for (const item of filteredKnowledge) {
+    const key = String(item.projectId);
+    const group = knowledgeGroups.get(key) ?? {
+      id: key,
+      name: String(item.projectName ?? "未命名项目"),
+      items: [],
+    };
+    group.items.push(item);
+    knowledgeGroups.set(key, group);
+  }
+  const groupedKnowledge = [...knowledgeGroups.values()]
+    .map((group) => ({
+      ...group,
+      items: group.items.sort((left, right) => {
+        const leftIndex = knowledgeTypeOrder.indexOf(String(left.type));
+        const rightIndex = knowledgeTypeOrder.indexOf(String(right.type));
+        if (leftIndex !== rightIndex) {
+          return (leftIndex < 0 ? 99 : leftIndex) - (rightIndex < 0 ? 99 : rightIndex);
+        }
+        return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      }),
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
 
   useEffect(() => {
     let cancelled = false;
@@ -1663,33 +1806,60 @@ function KnowledgePage() {
 
   const conclusion =
     knowledgeCount > 0
-      ? `当前共有 ${knowledgeCount} 条项目知识，覆盖 ${activeProjects} 个项目。`
+      ? `已沉淀 ${knowledgeCount} 条有效知识，覆盖 ${sourceProjectCount} 个项目。`
       : "当前还没有项目知识，先完成归类或重建一次知识库。";
 
   return (
     <>
       <PageHeader
         title="项目知识"
-        subtitle="从已归类会话中抽取出的可复用项目知识。"
+        subtitle="把会话整理成可追溯、可复用、可继续维护的中文项目知识。"
         actions={
           <div className="button-group">
             <button disabled={active} onClick={() => void runRebuild()}>
-              {active ? "重建中" : "重建知识"}
+              {active ? "重建中" : "按新标准重建"}
             </button>
           </div>
         }
       />
-      <ErrorBanner message={error || knowledgeState.error || overviewState.error} />
-      {message && <div className={`alert ${task?.status === "failed" ? "error" : "success"}`}>{message}</div>}
+      <ErrorBanner message={knowledgeState.error || overviewState.error} />
+      {visibleKnowledgeMessage && (
+        <div
+          className={`alert ${
+            task?.status === "failed"
+              ? "error"
+              : knowledgeDeferredMessage
+                ? "warning"
+                : "success"
+          }`}
+        >
+          {visibleKnowledgeMessage}
+        </div>
+      )}
       <section className="panel summary-panel">
         <h2>结论</h2>
         <p>{conclusion}</p>
+      </section>
+      <section className="panel knowledge-definition-panel">
+        <div>
+          <h2>这里保存什么</h2>
+          <p>已确认的决策、稳定需求、事实结论、风险、资源，以及仍需跟进的重要问题。</p>
+        </div>
+        <div>
+          <h2>这里不会保存什么</h2>
+          <p>助手的实施计划、代码生成步骤、过程播报、重复摘要、临时状态和无证据猜测。</p>
+        </div>
       </section>
       {task && (
         <section className="panel progress-panel">
           <div className="progress-header">
             <div>
-              <strong>项目知识 · {statusLabel(task.status)}</strong>
+              <strong>
+                项目知识 · {statusLabel(task.status)}
+                {knowledgeTaskStats.stage
+                  ? ` · ${stageLabel(knowledgeTaskStats.stage)}`
+                  : ""}
+              </strong>
               <span>{formatTaskTime(task.updatedAt)}</span>
             </div>
             <span>{taskPercent(task)}%</span>
@@ -1702,7 +1872,12 @@ function KnowledgePage() {
             <span>成功 {task.succeededCount ?? 0}</span>
             <span>失败 {task.failedCount ?? 0}</span>
           </div>
-          {task.error && <p className="progress-error">{task.error}</p>}
+          {knowledgeDeferredMessage && (
+            <p className="ai-deferred-notice">{knowledgeDeferredMessage}</p>
+          )}
+          {task.error && !knowledgeDeferredMessage && (
+            <p className="progress-error">{task.error}</p>
+          )}
         </section>
       )}
       <section className="project-metrics">
@@ -1714,7 +1889,7 @@ function KnowledgePage() {
         <article className="metric">
           <span>知识条目</span>
           <strong>{knowledgeCount}</strong>
-          <small>按更新时间倒序</small>
+          <small>仅显示当前有效知识</small>
         </article>
         <article className="metric">
           <span>来源项目</span>
@@ -1725,35 +1900,88 @@ function KnowledgePage() {
       <section className="panel">
         <div className="section-title-row">
           <div>
-            <h2>知识条目</h2>
-            <p className="panel-subtitle">从已归类会话中抽取出的项目知识。</p>
+            <h2>知识库</h2>
+            <p className="panel-subtitle">按项目整理；每条知识都能回到原始消息核对。</p>
           </div>
-          <span className="pill">{knowledge.length} 条</span>
+          <span className="pill">{filteredKnowledge.length} / {knowledge.length} 条</span>
+        </div>
+        <div className="toolbar knowledge-toolbar">
+          <input
+            aria-label="搜索项目知识"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索标题、正文或项目"
+          />
+          <select
+            aria-label="按项目筛选知识"
+            value={projectFilter}
+            onChange={(event) => setProjectFilter(event.target.value)}
+          >
+            <option value="">全部项目</option>
+            {projectsWithKnowledge.map(([id, name]) => (
+              <option key={id} value={id}>{name}</option>
+            ))}
+          </select>
+          <select
+            aria-label="按类型筛选知识"
+            value={typeFilter}
+            onChange={(event) => setTypeFilter(event.target.value)}
+          >
+            <option value="">全部类型</option>
+            {availableTypes.map((type) => (
+              <option key={type} value={type}>{knowledgeTypeLabels[type] ?? type}</option>
+            ))}
+          </select>
         </div>
         {knowledgeState.loading ? (
           <Loading />
+        ) : groupedKnowledge.length === 0 ? (
+          <p className="empty-state">没有符合当前条件的知识</p>
         ) : (
-          <div className="knowledge-grid">
-            {knowledge.map((item) => (
-              <article className="knowledge-card" key={item.id}>
-                <header>
-                  <span className="pill">{item.type}</span>
-                  <span>{item.projectName}</span>
+          <div className="knowledge-project-list">
+            {groupedKnowledge.map((group) => (
+              <section className="knowledge-project-section" key={group.id}>
+                <header className="knowledge-project-header">
+                  <div>
+                    <span>项目</span>
+                    <h3>{group.name}</h3>
+                  </div>
+                  <span className="pill">{group.items.length} 条知识</span>
                 </header>
-                <h3>{item.title}</h3>
-                <p>{item.body}</p>
-                <footer>
-                  <span>{Math.round(item.confidence * 100)}%</span>
-                  {item.sourceReferences.map((reference: UnknownRecord, index: number) => (
-                    <Link
-                      key={`${reference.revisionId}-${reference.messageOrdinal}`}
-                      to={`/conversations/${reference.conversationId}?revisionId=${reference.revisionId}#message-${reference.messageOrdinal}`}
-                    >
-                      来源 {index + 1} · 消息 #{reference.messageOrdinal}
-                    </Link>
-                  ))}
-                </footer>
-              </article>
+                <div className="knowledge-grid">
+                  {group.items.map((item) => {
+                    const references = Array.isArray(item.sourceReferences)
+                      ? item.sourceReferences
+                      : [];
+                    return (
+                      <article className="knowledge-card" key={item.id}>
+                        <header>
+                          <span className={`pill knowledge-type ${String(item.type)}`}>
+                            {knowledgeTypeLabels[String(item.type)] ?? String(item.type)}
+                          </span>
+                          <time>{new Date(item.updatedAt).toLocaleDateString("zh-CN")}</time>
+                        </header>
+                        <h3>{item.title}</h3>
+                        <p>{item.body}</p>
+                        <footer>
+                          <span>置信度 {Math.round(Number(item.confidence) * 100)}%</span>
+                          <div className="knowledge-evidence-links">
+                            <span>原始依据 {references.length} 条</span>
+                            {references.map((reference: UnknownRecord, index: number) => (
+                              <Link
+                                key={`${reference.revisionId}-${reference.messageOrdinal}-${index}`}
+                                to={`/conversations/${reference.conversationId}?revisionId=${reference.revisionId}#message-${reference.messageOrdinal}`}
+                              >
+                                查看依据 {index + 1}（消息 #{reference.messageOrdinal}）
+                              </Link>
+                            ))}
+                          </div>
+                        </footer>
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
             ))}
           </div>
         )}
@@ -1767,6 +1995,7 @@ function Reports() {
   const runsState = useLoad(() => api<UnknownRecord[]>("/api/v1/analysis/runs"), []);
   const [reportMessage, setReportMessage] = useState("");
   const activeRuns = runsState.data?.filter((run) => isActiveStatus(run.status)) ?? [];
+  const reportClock = useTaskClock(activeRuns.length > 0);
   const activeRunIds = activeRuns.map((run) => run.id).join(",");
 
   useEffect(() => {
@@ -1800,7 +2029,101 @@ function Reports() {
 
   const weeklyActive = activeRuns.some((run) => run.kind === "weekly");
   const monthlyActive = activeRuns.some((run) => run.kind === "monthly");
-  return <><PageHeader title="报告" subtitle="每周知识增量与每月项目演进" actions={<div className="button-group"><button disabled={weeklyActive} onClick={() => void run("weekly")}>{weeklyActive ? "周报处理中" : "立即生成周报"}</button><button className="secondary" disabled={monthlyActive} onClick={() => void run("monthly")}>{monthlyActive ? "月报处理中" : "立即生成月报"}</button></div>} />{reportMessage && <div className="alert success">{reportMessage}</div>}<section className="panel"><h2>生成状态</h2>{runsState.loading ? <Loading label="加载运行状态中…" /> : runsState.error ? <ErrorBanner message={runsState.error} /> : runsState.data?.length ? <div className="run-list">{runsState.data.map((run) => { const percent = runProgress(run); const stats = run.stats ?? {}; const error = compactErrorMessage(run.error); return <div className="run-row" key={run.id}><div><strong>{run.kind === "weekly" ? "周报" : "月报"} · {statusLabel(run.status)}</strong><span>{new Date(run.windowStart).toLocaleDateString()} — {new Date(run.windowEnd).toLocaleDateString()}</span></div><div className="run-progress"><div className="progress-bar"><span style={{ width: `${percent}%` }} /></div><small>{stats.stage ? stageLabel(stats.stage) : formatTaskTime(run.updatedAt ?? run.createdAt)}{typeof stats.analyzedConversations === "number" ? ` · 会话 ${stats.analyzedConversations}` : ""}{typeof stats.knowledgeCount === "number" ? ` · 知识 ${stats.knowledgeCount}` : ""}{error ? ` · ${error}` : ""}</small></div><span className={`pill ${statusClass(run.status)}`}>{statusLabel(run.status)}</span></div>; })}</div> : <p className="muted">还没有报告生成任务</p>}</section>{state.loading ? <Loading /> : state.error ? <ErrorBanner message={state.error} /> : <div className="card-list">{state.data!.map((report) => <Link className="report-card" to={`/reports/${report.id}`} key={report.id}><span className="pill">{report.kind}</span><h3>{report.title}</h3><p>{report.summary}</p><time>{new Date(report.createdAt).toLocaleString()}</time></Link>)}</div>}</>;
+  return (
+    <>
+      <PageHeader
+        title="报告"
+        subtitle="每周知识增量与每月项目演进"
+        actions={
+          <div className="button-group">
+            <button disabled={weeklyActive} onClick={() => void run("weekly")}>
+              {weeklyActive ? "周报处理中" : "立即生成周报"}
+            </button>
+            <button
+              className="secondary"
+              disabled={monthlyActive}
+              onClick={() => void run("monthly")}
+            >
+              {monthlyActive ? "月报处理中" : "立即生成月报"}
+            </button>
+          </div>
+        }
+      />
+      {reportMessage && <div className="alert success">{reportMessage}</div>}
+      <section className="panel">
+        <h2>生成状态</h2>
+        {runsState.loading ? (
+          <Loading label="加载运行状态中…" />
+        ) : runsState.error ? (
+          <ErrorBanner message={runsState.error} />
+        ) : runsState.data?.length ? (
+          <div className="run-list">
+            {runsState.data.map((run) => {
+              const percent = runProgress(run);
+              const stats = run.stats ?? {};
+              const deferredMessage = deferredAiTaskMessage(stats, reportClock);
+              const error = deferredMessage ? "" : compactErrorMessage(run.error);
+              return (
+                <div className="run-row" key={run.id}>
+                  <div>
+                    <strong>
+                      {run.kind === "weekly" ? "周报" : "月报"} · {statusLabel(run.status)}
+                    </strong>
+                    <span>
+                      {new Date(run.windowStart).toLocaleDateString()} —{" "}
+                      {new Date(run.windowEnd).toLocaleDateString()}
+                    </span>
+                  </div>
+                  <div className="run-progress">
+                    <div className="progress-bar">
+                      <span style={{ width: `${percent}%` }} />
+                    </div>
+                    <small className={deferredMessage ? "ai-deferred-inline" : ""}>
+                      {deferredMessage ||
+                        `${
+                          stats.stage
+                            ? stageLabel(stats.stage)
+                            : formatTaskTime(run.updatedAt ?? run.createdAt)
+                        }${
+                          typeof stats.analyzedConversations === "number"
+                            ? ` · 会话 ${stats.analyzedConversations}`
+                            : ""
+                        }${
+                          typeof stats.knowledgeCount === "number"
+                            ? ` · 知识 ${stats.knowledgeCount}`
+                            : ""
+                        }${error ? ` · ${error}` : ""}`}
+                    </small>
+                  </div>
+                  <span className={`pill ${statusClass(run.status)}`}>
+                    {statusLabel(run.status)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="muted">还没有报告生成任务</p>
+        )}
+      </section>
+      {state.loading ? (
+        <Loading />
+      ) : state.error ? (
+        <ErrorBanner message={state.error} />
+      ) : (
+        <div className="card-list">
+          {state.data!.map((report) => (
+            <Link className="report-card" to={`/reports/${report.id}`} key={report.id}>
+              <span className="pill">{report.kind}</span>
+              <h3>{report.title}</h3>
+              <p>{report.summary}</p>
+              <time>{new Date(report.createdAt).toLocaleString()}</time>
+            </Link>
+          ))}
+        </div>
+      )}
+    </>
+  );
 }
 
 function ReportDetail() {
