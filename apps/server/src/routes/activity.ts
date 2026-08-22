@@ -27,7 +27,7 @@ function stageLabel(stage: unknown): string {
     {
       queued: "等待 Worker 接手",
       preparing: "准备数据",
-      extracting: "抽取知识",
+      extracting: "整理材料",
       reporting: "生成报告",
       completed: "完成",
     } as Record<string, string>
@@ -118,9 +118,7 @@ export async function activityRoutes(app: FastifyInstance): Promise<void> {
         title:
           task.kind === "storage_redaction"
             ? "敏感信息清理"
-            : task.kind === "knowledge_rebuild"
-              ? "项目知识分析"
-              : "智能归类",
+            : "项目与标签整理",
         status: task.status,
         severity: task.status === "failed" ? "error" : "normal",
         message: task.message ?? task.error ?? "",
@@ -151,8 +149,8 @@ export async function activityRoutes(app: FastifyInstance): Promise<void> {
             typeof stats.totalConversations === "number"
               ? `会话 ${stats.processedConversations}/${stats.totalConversations}`
               : "",
-            typeof stats.knowledgeCount === "number"
-              ? `知识 ${stats.knowledgeCount}`
+            typeof stats.tagCount === "number"
+              ? `标签 ${stats.tagCount}`
               : "",
           ]
             .filter(Boolean)

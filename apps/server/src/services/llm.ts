@@ -25,8 +25,16 @@ const MINIMAX_TOKEN_PLAN_LOOKUP_TIMEOUT_MS = 10_000;
 const MAX_TOKEN_PLAN_RETRY_DELAY_MS = 8 * 24 * 60 * 60_000;
 const MAX_AI_REQUEST_INTERVAL_SECONDS = 60 * 60;
 
-let aiRequestPacingGate: Promise<void> = Promise.resolve();
-let nextAiRequestStartAt = 0;
+export type AiRequestPriority = "interactive" | "batch";
+
+const aiRequestPacingGates: Record<AiRequestPriority, Promise<void>> = {
+  interactive: Promise.resolve(),
+  batch: Promise.resolve(),
+};
+const nextAiRequestStartAt: Record<AiRequestPriority, number> = {
+  interactive: 0,
+  batch: 0,
+};
 
 export function aiRequestPacingDelayMs(
   nextStartAt: number,
@@ -36,29 +44,42 @@ export function aiRequestPacingDelayMs(
   return Math.max(0, Math.ceil(nextStartAt - now));
 }
 
-async function waitForAiRequestPacing(): Promise<void> {
+export function aiRequestIntervalMs(
+  priority: AiRequestPriority,
+  batchIntervalSeconds: number,
+): number {
+  if (priority === "interactive") return 0;
+  if (!Number.isFinite(batchIntervalSeconds)) return 0;
+  return Math.max(0, Math.round(batchIntervalSeconds * 1_000));
+}
+
+async function waitForAiRequestPacing(
+  priority: AiRequestPriority = "batch",
+): Promise<void> {
   const enabled = await getBooleanSetting("ai.pacingEnabled", true);
   if (!enabled) return;
-  const intervalSeconds = await getNumberSetting(
-    "ai.requestIntervalSeconds",
-    DEFAULT_AI_REQUEST_INTERVAL_SECONDS,
-    { min: 0, max: MAX_AI_REQUEST_INTERVAL_SECONDS },
-  );
-  const intervalMs = Math.round(intervalSeconds * 1_000);
+  const intervalSeconds = priority === "interactive"
+    ? 0
+    : await getNumberSetting(
+        "ai.requestIntervalSeconds",
+        DEFAULT_AI_REQUEST_INTERVAL_SECONDS,
+        { min: 0, max: MAX_AI_REQUEST_INTERVAL_SECONDS },
+      );
+  const intervalMs = aiRequestIntervalMs(priority, intervalSeconds);
   if (intervalMs <= 0) return;
 
   let releaseGate: (() => void) | undefined;
-  const previousGate = aiRequestPacingGate;
-  aiRequestPacingGate = new Promise<void>((resolve) => {
+  const previousGate = aiRequestPacingGates[priority];
+  aiRequestPacingGates[priority] = new Promise<void>((resolve) => {
     releaseGate = resolve;
   });
   await previousGate;
   try {
-    const waitMs = aiRequestPacingDelayMs(nextAiRequestStartAt, Date.now());
+    const waitMs = aiRequestPacingDelayMs(nextAiRequestStartAt[priority], Date.now());
     if (waitMs > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
     }
-    nextAiRequestStartAt = Date.now() + intervalMs;
+    nextAiRequestStartAt[priority] = Date.now() + intervalMs;
   } finally {
     releaseGate?.();
   }
@@ -507,6 +528,7 @@ export async function completeStructured<T>(input: {
   system: string;
   user: string;
   schema: z.ZodType<T, z.ZodTypeDef, unknown>;
+  priority?: AiRequestPriority;
 }): Promise<T> {
   const llm = await loadLlmConfig();
   return withPinnedNetworkDispatcher(llm.baseURL, async (dispatcher) => {
@@ -525,7 +547,7 @@ export async function completeStructured<T>(input: {
     };
     let response;
     try {
-      await waitForAiRequestPacing();
+      await waitForAiRequestPacing(input.priority);
       response = await client.chat.completions.create(
         {
           ...baseRequest,
@@ -536,7 +558,7 @@ export async function completeStructured<T>(input: {
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (!/response_format|json_object|unsupported/i.test(message)) throw error;
-      await waitForAiRequestPacing();
+      await waitForAiRequestPacing(input.priority);
       response = await client.chat.completions.create(
         baseRequest,
         { timeout: STRUCTURED_COMPLETION_TIMEOUT_MS },
@@ -567,7 +589,7 @@ export async function testLlmConnection(input: LlmConfigInput = {}): Promise<{
     };
     let response;
     try {
-      await waitForAiRequestPacing();
+      await waitForAiRequestPacing("interactive");
       response = await client.chat.completions.create(
         {
           ...request,
@@ -578,7 +600,7 @@ export async function testLlmConnection(input: LlmConfigInput = {}): Promise<{
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (!/max_tokens|unsupported|not support/i.test(message)) throw error;
-      await waitForAiRequestPacing();
+      await waitForAiRequestPacing("interactive");
       response = await client.chat.completions.create(
         request,
         { timeout: TEST_COMPLETION_TIMEOUT_MS },

@@ -1,74 +1,52 @@
-# 知言归藏文档总览
+# 知言归藏 V2.1 文档索引
 
-> 汇智能之言，成项目之知。
+本文档集以当前 V2.1.0 源码、migration 0012、API、测试和 Compose 配置为准，只描述已经实现的能力。历史行为只在 CHANGELOG 中保留。
 
-本文档集以服务端、Web 和客户端 `V2.0.2` 的可执行代码、数据库迁移和部署配置为准，只描述已经实现的能力。规划设想不混入当前需求、API、界面或运维说明；历史行为仅保留在变更历史中。
+## 文档
 
-## 文档入口
+| 文档 | 内容 |
+| --- | --- |
+| REQUIREMENTS.md | 当前产品边界、功能与验收要求 |
+| SYSTEM-DESIGN.md | 组件、数据流、整理、搜索、时间线、报告和安全设计 |
+| UI-DESIGN.md | Web 信息架构、页面与响应式行为 |
+| DATA-MODEL.md | 当前表、关系、迁移与备份映射 |
+| API.md | 当前 HTTP API |
+| USER-GUIDE.md | 安装后的日常使用 |
+| DEPLOYMENT.md | NAS、Web、插件和同步代理部署 |
+| OPERATIONS.md | 升级、监控、备份、恢复与故障排查 |
+| WINDOWS-SYNC.md | Windows 同步代理 |
+| MACOS-SYNC.md | macOS 同步代理 |
+| CHANGELOG.md | 各历史版本真实变更 |
 
-| 文档 | 读者与用途 | 事实来源 |
-| --- | --- | --- |
-| [项目需求文档](REQUIREMENTS.md) | 产品与研发；确认当前产品范围、验收口径和边界。 | Web/客户端行为、API、测试。 |
-| [系统设计文档](SYSTEM-DESIGN.md) | 研发与维护者；理解模块、数据流、任务编排、AI 和安全设计。 | 服务端、Worker、客户端源码。 |
-| [界面设计文档](UI-DESIGN.md) | 产品、设计与前端；核对 Web、扩展和同步客户端界面。 | `apps/web`、`apps/extension`、同步脚本。 |
-| [数据库设计文档](DATA-MODEL.md) | 后端与 DBA；核对表、关系、约束、幂等和生命周期。 | `schema.ts` 与 `0000`—`0011` 迁移。 |
-| [API 文档](API.md) | 前后端与集成方；调用当前已注册 HTTP 接口。 | `apps/server/src/routes`。 |
-| [用户手册](USER-GUIDE.md) | 管理员；完成登录、采集、同步、归类、知识、报告与脱敏操作。 | 当前 Web 与客户端。 |
-| [部署文档](DEPLOYMENT.md) | 部署人员；全新安装、反向代理、客户端发布和升级。 | Compose、Dockerfile、更新脚本。 |
-| [运维手册](OPERATIONS.md) | 运维人员；监控、迁移、备份恢复、排障与发布检查。 | 运行配置、脚本和队列实现。 |
-| [Windows 同步](WINDOWS-SYNC.md) | Windows 用户；安装便携同步包和后台计划任务。 | Windows 脚本。 |
-| [macOS 同步](MACOS-SYNC.md) | macOS 用户；安装便携同步包和 LaunchAgent。 | macOS 脚本。 |
-| [变更历史](CHANGELOG.md) | 所有人；追踪已发布版本变化。 | Git 历史与发布内容。 |
+## 当前组件版本
 
-## 当前软件组成
+| 组件 | 版本 |
+| --- | --- |
+| 服务端与 Web | V2.1.0 |
+| Chrome 插件 | V2.1.0 |
+| Windows/macOS 同步代理 | V2.1.0 |
+| 共享协议 | 2.1.0 |
 
-| 组件 | 当前版本 | 说明 |
-| --- | --- | --- |
-| 服务端与 Web | `V2.0.2` | 单镜像部署；app 自动迁移并提供 API/Web，worker 执行异步任务，host-monitor 通过只读 cgroup 汇总项目容器指标。 |
-| Chrome 插件 | `V2.0.2` | 网页会话轻量检测、完整/增量采集和本地上传队列。 |
-| Windows/macOS 同步代理 | `V2.0.2` | OpenClaw、Codex、Claude Code 本地文件扫描、监听和同步。 |
+## V2.1 核验重点
 
-## V2.0.2 安全审计基线
+- 原始会话及 Revision 仍是事实来源。
+- 一个会话只有一个主项目，可有多个标签。
+- 项目锁与人工/锁定标签在自动整理中受保护。
+- 搜索返回标题/正文命中原因，并定位 Revision 与消息。
+- 项目时间线选择最新完整 Revision。
+- PROJECT-CONTEXT.md 由用户按需生成。
+- 周报/月报直接读取归档会话。
+- Migration 0012 保留原业务数据并删除旧派生表。
+- 新备份包含标签；旧 V2.0.2 备份可兼容恢复并给出 warning。
+- 认证、脱敏、网络和容器安全基线不变。
 
-- 依赖漏洞审计、当前源码与 Git 历史凭据扫描均已执行；测试用假凭据之外未发现已提交密钥。
-- 认证 API 禁止缓存，生产响应启用 HSTS 与浏览器权限策略；异常日志执行第二层凭据脱敏。
-- app、worker、host-monitor 采用非 root 和只读根文件系统，且不授予额外 Linux capabilities。
-- 全部 174 项自动化测试、类型检查、生产构建与 Compose 配置校验通过。
-- 生产镜像仅保留运行依赖并移除 npm/corepack；本地 OCI 审计环境报告的镜像尺寸由约 224.6 MB 降至 98.4 MB，Trivy 可修复 High/Critical 漏洞和镜像秘密扫描结果均为 0。不同 Docker 存储驱动显示的未压缩占用不可直接横向比较。
-- 四个 V2.0.2 交付包已完成版本、内容、排除项和敏感信息核验；SHA-256 见[部署文档](DEPLOYMENT.md)。
+## 发布核验命令
 
-在线网页采集支持 ChatGPT、Gemini、Grok、腾讯元宝、MiniMax Agent、DeepSeek、千问和 Kimi。本地同步支持 OpenClaw、Codex 和 Claude Code。历史 ZIP 导入支持 ChatGPT、Gemini Takeout 和 Chat Memo 已实现的平台格式。
+~~~powershell
+pnpm typecheck
+pnpm test
+pnpm build
+docker compose -f infra/docker-compose.yml config
+~~~
 
-核心归档、搜索、导出、历史导入、修订查看和备份恢复不依赖模型；项目归类、知识整理和报告需要配置 OpenAI 兼容模型。
-
-## V2.0.2 发布核验
-
-2026-08-22 已按发布提交 `003d7bf` 完成生产部署核验：
-
-- `pnpm typecheck`、全部 174 项自动化测试、`pnpm build`、Compose 配置和 Markdown 本地链接检查均通过。
-- `pnpm audit` 与生产依赖审计未发现已知漏洞；当前源码和 Git 历史未发现测试夹具之外的高置信凭据。
-- 精简镜像在非 root、只读根文件系统下通过真实 PostgreSQL 迁移和完整服务启动测试；Trivy 可修复 High/Critical 漏洞与镜像秘密扫描结果均为 0。
-- NAS 更新脚本确认运行版本为 `V2.0.2`；app、host-monitor、PostgreSQL 健康，worker 正常运行，app 与 worker 均为 `node` 用户和只读根文件系统。
-- 公网 `/healthz` 返回 `200`、`ok: true` 与 `V2.0.2`，并确认 `Cache-Control: no-store`、HSTS、Permissions Policy、COOP 和 CSP 已生效；生产 Web 静态资源包含 V2.0.2 版本与更新记录。
-- 发布前数据库备份保存在 `/volume1/docker/ai-conversation-archive/backups/daily/archive_2026-08-22_164201.dump`；最终 NAS 包 SHA-256 为 `501EC7755E12B9B13D3B96EE77856EE9A625C622FA16C80DB3D33888235B03C1`。
-
-本节记录发布时已经完成的验证，不代表持续监控结果；实时运行状态仍以系统“设置 → 系统状态”和 `/healthz` 为准。
-
-## V2.0.1 发布核验
-
-2026-08-22 已按 `main` 提交 `a5867f4` 完成发布核验：
-
-- `pnpm typecheck`、全部 172 项自动化测试和 `pnpm build` 均通过。
-- NAS 运行时 `/healthz` 返回 `ok: true` 与 `version: V2.0.1`；app、host-monitor、PostgreSQL 健康，worker 正常运行。
-- 生产 Web 已确认显示 `V2.0.1`，2026-08-22 的六次日期型发布合并显示为一条 `V260822`，且版本号、发布日期和更新摘要使用同一文字基线。
-- 四个 V2.0.1 交付包已经生成并纳入版本库；文件摘要见[部署文档](DEPLOYMENT.md)。
-
-本节记录发布时已经完成的验证，不代表持续监控结果；实时运行状态仍以系统“设置 → 系统状态”和 `/healthz` 为准。
-
-## 文档维护规则
-
-1. API 增删以路由注册为准，接口变更必须同步 `API.md`。
-2. 表结构以迁移和 `schema.ts` 为准，不能只改 `DATA-MODEL.md`。
-3. Web 或客户端增加页面、状态或操作时，同步 `UI-DESIGN.md` 和 `USER-GUIDE.md`。
-4. 环境变量、端口、卷、升级或恢复方式变化时，同步部署与运维文档。
-5. 未实现、实验性或仅有构想的内容不得写成当前能力。
+数据库迁移由 app 启动时执行，也可使用 pnpm db:migrate 手动运行。生产升级前必须先做业务备份，并验证 /healthz 返回 V2.1.0。

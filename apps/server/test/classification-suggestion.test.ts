@@ -7,6 +7,7 @@ import {
   isRecoverableClassificationAiError,
   localProjectGuess,
   parseClassificationSuggestion,
+  parseTagSuggestions,
   shouldReuseClassification,
 } from "../src/services/analysis.js";
 
@@ -63,6 +64,20 @@ describe("parseClassificationSuggestion", () => {
     expect(result.suggestedName).toBe("千问采集修复");
     expect(result.existingProjectId).toBeNull();
     expect(result.confidence).toBe(0.52);
+  });
+});
+
+describe("parseTagSuggestions", () => {
+  it("normalizes, deduplicates, filters, and caps model tag suggestions", () => {
+    const result = parseTagSuggestions({
+      tags: [
+        { name: " TypeScript ", confidence: 0.7 },
+        { name: "ＴｙｐｅＳｃｒｉｐｔ", confidence: 0.9 },
+        { name: "一次性的完整句子！", confidence: 0.99 },
+        { name: "低置信", confidence: 0.2 },
+      ],
+    });
+    expect(result).toEqual([{ name: "TypeScript", confidence: 0.9 }]);
   });
 });
 
@@ -215,6 +230,19 @@ describe("classificationCandidateReason", () => {
         revisionCapturedAt,
       }),
     ).toBe("changed");
+  });
+
+  it("selects an existing project that has not received V2.1 tags", () => {
+    expect(
+      classificationCandidateReason({
+        scope: "incremental",
+        projectId: "11111111-1111-1111-1111-111111111111",
+        tagCount: 0,
+        confidence: 0.9,
+        assignmentUpdatedAt: freshAssignmentAt,
+        revisionCapturedAt,
+      }),
+    ).toBe("missing_tags");
   });
 
   it("skips stable fresh assignments in incremental mode", () => {

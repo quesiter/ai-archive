@@ -26,7 +26,6 @@ interface BackgroundTaskUpdateOptions {
 }
 
 function operationScope(kind: BackgroundTaskKind) {
-  if (kind === "knowledge_rebuild") return "analysis";
   if (kind === "storage_redaction") return "system";
   return "classification";
 }

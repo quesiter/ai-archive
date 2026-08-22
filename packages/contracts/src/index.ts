@@ -257,34 +257,6 @@ export const PairingClaimSchema = z.object({
 });
 export type PairingClaim = z.infer<typeof PairingClaimSchema>;
 
-export const KnowledgeTypeSchema = z.enum([
-  "decision",
-  "requirement",
-  "fact",
-  "idea",
-  "task",
-  "risk",
-  "resource",
-  "open_question",
-]);
-export type KnowledgeType = z.infer<typeof KnowledgeTypeSchema>;
-
-export const SourceReferenceSchema = z.object({
-  conversationId: z.string().uuid(),
-  revisionId: z.string().uuid(),
-  messageOrdinal: z.number().int().nonnegative(),
-});
-export type SourceReference = z.infer<typeof SourceReferenceSchema>;
-
-export const ExtractedKnowledgeSchema = z.object({
-  type: KnowledgeTypeSchema,
-  title: z.string().min(1).max(300),
-  body: z.string().min(1).max(20_000),
-  confidence: z.number().min(0).max(1),
-  sourceMessageOrdinals: z.array(z.number().int().nonnegative()).min(1),
-});
-export type ExtractedKnowledge = z.infer<typeof ExtractedKnowledgeSchema>;
-
 export const ProjectSuggestionSchema = z.object({
   existingProjectId: z.string().uuid().nullable(),
   suggestedName: z.string().min(1).max(200).nullable(),
@@ -292,6 +264,24 @@ export const ProjectSuggestionSchema = z.object({
   rationale: z.string().max(2_000),
 });
 export type ProjectSuggestion = z.infer<typeof ProjectSuggestionSchema>;
+
+export const TagSuggestionSchema = z.object({
+  name: z.string().min(1).max(100),
+  confidence: z.number().min(0).max(1),
+});
+export type TagSuggestion = z.infer<typeof TagSuggestionSchema>;
+
+export const ConversationOrganizationSuggestionSchema = z.object({
+  project: z.object({
+    projectId: z.string().uuid().nullable(),
+    suggestedProjectName: z.string().min(1).max(200).nullable(),
+    confidence: z.number().min(0).max(1),
+  }),
+  tags: z.array(TagSuggestionSchema).max(10),
+});
+export type ConversationOrganizationSuggestion = z.infer<
+  typeof ConversationOrganizationSuggestionSchema
+>;
 
 export function flattenMessageText(message: CaptureMessage): string {
   return message.segments

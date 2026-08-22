@@ -19,6 +19,7 @@ import { requireWebUser } from "../http.js";
 import {
   conversationProjects,
   conversationRevisions,
+  conversationTags,
   conversations,
   devices,
   messageSegments,
@@ -31,13 +32,17 @@ import {
 } from "../services/capture.js";
 import {
   loadHydratedRevisionMessages,
-  loadRevisionStorageChain,
 } from "../services/revision-storage.js";
 import {
   loadConversationExportData,
   renderConversationExport,
   type ConversationExportFormat,
 } from "../services/conversation-export.js";
+import { loadConversationTags } from "../services/tags.js";
+import {
+  buildConversationSearchHit,
+  conversationIdsMatchingAllTags,
+} from "../services/conversation-search.js";
 
 const ListQuerySchema = z.object({
   q: z.string().max(500).optional(),
@@ -45,6 +50,18 @@ const ListQuerySchema = z.object({
   source: z.enum(["web", "openclaw", "codex", "claude_code", "historical_import"]).optional(),
   completeness: z.enum(["complete", "partial"]).optional(),
   captureMode: z.enum(["full", "append", "import"]).optional(),
+  projectId: z.string().uuid().optional(),
+  tagIds: z
+    .preprocess(
+      (value) =>
+        Array.isArray(value)
+          ? value
+          : typeof value === "string" && value
+            ? value.split(",")
+            : [],
+      z.array(z.string().uuid()).max(20),
+    )
+    .default([]),
   from: z.string().datetime({ offset: true }).optional(),
   to: z.string().datetime({ offset: true }).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -62,14 +79,6 @@ const webProviders = [
   "qianwen",
   "kimi",
 ] as const;
-
-function searchExcerpt(content: string, q: string): string {
-  const index = content.toLowerCase().indexOf(q.toLowerCase());
-  if (index < 0) return content.slice(0, 160);
-  const start = Math.max(0, index - 54);
-  const end = Math.min(content.length, index + q.length + 90);
-  return `${start > 0 ? "…" : ""}${content.slice(start, end)}${end < content.length ? "…" : ""}`;
-}
 
 const ExportQuerySchema = z.object({
   format: z.enum(["csv", "md", "xlsx"]),
@@ -153,13 +162,27 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       revisionScopedIds = rows.map((row) => row.id);
       if (!revisionScopedIds.length) return [];
     }
+    let tagScopedIds: string[] | undefined;
+    if (query.tagIds.length) {
+      const tagLinks = await db
+        .select({
+          conversationId: conversationTags.conversationId,
+          tagId: conversationTags.tagId,
+        })
+        .from(conversationTags)
+        .where(inArray(conversationTags.tagId, query.tagIds));
+      tagScopedIds = conversationIdsMatchingAllTags(tagLinks, query.tagIds);
+      if (!tagScopedIds.length) return [];
+    }
     const filters = [isNull(conversations.deletedAt)];
     if (query.provider) filters.push(eq(conversations.provider, query.provider));
     if (query.source === "web") filters.push(inArray(conversations.provider, webProviders));
     if (query.source === "openclaw") filters.push(eq(conversations.provider, "openclaw"));
     if (query.source === "codex") filters.push(eq(conversations.provider, "codex"));
     if (query.source === "claude_code") filters.push(eq(conversations.provider, "claude_code"));
+    if (query.projectId) filters.push(eq(conversationProjects.projectId, query.projectId));
     if (revisionScopedIds) filters.push(inArray(conversations.id, revisionScopedIds));
+    if (tagScopedIds) filters.push(inArray(conversations.id, tagScopedIds));
     if (query.q) {
       filters.push(
         matchingIds?.length
@@ -217,34 +240,45 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
               .where(eq(conversationRevisions.id, revisionId))
               .limit(1)
           : [];
-        const storageRevisionIds = query.q && revision
-          ? (await loadRevisionStorageChain(revision.id)).map((item) => item.id)
-          : [];
-        const [hit] = query.q && storageRevisionIds.length
+        const titleMatched = Boolean(
+          query.q && row.title?.toLocaleLowerCase().includes(query.q.toLocaleLowerCase()),
+        );
+        const [hit] = query.q && !titleMatched
           ? await db
               .select({
+                revisionId: conversationRevisions.id,
                 ordinal: messages.ordinal,
                 content: messageSegments.content,
               })
-              .from(messages)
+              .from(conversationRevisions)
+              .innerJoin(messages, eq(messages.revisionId, conversationRevisions.id))
               .innerJoin(messageSegments, eq(messageSegments.messageId, messages.id))
               .where(
                 and(
-                  inArray(messages.revisionId, storageRevisionIds),
+                  eq(conversationRevisions.conversationId, row.id),
                   ilike(messageSegments.content, `%${query.q}%`),
                 ),
               )
-              .orderBy(asc(messages.ordinal))
+              .orderBy(
+                desc(conversationRevisions.capturedAt),
+                desc(conversationRevisions.createdAt),
+                asc(messages.ordinal),
+              )
               .limit(1)
           : [];
+        const tagRows = await loadConversationTags(row.id);
         return {
           ...row,
+          tags: tagRows,
           latestRevision: revision ?? null,
-          searchHit: hit && query.q
-            ? {
-                messageOrdinal: hit.ordinal,
-                excerpt: searchExcerpt(hit.content, query.q),
-              }
+          searchHit: query.q
+            ? buildConversationSearchHit({
+                query: query.q,
+                title: row.title,
+                titleMatched,
+                latestRevisionId: revision?.id ?? null,
+                bodyHit: hit ?? null,
+              })
             : null,
         };
       }),
@@ -317,6 +351,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         return {
           conversation,
           projectAssignment: projectAssignment ?? null,
+          tags: await loadConversationTags(conversation.id),
           revisions: revisionPayload,
           selectedRevision: null,
           messages: [],
@@ -326,6 +361,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       return {
         conversation,
         projectAssignment: projectAssignment ?? null,
+        tags: await loadConversationTags(conversation.id),
         revisions: revisionPayload,
         selectedRevision: selectedRevisionPayload ?? selectedRevision,
         messages: hydratedMessages,

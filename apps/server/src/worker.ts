@@ -4,7 +4,6 @@ import { closeDatabase } from "./db.js";
 import { processArchive, scanImportInbox } from "./jobs/import-job.js";
 import {
   classifyConversation,
-  rebuildKnowledge,
   reclassifyUnlockedConversations,
   retryDeferredAnalysisRuns,
   runAnalysis,
@@ -18,12 +17,10 @@ import {
 import {
   enqueueAnalysis,
   enqueueConversationClassification,
-  enqueueKnowledgeRebuild,
   enqueueNightlyAiMaintenance,
   enqueueUnlockedReclassification,
   getBoss,
   queueNames,
-  type KnowledgeRebuildJobData,
   type NightlyAiMaintenanceJobData,
   type ReclassificationJobData,
   stopBoss,
@@ -54,9 +51,6 @@ async function runAnalysisJob(kind: "weekly" | "monthly") {
 
 await failStaleBackgroundTasks("classification_rebuild").catch((error) => {
   console.warn("Failed to mark stale classification tasks", safeStoredError(error));
-});
-await failStaleBackgroundTasks("knowledge_rebuild").catch((error) => {
-  console.warn("Failed to mark stale knowledge tasks", safeStoredError(error));
 });
 await failStaleBackgroundTasks("storage_redaction", 24 * 60 * 60_000).catch((error) => {
   console.warn("Failed to mark stale storage redaction tasks", safeStoredError(error));
@@ -122,24 +116,6 @@ await boss.work(
         undefined,
         { startAfter: schedule.retryAt },
       );
-      if (!jobId) throw error;
-      return { deferred: true, retryAt: schedule.retryAt };
-    }
-  },
-);
-await boss.work(
-  queueNames.rebuildKnowledge,
-  { includeMetadata: true },
-  async (jobs) => {
-    const data = jobs[0]?.data as KnowledgeRebuildJobData | undefined;
-    try {
-      return await rebuildKnowledge(data?.taskId);
-    } catch (error) {
-      if (!isRetryableRateLimitError(error)) throw error;
-      const schedule = await aiRetrySchedule(error);
-      const jobId = await enqueueKnowledgeRebuild(data, {
-        startAfter: schedule.retryAt,
-      });
       if (!jobId) throw error;
       return { deferred: true, retryAt: schedule.retryAt };
     }

@@ -5,7 +5,6 @@ import {
   conversationRevisions,
   conversations,
   importJobs,
-  knowledgeItems,
   messageSegments,
   operationLogs,
   reports,
@@ -100,7 +99,6 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
     db.select({ value: count() }).from(messageSegments),
     db.select({ value: count() }).from(conversationRevisions),
     db.select({ value: count() }).from(conversations),
-    db.select({ value: count() }).from(knowledgeItems),
     db.select({ value: count() }).from(reports),
     db.select({ value: count() }).from(captureRuns),
     db.select({ value: count() }).from(importJobs),
@@ -247,33 +245,6 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
       }
       cursor = rows.at(-1)!.id;
       await updateProgress(taskId, "会话信息", progress, total);
-    }
-
-    cursor = NIL_UUID;
-    while (true) {
-      const rows = await db
-        .select({ id: knowledgeItems.id, title: knowledgeItems.title, body: knowledgeItems.body })
-        .from(knowledgeItems)
-        .where(gt(knowledgeItems.id, cursor))
-        .orderBy(asc(knowledgeItems.id))
-        .limit(BATCH_SIZE);
-      if (!rows.length) break;
-      for (const row of rows) {
-        const title = redactSensitiveTextForStorage(row.title, rules);
-        const body = redactSensitiveTextForStorage(row.body, rules);
-        const replacements = title.replacements + body.replacements;
-        if (replacements > 0) {
-          await db
-            .update(knowledgeItems)
-            .set({ title: title.text, body: body.text })
-            .where(eq(knowledgeItems.id, row.id));
-        }
-        progress.processed += 1;
-        progress.redactedRows += replacements > 0 ? 1 : 0;
-        progress.replacements += replacements;
-      }
-      cursor = rows.at(-1)!.id;
-      await updateProgress(taskId, "项目知识", progress, total);
     }
 
     cursor = NIL_UUID;

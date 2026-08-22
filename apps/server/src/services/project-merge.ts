@@ -1,9 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
-import type { SourceReference } from "@ai-archive/contracts";
 import { db } from "../db.js";
 import {
   conversationProjects,
-  knowledgeItems,
   projects,
   reports,
 } from "../schema.js";
@@ -14,23 +12,7 @@ export interface ProjectMergeResult {
   targetProjectId: string;
   targetProjectName: string;
   movedConversationCount: number;
-  movedKnowledgeCount: number;
-  mergedKnowledgeCount: number;
   movedReportCount: number;
-}
-
-export function mergeSourceReferences(
-  left: SourceReference[],
-  right: SourceReference[],
-): SourceReference[] {
-  const references = new Map<string, SourceReference>();
-  for (const reference of [...left, ...right]) {
-    references.set(
-      `${reference.conversationId}:${reference.revisionId}:${reference.messageOrdinal}`,
-      reference,
-    );
-  }
-  return [...references.values()];
 }
 
 export async function mergeProjectIntoProject(input: {
@@ -71,60 +53,14 @@ export async function mergeProjectIntoProject(input: {
       .select({ conversationId: conversationProjects.conversationId })
       .from(conversationProjects)
       .where(eq(conversationProjects.projectId, source.id));
-    const sourceKnowledge = await tx
-      .select()
-      .from(knowledgeItems)
-      .where(eq(knowledgeItems.projectId, source.id));
-    const targetKnowledge = await tx
-      .select()
-      .from(knowledgeItems)
-      .where(eq(knowledgeItems.projectId, target.id));
     const sourceReports = await tx
       .select({ id: reports.id })
       .from(reports)
       .where(eq(reports.projectId, source.id));
-    const targetByFingerprint = new Map(
-      targetKnowledge.map((item) => [item.fingerprint, item]),
-    );
-    let mergedKnowledgeCount = 0;
-    for (const sourceItem of sourceKnowledge) {
-      const targetItem = targetByFingerprint.get(sourceItem.fingerprint);
-      if (!targetItem) continue;
-      const mergedReferences = mergeSourceReferences(
-        targetItem.sourceReferences,
-        sourceItem.sourceReferences,
-      );
-      await tx
-        .update(knowledgeItems)
-        .set({
-          confidence: Math.max(targetItem.confidence, sourceItem.confidence),
-          sourceReferences: mergedReferences,
-          supersedesId:
-            targetItem.supersedesId === sourceItem.id
-              ? null
-              : targetItem.supersedesId,
-          updatedAt: new Date(),
-        })
-        .where(eq(knowledgeItems.id, targetItem.id));
-      await tx
-        .update(knowledgeItems)
-        .set({
-          supersedesId:
-            targetItem.supersedesId === sourceItem.id ? null : targetItem.id,
-        })
-        .where(eq(knowledgeItems.supersedesId, sourceItem.id));
-      await tx.delete(knowledgeItems).where(eq(knowledgeItems.id, sourceItem.id));
-      mergedKnowledgeCount += 1;
-    }
-
     await tx
       .update(conversationProjects)
       .set({ projectId: target.id, updatedAt: new Date() })
       .where(eq(conversationProjects.projectId, source.id));
-    await tx
-      .update(knowledgeItems)
-      .set({ projectId: target.id, updatedAt: new Date() })
-      .where(eq(knowledgeItems.projectId, source.id));
     await tx
       .update(reports)
       .set({ projectId: target.id })
@@ -141,8 +77,6 @@ export async function mergeProjectIntoProject(input: {
       targetProjectId: target.id,
       targetProjectName: target.name,
       movedConversationCount: sourceAssignments.length,
-      movedKnowledgeCount: sourceKnowledge.length - mergedKnowledgeCount,
-      mergedKnowledgeCount,
       movedReportCount: sourceReports.length,
     };
   });

@@ -2,6 +2,20 @@
 
 本文件合并原 `docs/UPDATE-*.md` 的版本说明。具体部署、升级、备份和排错步骤统一查看 [运维手册](OPERATIONS.md)。
 
+## 2026-08-22 V2.1.0：产品收敛为归档、检索与项目演进
+
+- 产品定位调整为个人自托管的 AI 会话归档、历史检索与项目演进系统；当前导航统一为总览、会话、项目与标签、报告、导入、设备、日志和设置。
+- 正式删除项目知识页面、API、schema、服务、队列、Worker handler、夜间重建阶段、当前统计和类型；migration 0012 创建标签表、清理遗留任务并删除 `knowledge_items`，同时保持原始会话、修订、消息、项目关系、人工项目锁和历史报告不变。
+- 增加规范化 Tag 与 Conversation 多标签关系，支持自动/人工来源、人工锁、搜索、创建、重命名、合并、删除，以及项目和多个标签的组合筛选。
+- AI 分类升级为“一个长期主项目 + 少量稳定标签”；增量候选新增无标签会话，人工项目锁只保护项目，不再阻止自动补标签，批量续跑固定候选列表和 offset。
+- 搜索同时定位标题和正文，返回命中原因、附近摘要、Revision 与消息序号；项目页增加可靠时间线、常见标签和按需生成 `PROJECT-CONTEXT.md`。
+- 周报/月报改为直接读取周期内最新完整 Conversation Revision、Project、Tags 和必要正文；月报可继续引用周报，不再依赖派生知识生命周期。
+- AI pacing 明确区分 `interactive` 与 `batch`：用户主动生成 Context 和模型测试不受批处理固定间隔影响，后台整理与报告继续使用 Token Plan 延迟续跑。
+- 新备份导出 `tags` 与 `conversationTags`；旧 V2.0.2 备份中的 `knowledgeItems`/`knowledge_items` 被忽略并返回 warning，旧重建任务不恢复。
+- 服务端、Web、Chrome 插件、Windows/macOS 同步代理和共享协议统一升级为 `V2.1.0`。
+
+发布包：`release/ai-conversation-archive-nas-V2.1.0-clean-install.tar.gz`、`release/ai-archiveextension-V2.1.0-chrome.zip`、`release/ai-conversation-archive-windows-sync-V2.1.0.zip`、`release/ai-conversation-archive-macos-sync-V2.1.0.tar.gz`。
+
 ## 2026-08-22 V2.0.2：全量安全审计与运行时加固
 
 - 完成工作区依赖、敏感信息、认证授权、输入与文件处理、外部网络请求、日志、浏览器渲染和 Docker 配置的全量安全复核；`pnpm audit` 未发现已知依赖漏洞，当前及历史 Git 记录未发现测试夹具之外的密钥文件或高置信凭据。

@@ -6,17 +6,13 @@ import {
   captureRuns,
   conversationProjects,
   conversationRevisions,
+  conversationTags,
   conversations,
   devices,
-  knowledgeItems,
   projects,
   reports,
+  tags,
 } from "../schema.js";
-
-function toNumber(value: unknown): number {
-  const numeric = Number(value ?? 0);
-  return Number.isFinite(numeric) ? numeric : 0;
-}
 
 function textUnitCount(value: string): number {
   return Array.from(value).length;
@@ -30,12 +26,12 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
     const [
       [conversationCount],
       [projectCount],
-      [knowledgeCount],
+      [tagCount],
       [deviceCount],
       [unclassifiedCount],
       activeProjects,
       assignmentRows,
-      knowledgeCountRows,
+      projectTagRows,
       latestRevisionRows,
     ] =
       await Promise.all([
@@ -44,7 +40,7 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
           .from(conversations)
           .where(isNull(conversations.deletedAt)),
         db.select({ value: count() }).from(projects),
-        db.select({ value: count() }).from(knowledgeItems),
+        db.select({ value: count() }).from(tags),
         db.select({ value: count() }).from(devices).where(isNull(devices.revokedAt)),
         db
           .select({ value: count() })
@@ -85,13 +81,16 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
           .where(and(eq(projects.archived, false), isNull(conversations.deletedAt))),
         db
           .select({
-            projectId: knowledgeItems.projectId,
-            value: count(),
+            projectId: conversationProjects.projectId,
+            tagId: conversationTags.tagId,
           })
-          .from(knowledgeItems)
-          .innerJoin(projects, eq(projects.id, knowledgeItems.projectId))
-          .where(eq(projects.archived, false))
-          .groupBy(knowledgeItems.projectId),
+          .from(conversationTags)
+          .innerJoin(
+            conversationProjects,
+            eq(conversationProjects.conversationId, conversationTags.conversationId),
+          )
+          .innerJoin(projects, eq(projects.id, conversationProjects.projectId))
+          .where(eq(projects.archived, false)),
         db
           .select({
             conversationId: conversationRevisions.conversationId,
@@ -148,19 +147,20 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
       current[capture.status] += 1;
       providerStats.set(capture.provider, current);
     }
-    const knowledgeCountByProject = new Map(
-      knowledgeCountRows.map((row) => [
-        row.projectId,
-        toNumber(row.value),
-      ]),
-    );
+    const tagIdsByProject = new Map<string, Set<string>>();
+    for (const row of projectTagRows) {
+      if (!row.projectId) continue;
+      const values = tagIdsByProject.get(row.projectId) ?? new Set<string>();
+      values.add(row.tagId);
+      tagIdsByProject.set(row.projectId, values);
+    }
     const categoryStats = activeProjects.map((project) => ({
       projectId: project.id,
       projectName: project.name,
       description: project.description,
       conversationCount: 0,
       growth7d: 0,
-      knowledgeCount: knowledgeCountByProject.get(project.id) ?? 0,
+      tagCount: tagIdsByProject.get(project.id)?.size ?? 0,
       latestActivityAt: project.updatedAt?.toISOString?.() ?? null,
     }));
     const categoryByProject = new Map(
@@ -212,7 +212,7 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
       counts: {
         conversations: conversationCount?.value ?? 0,
         projects: projectCount?.value ?? 0,
-        knowledge: knowledgeCount?.value ?? 0,
+        tags: tagCount?.value ?? 0,
         devices: deviceCount?.value ?? 0,
       },
       textStats: {

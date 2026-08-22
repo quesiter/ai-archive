@@ -5,7 +5,7 @@
 ## 首次使用
 
 1. 在 Web 后台的设备页面生成 `OpenClaw/Codex 同步代理` 配对码。
-2. 把 `ai-conversation-archive-macos-sync-V2.0.2.tar.gz` 复制到 Mac。
+2. 把 `ai-conversation-archive-macos-sync-V2.1.0.tar.gz` 复制到 Mac。
 3. 解压后双击 `AI-Archive-Sync.command`。
 4. 输入配对码。
 5. 配对成功后输入 `Y` 安装后台同步。

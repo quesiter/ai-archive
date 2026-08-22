@@ -5,6 +5,7 @@ import { closeDatabase } from "../src/db.js";
 import {
   BACKUP_FORMAT,
   parseBackupArchive,
+  prepareRestoredBackupTables,
   sanitizeRestoredBackupTables,
 } from "../src/services/backup.js";
 
@@ -77,6 +78,31 @@ describe("backup archive parsing", () => {
     await expect(
       parseBackupArchive("backup.json", Buffer.from(JSON.stringify(invalid))),
     ).rejects.toThrow(/Unknown backup table/);
+  });
+
+  it("accepts legacy Knowledge tables and strips them with a compatibility warning", async () => {
+    const legacy = {
+      ...backupEnvelope(),
+      tables: {
+        ...backupEnvelope().tables,
+        knowledgeItems: [{ id: "legacy-item" }],
+        backgroundTasks: [
+          { id: "old", kind: "knowledge_rebuild" },
+          { id: "keep", kind: "classification" },
+        ],
+      },
+    };
+    const parsed = await parseBackupArchive(
+      "backup.json",
+      Buffer.from(JSON.stringify(legacy)),
+    );
+    const prepared = prepareRestoredBackupTables(parsed.tables);
+
+    expect(prepared.tables.knowledgeItems).toBeUndefined();
+    expect(prepared.tables.backgroundTasks).toEqual([
+      { id: "keep", kind: "classification" },
+    ]);
+    expect(prepared.warnings.join(" ")).toMatch(/未导入/);
   });
 
   it("redacts archived message secrets before backup rows are restored", () => {

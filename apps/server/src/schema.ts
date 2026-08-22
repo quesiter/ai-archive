@@ -4,6 +4,7 @@ import {
   index,
   integer,
   jsonb,
+  primaryKey,
   pgTable,
   text,
   timestamp,
@@ -14,11 +15,9 @@ import type {
   CaptureMode,
   CaptureTriggerReason,
   DeviceKind,
-  KnowledgeType,
   MessageRole,
   Provider,
   SegmentType,
-  SourceReference,
 } from "@ai-archive/contracts";
 
 const createdAt = timestamp("created_at", { withTimezone: true })
@@ -232,37 +231,47 @@ export const conversationProjects = pgTable("conversation_projects", {
     .defaultNow(),
 });
 
-export const knowledgeItems = pgTable(
-  "knowledge_items",
+export const tags = pgTable(
+  "tags",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    projectId: uuid("project_id")
-      .notNull()
-      .references(() => projects.id, { onDelete: "cascade" }),
-    type: text("type").$type<KnowledgeType>().notNull(),
-    title: text("title").notNull(),
-    body: text("body").notNull(),
-    status: text("status")
-      .$type<"active" | "superseded" | "contradicted" | "done">()
-      .notNull()
-      .default("active"),
-    confidence: doublePrecision("confidence").notNull(),
-    sourceReferences: jsonb("source_references")
-      .$type<SourceReference[]>()
-      .notNull(),
-    fingerprint: text("fingerprint").notNull(),
-    supersedesId: uuid("supersedes_id"),
+    name: text("name").notNull(),
+    normalizedName: text("normalized_name").notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
     createdAt,
   },
   (table) => [
-    uniqueIndex("knowledge_project_fingerprint_uidx").on(
-      table.projectId,
-      table.fingerprint,
-    ),
-    index("knowledge_project_idx").on(table.projectId),
+    uniqueIndex("tags_normalized_name_uidx").on(table.normalizedName),
+    index("tags_name_idx").on(table.name),
+  ],
+);
+
+export const conversationTags = pgTable(
+  "conversation_tags",
+  {
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    tagId: uuid("tag_id")
+      .notNull()
+      .references(() => tags.id, { onDelete: "cascade" }),
+    confidence: doublePrecision("confidence"),
+    source: text("source").$type<"auto" | "manual">().notNull(),
+    lockedByUser: boolean("locked_by_user").notNull().default(false),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt,
+  },
+  (table) => [
+    primaryKey({
+      name: "conversation_tags_pk",
+      columns: [table.conversationId, table.tagId],
+    }),
+    index("conversation_tags_tag_idx").on(table.tagId),
+    index("conversation_tags_conversation_idx").on(table.conversationId),
   ],
 );
 
@@ -299,7 +308,7 @@ export const backgroundTasks = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     kind: text("kind")
-      .$type<"classification_rebuild" | "knowledge_rebuild" | "storage_redaction">()
+      .$type<"classification_rebuild" | "storage_redaction">()
       .notNull(),
     status: text("status")
       .$type<"queued" | "running" | "completed" | "failed">()

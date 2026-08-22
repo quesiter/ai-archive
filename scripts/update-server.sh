@@ -7,7 +7,7 @@ usage() {
 
 Usage:
   sh scripts/update-server.sh
-  sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.2-clean-install.tar.gz
+  sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.1.0-clean-install.tar.gz
 
 Environment:
   APP_ROOT=/volume1/docker/ai-conversation-archive

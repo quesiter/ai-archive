@@ -1,329 +1,175 @@
-# 知言归藏运维手册
+# 知言归藏 V2.1 运维手册
 
-## 1. 运行环境
-
-推荐环境：
+## 1. 运行基线
 
 | 组件 | 要求 |
 | --- | --- |
 | Node.js | 22 或更高 |
-| 包管理器 | pnpm 11 |
-| 数据库 | PostgreSQL 17 |
-| 队列 | pg-boss，使用同一个 PostgreSQL |
-| 浏览器 | Chrome 或 Chromium 系浏览器 |
-| NAS | 群晖 DSM 7.2.2，Container Manager |
+| pnpm | 11 |
+| PostgreSQL | 17 |
+| 队列 | PgBoss，共用 PostgreSQL |
+| 时区 | Asia/Shanghai |
+| 浏览器 | Chrome/Chromium |
+| NAS | DSM 7.2.2 与 Container Manager |
 
-## 2. 环境变量
+## 2. 本地开发与验证
 
-服务端读取 `.env`。主要变量如下：
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `NODE_ENV` | `development` | `production` 时启用生产约束。 |
-| `PORT` | `8080` | 应用容器内部监听端口。 |
-| `DATABASE_URL` | `postgres://archive:archive@localhost:5432/archive` | PostgreSQL 连接串。 |
-| `APP_ORIGIN` | `http://localhost:5173` | Web 外部访问地址，生产远程访问应使用 HTTPS。 |
-| `APP_MASTER_KEY` | 开发环境内置派生值 | 32 字节 Base64，生产必须生成真实随机值。 |
-| `COOKIE_SECURE` | 跟随生产环境 | Cookie 是否只允许 HTTPS。 |
-| `TRUST_PROXY` | `false` | 是否信任代理转发头；推荐填写可信代理跳数，例如 `1`。 |
-| `EXTENSION_ORIGINS` | 官方 Chrome 扩展来源 | 允许跨域调用 API 的固定 Chrome 扩展来源，多个值用逗号分隔。 |
-| `ALLOW_PRIVATE_NETWORK_TARGETS` | `false` | 是否允许 LLM/SMTP 访问内网；默认启用 SSRF 和 DNS 重绑定防护。 |
-| `IMPORT_INBOX` | `./data/imports/inbox` | 待处理导入目录。 |
-| `IMPORT_PROCESSED` | `./data/imports/processed` | 导入成功归档目录。 |
-| `IMPORT_FAILED` | `./data/imports/failed` | 导入失败归档目录。 |
-| `COMPONENT_RELEASE_DIR` | 自动发现 `release` | 设备页可下载客户端组件的发布目录。 |
-| `HOST_MONITOR_URL` | 空 | app 读取项目容器监测指标的内部地址；Compose 固定为 `http://host-monitor:9091`。 |
-| `ARCHIVE_CGROUP_PARENT` | `ai-conversation-archive` | 项目各容器共享的父 cgroup；所有服务必须保持一致。 |
-| `ARCHIVE_STORAGE_BUDGET_GB` | 空 | 可选项目数据软预算；留空时不计算存储百分比和容量告警。 |
-| `HOST_SAMPLE_INTERVAL_MS` | `10000` | Compose 项目容器监测采样间隔，最低有效值 5000 毫秒。 |
-| `HOST_HISTORY_LIMIT` | `27` | 内存趋势采样点数量，服务端限制为 10–120。 |
-| `TZ` | `Asia/Shanghai` | Worker 定时任务时区。 |
-| `LOG_LEVEL` | `info` | 服务日志级别。 |
-| `WEB_DIST` | `../web/dist` | Web 静态文件目录。 |
-
-生成生产主密钥：
-
-```sh
-openssl rand -base64 32
-```
-
-## 3. 本地开发
-
-```powershell
+~~~powershell
 Copy-Item .env.example .env
 pnpm install
 docker compose -f deploy/docker-compose.yml up -d postgres
 pnpm db:migrate
 pnpm dev:server
 pnpm dev:web
-```
+~~~
 
-常用命令：
+提交或发布前：
 
-```powershell
-pnpm build
+~~~powershell
 pnpm typecheck
 pnpm test
+pnpm build
+docker compose -f deploy/docker-compose.yml config
 pnpm test:e2e-api
-pnpm db:migrate
-```
+~~~
 
-## 4. NAS 部署
+e2e-api 默认期望 /healthz 返回 V2.1.0，需要正在运行的测试服务。
 
-推荐目录：
+## 3. 日常状态检查
 
-```text
-/volume1/docker/ai-conversation-archive/source
-/volume1/docker/ai-conversation-archive/data
-/volume1/backup/ai-conversation-archive
-```
-
-全新安装详见 [部署与使用](DEPLOYMENT.md)。启动后用以下命令检查：
-
-```sh
+~~~sh
 cd /volume1/docker/ai-conversation-archive/source/deploy
 docker compose --env-file .env ps
+docker compose --env-file .env logs --tail=120 app worker host-monitor postgres
 curl -fsS http://127.0.0.1:18080/healthz
-```
+~~~
 
-正常状态为 app、postgres、host-monitor 均为 healthy，worker 为 Up。`host-monitor` 不应显示宿主端口；它只在 Compose 内部网络监听 9091。Web 登录后可在“设置 → 系统状态”核对项目容器、项目存储和数据库指标。
+正常状态：
 
-## 5. 升级流程
+- /healthz 返回 ok=true 与 V2.1.0。
+- app、postgres、host-monitor 为 healthy；worker 为 Up。
+- host-monitor 只在 Compose 网络暴露 9091。
+- “设置 → 系统状态”能读取数据库、项目容器和存储指标。
 
-常规升级：
+## 4. 升级
 
-```sh
+先备份，再执行：
+
+~~~sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.2-clean-install.tar.gz
-```
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.1.0-clean-install.tar.gz
+~~~
 
-测试环境可跳过升级前数据库备份：
+脚本会保留 deploy/.env 并核对新版本。健康检查仍返回旧号时，检查镜像缓存、反向代理目标和 app/worker/host-monitor 是否被强制重建。
 
-```sh
-SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.0.2-clean-install.tar.gz
-```
+V2.1 首次升级应在 app 日志确认 migration 0012 成功。可用只读 SQL 核对 tags、conversation_tags 已创建，旧派生表已移除，以及 conversations、conversation_revisions、projects、conversation_projects、reports 行数与升级前备份一致。
 
-升级后检查：
-
-```sh
-cd /volume1/docker/ai-conversation-archive/source/deploy
-docker compose --env-file .env ps
-docker compose --env-file .env logs --tail=120 host-monitor app worker
-curl -fsS http://127.0.0.1:18080/healthz
-```
-
-`/healthz` 应返回当前版本 `V2.0.2`。如果健康检查版本仍是旧号，通常是 Docker 镜像缓存、反向代理指向旧容器，或没有强制重建 host-monitor/app/worker。升级脚本兼容直接 Docker 权限和免交互 `sudo docker`；当宿主账户不能进入 UID 1000 的导入目录时，会通过本机应用镜像维护目录权限。
-
-## 6. Chrome 插件运维
-
-最新插件包：
-
-```text
-release/ai-archiveextension-V2.0.2-chrome.zip
-```
-
-升级插件：
-
-1. 解压新版 zip。
-2. 打开 `chrome://extensions`。
-3. 开启开发者模式。
-4. 加载新版解压目录，或点击旧扩展的刷新按钮。
-5. 如果服务器地址或设备令牌变化，重新配对。
-
-Chrome 的无痕模式和工具栏固定不能由普通插件自动打开。插件已声明 `incognito` 支持；需要用户在扩展详情页启用，或由企业策略统一配置。
-
-## 7. 本地同步代理运维
-
-Windows 便携包：
-
-```text
-release/ai-conversation-archive-windows-sync-V2.0.2.zip
-```
-
-Windows 后台运行：
-
-```bat
-sync-local-windows.bat install
-sync-local-windows.bat uninstall
-```
-
-后台任务复用 `%USERPROFILE%\.config\ai-archive\openclaw-sync.json`，升级同步器代码通常不需要重新配对。后台日志位于 `%LOCALAPPDATA%\AIArchive\Sync\Logs`。
-
-macOS 同步包：
-
-```text
-release/ai-conversation-archive-macos-sync-V2.0.2.tar.gz
-```
-
-默认配置文件：
-
-```text
-~/.config/ai-archive/openclaw-sync.json
-```
-
-macOS 后台运行：双击 `AI-Archive-Sync.command`，按菜单安装或卸载 LaunchAgent。后台日志位于 `~/Library/Logs/AIArchive`。
-
-Windows 和 macOS 都可用 `AI_ARCHIVE_SYNC_CONFIG` 指定配置路径。服务地址或设备被撤销后需要重新配对；只是升级同步器代码通常不需要重新配对。
-
-常用命令：
-
-```sh
-./AI-Archive-Sync.command
-./AI-Archive-Sync.command install
-./AI-Archive-Sync.command uninstall
-./AI-Archive-Sync.command rebuild
-```
-
-## 8. 数据库迁移
-
-迁移文件位于：
-
-```text
-apps/server/migrations
-```
-
-本地执行：
-
-```powershell
-pnpm db:migrate
-```
-
-容器部署会在启动流程中执行迁移。升级后应查看 app/worker 日志，确认没有迁移失败。
-
-## 9. 备份与恢复
-
-Web 业务备份适合“清空生产环境、重新部署网站、再导入原业务数据”。路径为“设置 > 备份与恢复”。
-
-业务备份包含会话、修订、消息、设备、项目、知识、报告、设置、导入记录和操作日志；不包含管理员账号、登录会话和一次性配对码。
-
-数据库脚本备份适合 NAS 灾备：
-
-```sh
-POSTGRES_USER=archive POSTGRES_DB=archive \
-BACKUP_ROOT=/volume1/backup/ai-conversation-archive \
-sh /volume1/docker/ai-conversation-archive/source/scripts/backup.sh
-```
-
-恢复前先停止服务，并优先在测试环境演练：
-
-```sh
-sh /volume1/docker/ai-conversation-archive/source/scripts/restore.sh
-```
-
-## 10. Worker 与队列
-
-Worker 负责：
+## 5. 队列
 
 | 队列 | 说明 |
 | --- | --- |
-| `analysis-weekly` | 周报生成。 |
-| `analysis-monthly` | 月报生成。 |
-| `classify-conversation` | 单会话归类。 |
-| `reclassify-unlocked` | 批量智能归类。 |
-| `rebuild-knowledge` | 项目知识重建。 |
-| `nightly-ai-maintenance` | 夜间增量归类与知识分析编排。 |
-| `import-archive` | 历史 ZIP 导入。 |
-| `email-report` | 报告邮件发送。 |
-| `redact-storage` | 历史敏感信息不可逆清理。 |
+| analysis-weekly | 周报 |
+| analysis-monthly | 月报 |
+| classify-conversation | 单会话项目与标签整理 |
+| reclassify-unlocked | 批量项目与标签整理 |
+| nightly-ai-maintenance | 夜间增量整理编排 |
+| import-archive | 历史 ZIP 导入 |
+| email-report | 报告邮件 |
+| redact-storage | 历史入库脱敏清理 |
 
 定时任务：
 
-| 任务 | 时间 |
+| 时间 | 任务 |
 | --- | --- |
-| 周报 | 每周一 07:30，使用 `TZ` 时区。 |
-| 月报 | 每月 1 日 08:00，使用 `TZ` 时区。 |
-| 自动重归类 | 每周日 06:15，需要开启 `classification.autoReclassify`。 |
-| 夜间智能维护 | 每天 22:00，需要开启 `ai.nightlyMaintenanceEnabled`；先增量归类，再知识分析。 |
-| 延迟报告恢复检查 | 每 5 分钟。 |
-| 导入目录扫描 | 每 5 分钟。 |
+| 周一 07:30 | 周报 |
+| 每月 1 日 08:00 | 月报 |
+| 周日 06:15 | 可选自动重评 |
+| 每天 22:00 | 可选夜间增量项目与标签整理 |
+| 每 5 分钟 | 延迟报告恢复与导入目录扫描 |
 
-分类、导入或报告一直不动时，优先检查 Worker 容器是否运行。批量智能归类默认先在数据库里筛增量候选，只处理新会话、未归类、低置信度和内容更新的会话；完整重评是显式操作。归类会分片续跑，续跑时使用首次筛出的固定候选列表，避免 offset 因已处理记录更新而跳过后续会话。如果某个 `background_tasks` 记录长时间没有进度更新，Worker 启动和任务状态接口会自动把它标记为失败，用户可在升级或修复模型配置后重新点击“智能归类”。历史导入会额外检查 PgBoss 中是否仍有对应的活跃 `import-archive` job：没有活跃 job 且源 ZIP 仍在 inbox 时自动重新入队，源文件缺失时标记失败。
+夜间任务只有 classification 与 wait_classification 两阶段；无候选时直接结束。
 
-## 11. 模型与邮件配置
+批量任务最多按固定候选列表分片续跑。candidate ids 和 offset 随续跑 job 保存，避免前一片更新状态后跳过后续会话。项目锁不会阻止自动补标签。
 
-OpenAI 兼容模型配置项：
+## 6. 模型与额度
 
-1. `llm.baseUrl`
-2. `llm.apiKey`
-3. `llm.model`
+设置键包括 llm.baseUrl、llm.apiKey、llm.model。先在设置页测试连接。
 
-设置页提供“测试”按钮。测试成功后再运行分类、周报或月报。
+- batch：项目/标签批量整理、周报、月报，使用固定节流。
+- interactive：模型测试和 Project Context，不使用 batch 固定间隔。
+- 429、MiniMax Token Plan 等错误优先解析刷新时间或查询额度窗口。
+- 后台任务 stats 保存 retryAt、quotaResetAt、source 和 resumeOffset。
+- 刷新时间后加入缓冲并重新入队；额度接口不可用时使用兜底延迟。
 
-所有结构化 AI 请求共用进程级节流，默认起始间隔 82 秒。MiniMax Token Plan/速率限制会优先从错误或 `/v1/token_plan/remains` 获取五小时/周额度刷新时间，在刷新后增加 10 分钟缓冲并创建延迟续跑；无法查询刷新时间时一小时后重试。任务的 `stats` 中记录 `retryAt`、`quotaResetAt`、窗口和来源，Web 显示倒计时。不要把额度等待误判为 Worker 停止。
+额度等待是 queued/deferred 状态，不应重复触发任务。先看页面倒计时，再查 worker 日志。
 
-常见失败：
+LLM 与 SMTP 默认禁止回环、RFC1918、链路本地、云元数据和保留地址，并固定到已验证 DNS 结果。只对可信内网服务设置 ALLOW_PRIVATE_NETWORK_TARGETS=true。
 
-| 失败 | 可能原因 |
-| --- | --- |
-| Base URL 无法访问 | NAS 网络、代理、防火墙或 URL 错误。 |
-| 401/403 | API Key 错误或无权限。 |
-| 模型不存在 | 模型名不匹配。 |
-| 空响应 | 上游模型异常或接口不兼容。 |
-| JSON 校验失败 | 模型未遵循结构化输出，查看分析日志。 |
+## 7. 报告排错
 
-SMTP 未配置时，报告仍保存到后台，只是不发送邮件。
+周报/月报只依赖会话最新完整 Revision、项目、标签与正文。失败时检查：
 
-LLM Base URL 和 SMTP Host 默认禁止回环、RFC1918 内网、链路本地、云元数据与保留地址，并把实际连接固定到验证过的 IP，避免 DNS 重绑定。需要访问可信的局域网模型或邮件服务器时，可显式设置 `ALLOW_PRIVATE_NETWORK_TARGETS=true`；启用后应同时依靠网络 ACL、防火墙和独立服务账号限制访问范围。
+1. 模型连接测试。
+2. analysis_runs 的状态、窗口、error 和 stats。
+3. Worker 是否运行。
+4. 周期内是否有 complete Revision。
+5. 是否处于额度延迟。
+6. scope=analysis 的过滤后日志。
 
-## 12. 日志与排错
+标签为空不会阻止报告；旧派生表不存在是 V2.1 正常状态。
 
-后台“日志”页支持按范围、级别、AI 平台、状态和关键字筛选。平台筛选会显示 Session 数，例如 `ChatGPT（40）`。
+## 8. 备份与恢复
 
-容器日志：
+Web 业务备份用于重建站点后的逻辑恢复。数据库脚本备份用于 NAS 灾备：
 
-```sh
-cd /volume1/docker/ai-conversation-archive/source/deploy
-docker compose --env-file .env logs --tail=200 app
-docker compose --env-file .env logs --tail=200 worker
-docker compose --env-file .env logs --tail=200 host-monitor
-docker compose --env-file .env logs --tail=200 postgres
-```
+~~~sh
+POSTGRES_USER=archive POSTGRES_DB=archive BACKUP_ROOT=/volume1/backup/ai-conversation-archive sh /volume1/docker/ai-conversation-archive/source/scripts/backup.sh
+~~~
 
-常见问题检查：
+恢复前停止写入并优先在隔离环境演练：
 
-- 插件没有采集：检查当前域名、Session ID、配对状态、站点权限、悬浮窗状态和 `scope=capture` 日志。
-- 插件重复采集：检查是否已升级轻量变化检测，服务端是否返回 `incremental_base_mismatch`。
-- 元宝会话串号：确认 URL 为 `/chat/<app>/<conversation>`，后台 `externalSessionId` 应保存两段 ID。
-- 千问无法采集：确认 URL 为 `https://www.qianwen.com/chat/<id>` 或 `https://qianwen.com/chat/<id>`，并检查扩展权限。
-- Codex 只有问题没有答案：先在会话详情切换最新修订。`V2.0.1` 会以修订创建时间解决同采集时间排序，合并扫描期间收到的文件变化，并按 LF 读取含独立 CR 空白的 JSONL；升级服务端和本地同步代理后，运行一次近期 `rebuild` 可补齐受影响会话。
-- 智能归类失败：先测试模型连接，再看 Worker、`classification.maxConversationChars` 和 `scope=classification` 错误日志。
-- 周报/月报失败：检查模型测试、报告运行状态、项目知识数量和 `scope=analysis level=error` 日志。
-- 导入任务不动：检查 Worker、ZIP 大小、重复导入、导入目录权限和 `scope=import` 日志。
-- Token Plan 等待过久：查看任务统计中的 `source`、`quotaResetAt` 和 `retryAt`；`source=fallback` 表示额度接口不可用，按一小时兜底。
-- 系统状态无项目容器指标：检查 `host-monitor` 是否 healthy，`/proc` 与 `/sys/fs/cgroup` 只读挂载是否存在，并确认所有服务使用相同的 `ARCHIVE_CGROUP_PARENT`；不要通过暴露 9091 或挂载 Docker Socket 绕过问题。
+~~~sh
+sh /volume1/docker/ai-conversation-archive/source/scripts/restore.sh
+~~~
 
-## 13. 安全检查清单
+业务备份 V2.1 包含 tags 和 conversationTags。导入 V2.0.2 备份时应看到旧派生数据未导入的 warning；这不是失败。不同 APP_MASTER_KEY 时加密设置会跳过，需要重新填写。
 
-生产部署前确认：
+## 9. 导入排错
 
-1. `APP_MASTER_KEY` 是真实随机值。
-2. `APP_ORIGIN` 是 HTTPS 外部地址。
-3. `COOKIE_SECURE=true` 或 `NODE_ENV=production`。
-4. PostgreSQL 不暴露到公网。
-5. DSM 管理端口不暴露到公网。
-6. 只暴露一个 HTTPS 反向代理入口。
-7. 管理员 TOTP 已绑定。
-8. 不使用过期或测试设备令牌。
-9. 定期备份数据库和 `.env`。
-10. LLM API Key 使用最小权限和可撤销密钥。
-11. `TRUST_PROXY` 只填写实际可信的代理跳数，不使用无边界的 `true`。
-12. `EXTENSION_ORIGINS` 只包含当前发布扩展的固定 ID。
-13. 除可信内网模型/SMTP 外，保持 `ALLOW_PRIVATE_NETWORK_TARGETS=false`。
-14. app/worker 使用非 root 和只读根文件系统运行，只有导入卷与受限 `/tmp` 可写；导入数据目录只授予 UID 1000 所需读写权限。生产镜像不包含 npm/corepack、esbuild、Vite、TypeScript 和测试工具。PostgreSQL 仅恢复官方入口脚本启动所需的 `CHOWN`、`DAC_OVERRIDE`、`FOWNER`、`SETGID`、`SETUID` 能力。
-15. 在设置页启用安全规则包，并在首次启用前完成数据库备份；历史清理完成后检查任务失败数为 0。
-16. host-monitor 不映射宿主端口、不挂载 Docker Socket，保持只读根文件系统、只读指标挂载和全部 capabilities 移除。
-17. 发布镜像执行依赖与镜像 CVE 扫描；High/Critical 可修复漏洞不为 0 时不得部署。
+任务不动时检查 Worker、ZIP 大小、导入卷 UID 1000 权限、PgBoss 活跃 job 和 IMPORT_INBOX 文件是否还存在。Worker 启动扫描会重新入队仍为 queued 且源文件存在的任务；源文件缺失则标记失败。
 
-## 14. 发布包检查
+## 10. 采集排错
 
-当前产品版本基线为 `V2.0.2`。后续每次发布只增加补丁号，即 `V2.0.3`、`V2.0.4`……；根包、服务端、Web、共享协议、Chrome Manifest 和同步代理版本必须在同一次发布中保持一致。每次发布都应在 `docs/CHANGELOG.md` 顶部新增日期、版本、主题和客观变更，该文件会直接构建到 Web 的独立更新记录页。
+- 插件无采集：检查域名适配、Session ID、设备配对、站点权限和 scope=capture 日志。
+- 重复采集：检查客户端轻量变化检测和服务端 contentHash 幂等。
+- 会话不完整：在详情切换最新 complete Revision，核对 completeness reason。
+- 本地工具缺回答：升级同步代理并对近期数据执行 rebuild；不要删除旧 Revision。
+- 搜索未定位消息：核对返回 searchHit 的 revisionId、messageOrdinal 和 Web 锚点。
 
-每次交付至少包含：
+## 11. 标签与项目排错
 
-1. NAS 源码包。
-2. Chrome 插件包。
-3. Windows/macOS 同步代理包。
-4. 对应版本说明。
-5. 如改动数据库，明确迁移文件编号。
+- 大小写/全半角重复：检查 normalizedName 唯一索引和 NFKC 归一化。
+- 增量整理不补标签：确认 conversation_tags 为空时会成为 missing_tags 候选，且模型可用。
+- 人工标签被替换：检查 source=manual 或 lockedByUser=true。
+- 项目锁被改变：检查 conversation_projects.lockedByUser=true。
+- 合并标签冲突：目标关系应保留最高 confidence，并对 manual/locked 取保护并集。
+- 删除标签后会话仍应存在；只检查关联是否删除。
 
-打包时不要包含 `node_modules`、`.env`、数据库数据目录、临时导入文件、本地日志、浏览器本地状态和历史 release 目录。
+## 12. 安全检查
+
+1. APP_MASTER_KEY 为真实随机值并已离线备份。
+2. APP_ORIGIN 为 HTTPS，生产 Cookie 为 Secure。
+3. PostgreSQL、DSM 管理端口、应用 HTTP 和 host-monitor 不暴露公网。
+4. TRUST_PROXY 只配置真实跳数。
+5. EXTENSION_ORIGINS 只含可信扩展 ID。
+6. 默认保持 ALLOW_PRIVATE_NETWORK_TARGETS=false。
+7. app/worker/host-monitor 为非 root、只读、no-new-privileges、cap_drop ALL。
+8. 导入目录只授予 UID 1000 必要权限。
+9. host-monitor 不挂 Docker Socket。
+10. 定期撤销不用的设备并轮换外部 API Key。
+11. 历史脱敏清理前先备份；该操作不可逆。
+12. 发布前执行依赖、镜像漏洞与敏感信息扫描。
+
+## 13. 发布一致性
+
+根包、server、web、contracts、Chrome Manifest 和同步代理必须同时为 2.1.0/V2.1.0。CHANGELOG 顶部新增本次事实，不改写历史版本。交付包不得包含 node_modules、.env、数据库、导入临时文件、本地日志、浏览器状态或旧 release 目录。

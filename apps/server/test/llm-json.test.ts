@@ -4,6 +4,7 @@ import {
   DEFAULT_AI_REQUEST_INTERVAL_SECONDS,
   MINIMAX_TOKEN_PLAN_RETRY_BUFFER_MS,
   aiRequestPacingDelayMs,
+  aiRequestIntervalMs,
   extractJson,
   fallbackAiRetrySchedule,
   isRetryableRateLimitError,
@@ -19,6 +20,8 @@ describe("extractJson", () => {
     );
     expect(aiRequestPacingDelayMs(182_000, 100_000)).toBe(82_000);
     expect(aiRequestPacingDelayMs(100_000, 182_000)).toBe(0);
+    expect(aiRequestIntervalMs("batch", 82)).toBe(82_000);
+    expect(aiRequestIntervalMs("interactive", 82)).toBe(0);
   });
 
   it("parses fenced JSON responses", () => {

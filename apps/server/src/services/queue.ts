@@ -11,7 +11,6 @@ export const queueNames = {
   monthly: "analysis-monthly",
   classifyConversation: "classify-conversation",
   reclassifyUnlocked: "reclassify-unlocked",
-  rebuildKnowledge: "rebuild-knowledge",
   nightlyAiMaintenance: "nightly-ai-maintenance",
   importArchive: "import-archive",
   emailReport: "email-report",
@@ -26,21 +25,14 @@ export interface ReclassificationJobData {
   offset?: number;
 }
 
-export interface KnowledgeRebuildJobData {
-  taskId?: string;
-}
-
 export type NightlyAiMaintenanceStage =
   | "classification"
-  | "wait_classification"
-  | "knowledge"
-  | "wait_knowledge";
+  | "wait_classification";
 
 export interface NightlyAiMaintenanceJobData {
   runKey: string;
   stage: NightlyAiMaintenanceStage;
   classificationTaskId?: string;
-  knowledgeTaskId?: string;
 }
 
 export interface AiQueueScheduleOptions {
@@ -144,39 +136,12 @@ export async function enqueueUnlockedReclassification(
   );
 }
 
-export async function enqueueKnowledgeRebuild(
-  input?: string | KnowledgeRebuildJobData,
-  schedule?: AiQueueScheduleOptions,
-): Promise<string | null> {
-  const boss = await getBoss();
-  const data = typeof input === "string" ? { taskId: input } : { ...(input ?? {}) };
-  const singletonOptions = data.taskId
-    ? { singletonKey: scheduledSingletonKey(data.taskId, schedule) }
-    : {
-        singletonKey: scheduledSingletonKey("all-knowledge", schedule),
-        singletonSeconds: 300,
-      };
-  return boss.send(
-    queueNames.rebuildKnowledge,
-    { ...data, requestedAt: new Date().toISOString() },
-    {
-      ...singletonOptions,
-      ...(schedule?.startAfter ? { startAfter: schedule.startAfter } : {}),
-      // A paced full knowledge pass can legitimately span more than one day.
-      expireInHours: 72,
-      retryLimit: AI_RETRY_LIMIT,
-      retryDelay: AI_RETRY_DELAY_SECONDS,
-      retryBackoff: false,
-    },
-  );
-}
-
 export async function enqueueNightlyAiMaintenance(
   input: NightlyAiMaintenanceJobData,
   schedule?: AiQueueScheduleOptions,
 ): Promise<string | null> {
   const boss = await getBoss();
-  const taskKey = input.classificationTaskId ?? input.knowledgeTaskId ?? "start";
+  const taskKey = input.classificationTaskId ?? "start";
   return boss.send(
     queueNames.nightlyAiMaintenance,
     { ...input, requestedAt: new Date().toISOString() },

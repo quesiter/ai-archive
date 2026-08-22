@@ -10,14 +10,12 @@ import {
   type CapturePayloadV1,
   type CaptureSnapshotV1,
   type CaptureTriggerReason,
-  type SourceReference,
 } from "@ai-archive/contracts";
 import { db } from "../db.js";
 import {
   captureRuns,
   conversationRevisions,
   conversations,
-  knowledgeItems,
   messageSegments,
   messages,
 } from "../schema.js";
@@ -817,28 +815,6 @@ export async function hardDeleteConversation(id: string): Promise<boolean> {
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`conversation:${conversation.provider}:${conversation.externalSessionId}`}, 0))`,
     );
-
-    const knowledge = await tx
-      .select({ id: knowledgeItems.id, sourceReferences: knowledgeItems.sourceReferences })
-      .from(knowledgeItems);
-    for (const item of knowledge) {
-      const references = item.sourceReferences.filter(
-        (reference: SourceReference) => reference.conversationId !== id,
-      );
-      if (references.length === item.sourceReferences.length) continue;
-      if (references.length === 0) {
-        await tx
-          .update(knowledgeItems)
-          .set({ supersedesId: null })
-          .where(eq(knowledgeItems.supersedesId, item.id));
-        await tx.delete(knowledgeItems).where(eq(knowledgeItems.id, item.id));
-      } else {
-        await tx
-          .update(knowledgeItems)
-          .set({ sourceReferences: references, updatedAt: new Date() })
-          .where(eq(knowledgeItems.id, item.id));
-      }
-    }
 
     await tx
       .delete(captureRuns)

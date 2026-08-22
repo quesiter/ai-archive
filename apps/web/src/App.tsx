@@ -26,7 +26,7 @@ import { api, ApiError, jsonBody } from "./api.js";
 import { releaseNotes } from "./release-notes.js";
 
 type UnknownRecord = Record<string, any>;
-const WEB_VERSION = "V2.0.2";
+const WEB_VERSION = "V2.1.0";
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -107,7 +107,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
       <section className="auth-card">
         <div className="brand-mark">知</div>
         <h1>知言归藏</h1>
-        <p className="muted">汇智能之言，成项目之知。</p>
+        <p className="muted">藏过往之言，续项目之路。</p>
         <ErrorBanner message={error} />
         {!status.data?.initialized ? (
           <>
@@ -144,8 +144,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
 const navigation = [
   ["/", "总览", "⌂"],
   ["/conversations", "会话", "◫"],
-  ["/classification", "分类结果", "◇"],
-  ["/knowledge", "项目知识", "▣"],
+  ["/projects", "项目与标签", "◇"],
   ["/reports", "报告", "▤"],
   ["/imports", "导入", "⇧"],
   ["/devices", "设备", "⌘"],
@@ -161,7 +160,7 @@ function Shell({ children, onLogout }: { children: ReactNode; onLogout: () => vo
           <span>知</span>
           <div className="sidebar-brand-copy">
             <strong>知言归藏</strong>
-            <small>汇智能之言，成项目之知。</small>
+            <small>归档、检索与追溯 AI 历史。</small>
           </div>
         </div>
         <nav>
@@ -202,7 +201,7 @@ function ChangelogPage() {
           <span>当前版本</span>
           <strong>{WEB_VERSION}</strong>
         </div>
-        <p>后续发布采用语义化补丁版本递增：V2.0.1、V2.0.2……</p>
+        <p>后续发布继续采用语义化版本：V2.1.1、V2.2.0……</p>
       </section>
       <div className="release-timeline">
         {releaseNotes.map((note, index) => (
@@ -323,37 +322,15 @@ function stageLabel(stage: unknown): string {
       parsing: "解析文件",
       importing: "写入归档",
       preparing: "准备数据",
-      extracting: "抽取知识",
-      rebuilding: "重建知识",
-      consolidating: "整理知识",
+      extracting: "提取会话信息",
+      rebuilding: "整理项目与标签",
+      consolidating: "汇总归档信息",
       deferred: "等待 AI 额度恢复",
       reporting: "生成报告",
       completed: "完成",
     } as Record<string, string>
   )[String(stage)] ?? String(stage ?? "");
 }
-
-const knowledgeTypeLabels: Record<string, string> = {
-  decision: "决策",
-  requirement: "需求",
-  fact: "事实与结论",
-  idea: "已采纳想法",
-  task: "待办任务",
-  risk: "风险",
-  resource: "资源",
-  open_question: "待解问题",
-};
-
-const knowledgeTypeOrder = [
-  "decision",
-  "requirement",
-  "fact",
-  "risk",
-  "open_question",
-  "task",
-  "resource",
-  "idea",
-];
 
 function taskPercent(task: UnknownRecord | null): number {
   if (!task) return 0;
@@ -468,6 +445,7 @@ const classificationScopeLabels: Record<string, string> = {
 const classificationCandidateReasonLabels: Record<string, string> = {
   full: "完整重评",
   unassigned: "未归类",
+  missing_tags: "尚无标签",
   low_confidence: "低置信度",
   changed: "内容已更新",
 };
@@ -475,7 +453,7 @@ const classificationCandidateReasonLabels: Record<string, string> = {
 function taskCandidateReasonEntries(task: UnknownRecord | null) {
   const reasons = taskStats(task).candidateReasons;
   if (!reasons || typeof reasons !== "object" || Array.isArray(reasons)) return [];
-  const order = ["unassigned", "changed", "low_confidence", "full"];
+  const order = ["unassigned", "missing_tags", "changed", "low_confidence", "full"];
   return Object.entries(reasons as Record<string, unknown>)
     .map(([key, value]) => ({ key, count: toFiniteNumber(value) }))
     .filter((item) => item.count > 0)
@@ -531,7 +509,7 @@ function Dashboard() {
   const categoryStats = Array.isArray(data.categoryStats)
     ? data.categoryStats
     : [];
-  const knowledgeCount = toFiniteNumber(counts.knowledge);
+  const tagCount = toFiniteNumber(counts.tags);
   const topCategories = categoryStats.slice(0, 12);
   const maxCategoryCount = Math.max(
     1,
@@ -541,7 +519,7 @@ function Dashboard() {
   );
   return (
     <>
-      <PageHeader title="总览" subtitle="归档规模、分类增长和知识沉淀状态" />
+      <PageHeader title="总览" subtitle="归档规模、组织状态、采集健康与最近报告" />
       <section className="metric-grid dashboard-metrics">
         <article className="metric">
           <span>总会话</span>
@@ -569,21 +547,26 @@ function Dashboard() {
           <small>{textStats.tokenEstimateRule ?? "粗略估算"}</small>
         </article>
         <article className="metric">
-          <span>知识</span>
-          <strong>{formatCount(knowledgeCount)}</strong>
-          <small>由报告/抽取任务产生</small>
+          <span>标签</span>
+          <strong>{formatCount(tagCount)}</strong>
+          <small>跨项目复用的细粒度主题</small>
+        </article>
+        <article className="metric">
+          <span>活跃设备</span>
+          <strong>{formatCount(counts.devices)}</strong>
+          <small>当前未撤销的采集端</small>
         </article>
       </section>
       <section className="dashboard-main-grid">
         <article className="panel category-overview-panel">
           <div className="section-title-row">
             <div>
-              <h2>分类分布</h2>
+              <h2>最近活跃项目</h2>
               <p className="panel-subtitle">
-                {formatCount(categoryStats.length)} 个分类，近 7 日新增或更新 {formatCount(categoryTotals.growth7d)} 条会话
+                 {formatCount(categoryStats.length)} 个项目，近 7 日新增或更新 {formatCount(categoryTotals.growth7d)} 条会话
               </p>
             </div>
-            <Link className="button-link secondary small" to="/classification">查看分类</Link>
+            <Link className="button-link secondary small" to="/projects">查看项目与标签</Link>
           </div>
           {topCategories.length ? (
             <div className="category-dashboard-list">
@@ -608,30 +591,26 @@ function Dashboard() {
                       <strong>+{formatCount(growth7d)}</strong>
                       <span>近 7 日</span>
                     </div>
-                    <span className="pill">{formatCount(category.knowledgeCount)} 知识</span>
+                    <span className="pill">{formatCount(category.tagCount)} 标签</span>
                   </div>
                 );
               })}
             </div>
           ) : (
-            <p className="muted">还没有分类结果，先在项目知识页运行智能归类。</p>
+            <p className="muted">还没有项目数据，可在“项目与标签”运行一次整理。</p>
           )}
         </article>
-        <article className="panel knowledge-explain-panel">
-          <h2>知识如何产生</h2>
-          <div className="knowledge-count-line">
-            <strong>{formatCount(knowledgeCount)}</strong>
-            <span>当前知识条目</span>
+        <article className="panel archive-value-panel">
+          <h2>归档可复用状态</h2>
+          <div className="archive-value-count-line">
+            <strong>{formatCount(tagCount)}</strong>
+            <span>当前标签</span>
           </div>
-          <p>
-            知识不是原始会话数量。系统会先把会话归入项目，再在周报、月报或知识抽取流程里从已归类会话中提炼长期有效的信息。
-          </p>
-          <p className="muted">
-            如果这里是 0，通常表示还没有生成报告、智能归类未完成，或分析接口返回异常导致知识抽取没有写入。
-          </p>
+          <p>原始会话和 Revision 始终是事实来源。项目负责长期归属，标签负责细粒度交叉检索。</p>
+          <p className="muted">需要继续工作时，可从项目时间线打开原文，或生成 PROJECT-CONTEXT.md 交给其他 AI。</p>
           <div className="button-group">
-            <Link className="button-link secondary small" to="/reports">生成报告</Link>
-            <Link className="button-link secondary small" to="/settings">分析配置</Link>
+            <Link className="button-link secondary small" to="/projects">浏览项目</Link>
+            <Link className="button-link secondary small" to="/conversations">搜索历史</Link>
           </div>
         </article>
       </section>
@@ -907,6 +886,9 @@ function Conversations() {
   const source = searchParams.get("source") ?? "";
   const completeness = searchParams.get("completeness") ?? "";
   const captureMode = searchParams.get("captureMode") ?? "";
+  const projectId = searchParams.get("projectId") ?? "";
+  const tagIds = searchParams.get("tagIds") ?? "";
+  const selectedTagIds = tagIds.split(",").filter(Boolean);
   const from = searchParams.get("from") ?? "";
   const to = searchParams.get("to") ?? "";
   const limit = 100;
@@ -923,16 +905,20 @@ function Conversations() {
           ...(source ? { source } : {}),
           ...(completeness ? { completeness } : {}),
           ...(captureMode ? { captureMode } : {}),
+          ...(projectId ? { projectId } : {}),
+          ...(tagIds ? { tagIds } : {}),
           ...(dateParamToIso(from) ? { from: dateParamToIso(from) } : {}),
           ...(dateParamToIso(to) ? { to: dateParamToIso(to) } : {}),
         })}`,
       ),
-    [q, provider, source, completeness, captureMode, from, to, offset],
+    [q, provider, source, completeness, captureMode, projectId, tagIds, from, to, offset],
   );
   const providerCountsState = useLoad(
     () => api<UnknownRecord[]>("/api/v1/conversations/provider-counts"),
     [],
   );
+  const projectsState = useLoad(() => api<UnknownRecord[]>("/api/v1/projects"), []);
+  const tagsState = useLoad(() => api<UnknownRecord[]>("/api/v1/tags"), []);
 
   function updateQuery(next: Record<string, string | number>) {
     const merged = {
@@ -941,6 +927,8 @@ function Conversations() {
       source,
       completeness,
       captureMode,
+      projectId,
+      tagIds,
       from,
       to,
       offset,
@@ -952,6 +940,8 @@ function Conversations() {
     if (merged.source) params.set("source", String(merged.source));
     if (merged.completeness) params.set("completeness", String(merged.completeness));
     if (merged.captureMode) params.set("captureMode", String(merged.captureMode));
+    if (merged.projectId) params.set("projectId", String(merged.projectId));
+    if (merged.tagIds) params.set("tagIds", String(merged.tagIds));
     if (merged.from) params.set("from", String(merged.from));
     if (merged.to) params.set("to", String(merged.to));
     if (Number(merged.offset) > 0) params.set("offset", String(merged.offset));
@@ -1019,6 +1009,40 @@ function Conversations() {
           <option value="append">增量</option>
           <option value="import">导入</option>
         </select>
+        <select
+          value={projectId}
+          onChange={(event) => updateQuery({ projectId: event.target.value, offset: 0 })}
+        >
+          <option value="">全部项目</option>
+          {(projectsState.data ?? []).filter(
+            (project) => !project.archived || project.id === projectId,
+          ).map((project) => (
+            <option key={project.id} value={project.id}>{project.name}</option>
+          ))}
+        </select>
+        <details className="tag-filter-popover">
+          <summary>标签{selectedTagIds.length ? `（${selectedTagIds.length}）` : ""}</summary>
+          <div>
+            {(tagsState.data ?? []).map((tag) => (
+              <label key={tag.id}>
+                <input
+                  type="checkbox"
+                  checked={selectedTagIds.includes(String(tag.id))}
+                  onChange={() => {
+                    const next = selectedTagIds.includes(String(tag.id))
+                      ? selectedTagIds.filter((id) => id !== String(tag.id))
+                      : [...selectedTagIds, String(tag.id)];
+                    updateQuery({ tagIds: next.join(","), offset: 0 });
+                  }}
+                />
+                {tag.name} ({tag.conversationCount ?? 0})
+              </label>
+            ))}
+            {selectedTagIds.length > 0 && (
+              <button className="ghost small" onClick={() => updateQuery({ tagIds: "", offset: 0 })}>清除标签</button>
+            )}
+          </div>
+        </details>
         <input
           type="date"
           value={from}
@@ -1055,7 +1079,7 @@ function Conversations() {
         <section className="panel conversation-list-panel">
           <div className="conversation-list-header">
             <span>会话</span>
-            <span>归类</span>
+            <span>项目与标签</span>
             <span>采集</span>
             <span>状态</span>
             <span>更新时间</span>
@@ -1089,10 +1113,8 @@ function Conversations() {
               return (
                 <Link
                   to={`/conversations/${conversation.id}${
-                    searchHit?.messageOrdinal !== undefined
-                      ? `#message-${searchHit.messageOrdinal}`
-                      : ""
-                  }`}
+                    searchHit?.revisionId ? `?revisionId=${searchHit.revisionId}` : ""
+                  }${typeof searchHit?.messageOrdinal === "number" ? `#message-${searchHit.messageOrdinal}` : ""}`}
                   className="conversation-compact-row"
                   key={conversation.id}
                 >
@@ -1103,7 +1125,12 @@ function Conversations() {
                     <div>
                       <strong>{conversation.title || conversation.externalSessionId}</strong>
                       <code>{conversation.externalSessionId}</code>
-                      {searchHit?.excerpt && <span className="search-hit">{searchHit.excerpt}</span>}
+                      {searchHit?.excerpt && <span className="search-hit"><b>{searchHit.reason}：</b>{searchHit.excerpt}</span>}
+                      {Array.isArray(conversation.tags) && conversation.tags.length > 0 && (
+                        <span className="conversation-tag-line">
+                          {conversation.tags.map((tag: UnknownRecord) => tag.name).join(" · ")}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <span className="conversation-project-label">{classification}</span>
@@ -1247,6 +1274,46 @@ function ConversationDetail() {
     }
   }
 
+  async function addConversationTag(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    setActionError("");
+    try {
+      await api(`/api/v1/conversations/${id}/tags`, {
+        method: "POST",
+        ...jsonBody({ name: form.get("name"), lockedByUser: true }),
+      });
+      formElement.reset();
+      state.reload();
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function toggleConversationTag(tag: UnknownRecord) {
+    setActionError("");
+    try {
+      await api(`/api/v1/conversations/${id}/tags/${tag.id}`, {
+        method: "PATCH",
+        ...jsonBody({ lockedByUser: !tag.lockedByUser }),
+      });
+      state.reload();
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function removeConversationTag(tag: UnknownRecord) {
+    setActionError("");
+    try {
+      await api(`/api/v1/conversations/${id}/tags/${tag.id}`, { method: "DELETE" });
+      state.reload();
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
   async function removeConversation(): Promise<void> {
     if (!window.confirm("确认永久删除这个会话及全部版本？删除后无法恢复，再次采集会创建全新的版本。")) return;
     await api(`/api/v1/conversations/${id}`, { method: "DELETE" });
@@ -1268,7 +1335,27 @@ function ConversationDetail() {
   const canonicalUrl = safeExternalHref(data.conversation.canonicalUrl);
   return <><PageHeader title={data.conversation.title || "未命名会话"} subtitle={`${providerLabels[data.conversation.provider as Provider]} · ${data.conversation.externalSessionId}`} actions={<div className="button-group"><ExportLinks path={`/api/v1/conversations/${id}/export`} />{canonicalUrl && <a className="button-link" href={canonicalUrl} target="_blank" rel="noopener noreferrer">打开原会话</a>}<button className="danger" onClick={() => void removeConversation()}>永久删除归档</button></div>} />
     <ErrorBanner message={actionError} />
-    <div className="toolbar"><label>版本 <select value={selectedRevision?.id ?? ""} onChange={(event) => setSearchParams(event.target.value ? { revisionId: event.target.value } : {})}>{data.revisions.map((revision: UnknownRecord) => <option key={revision.id} value={revision.id}>{new Date(revision.capturedAt).toLocaleString()} · {captureModeLabels[String(revision.captureMode)] ?? revision.captureMode} · {revision.completeness} · {revision.messageCount} 条</option>)}</select></label><label>项目（选择后人工锁定） <select disabled={projectsState.loading} value={data.projectAssignment?.projectId ?? ""} onChange={(event) => void assignProject(event.target.value)}><option value="">待归类</option>{projectsState.data?.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>{data.projectAssignment?.lockedByUser ? <><span className="pill complete">人工锁定</span><button className="secondary small" onClick={() => void releaseProjectLock()}>交还 AI 调整</button></> : <span className="pill">AI 可动态调整</span>}</div>
+    <div className="toolbar"><label>版本 <select value={selectedRevision?.id ?? ""} onChange={(event) => setSearchParams(event.target.value ? { revisionId: event.target.value } : {})}>{data.revisions.map((revision: UnknownRecord) => <option key={revision.id} value={revision.id}>{new Date(revision.capturedAt).toLocaleString()} · {captureModeLabels[String(revision.captureMode)] ?? revision.captureMode} · {revision.completeness} · {revision.messageCount} 条</option>)}</select></label><label>项目（选择后人工锁定） <select disabled={projectsState.loading} value={data.projectAssignment?.projectId ?? ""} onChange={(event) => void assignProject(event.target.value)}><option value="">待归类</option>{projectsState.data?.filter((project) => !project.archived || project.id === data.projectAssignment?.projectId).map((project) => <option key={project.id} value={project.id}>{project.name}{project.archived ? "（已归档）" : ""}</option>)}</select></label>{data.projectAssignment?.lockedByUser ? <><span className="pill complete">人工锁定</span><button className="secondary small" onClick={() => void releaseProjectLock()}>交还 AI 调整</button></> : <span className="pill">AI 可动态调整</span>}</div>
+    <section className="panel conversation-tags-panel">
+      <div className="section-title-row">
+        <div><h2>标签</h2><p className="panel-subtitle">人工标签默认锁定；自动整理不会覆盖人工或已锁定关联。</p></div>
+        <form className="inline-form" onSubmit={addConversationTag}>
+          <input name="name" placeholder="新增标签" required />
+          <button>添加</button>
+        </form>
+      </div>
+      <div className="conversation-tag-editor">
+        {(data.tags ?? []).map((tag: UnknownRecord) => (
+          <span className={`tag-editor-chip ${tag.lockedByUser ? "locked" : ""}`} key={tag.id}>
+            <Link to={`/conversations?tagIds=${tag.id}`}>{tag.name}</Link>
+            <small>{tag.source === "manual" ? "人工" : `AI ${typeof tag.confidence === "number" ? Math.round(tag.confidence * 100) + "%" : ""}`}</small>
+            <button className="ghost small" onClick={() => void toggleConversationTag(tag)}>{tag.lockedByUser ? "解锁" : "锁定"}</button>
+            <button className="ghost small" onClick={() => void removeConversationTag(tag)}>移除</button>
+          </span>
+        ))}
+        {!data.tags?.length && <span className="muted">暂无标签</span>}
+      </div>
+    </section>
     {selectedRevision && <section className="revision-meta-grid">
       <div><span>采集模式</span><strong>{captureModeLabels[String(selectedRevision.captureMode)] ?? selectedRevision.captureMode}</strong></div>
       <div><span>触发原因</span><strong>{triggerReasonLabels[String(selectedRevision.triggerReason)] ?? "未记录"}</strong></div>
@@ -1298,6 +1385,39 @@ function ConversationDetail() {
   </>;
 }
 
+function ProjectTimeline({ projectId }: { projectId: string }) {
+  const [visible, setVisible] = useState(false);
+  const state = useLoad(
+    () => visible
+      ? api<UnknownRecord>(`/api/v1/projects/${projectId}/timeline?limit=100`)
+      : Promise.resolve(null as UnknownRecord | null),
+    [visible, projectId],
+  );
+  if (!visible) {
+    return <button className="secondary small" onClick={() => setVisible(true)}>查看项目时间线</button>;
+  }
+  if (state.loading) return <Loading label="加载时间线中…" />;
+  if (state.error) return <ErrorBanner message={state.error} />;
+  const items = Array.isArray(state.data?.items) ? state.data.items : [];
+  return (
+    <div className="project-timeline">
+      <div className="section-title-row">
+        <strong>项目演进</strong>
+        <button className="ghost small" onClick={() => setVisible(false)}>收起</button>
+      </div>
+      {items.length ? items.map((item: UnknownRecord) => (
+        <Link className="timeline-item" key={item.revisionId} to={item.href}>
+          <time>{new Date(item.capturedAt).toLocaleDateString()}</time>
+          <div>
+            <strong>{providerLabels[item.provider as Provider] ?? item.provider} · {item.title || "未命名会话"}</strong>
+            <span>{Array.isArray(item.tags) ? item.tags.map((tag: UnknownRecord) => tag.name).join(" · ") : ""}</span>
+          </div>
+        </Link>
+      )) : <p className="muted">这个项目还没有可展示的完整 Revision。</p>}
+    </div>
+  );
+}
+
 function Projects() {
   const overviewState = useLoad(() => api<UnknownRecord>("/api/v1/projects/overview"), []);
   const [error, setError] = useState("");
@@ -1311,15 +1431,20 @@ function Projects() {
   const classificationClock = useTaskClock(classificationActive);
   const overview = overviewState.data ?? {};
   const projectGroups = Array.isArray(overview.projects) ? overview.projects : [];
-  const categorizedProjectGroups = projectGroups.filter(
+  const activeProjectGroups = projectGroups.filter((project) => !project.archived);
+  const archivedProjectGroups = projectGroups.filter((project) => project.archived);
+  const categorizedProjectGroups = activeProjectGroups.filter(
     (project) => Number(project.conversationCount ?? 0) > 0,
   );
-  const emptyProjectGroups = projectGroups.filter(
+  const emptyProjectGroups = activeProjectGroups.filter(
     (project) => Number(project.conversationCount ?? 0) <= 0,
   );
   const unclassified = Array.isArray(overview.unclassified) ? overview.unclassified : [];
   const totals = overview.totals ?? {};
-  const totalProjectCount = Number(totals.projectCount ?? projectGroups.length);
+  const totalProjectCount = Number(totals.projectCount ?? activeProjectGroups.length);
+  const archivedProjectCount = Number(
+    totals.archivedProjectCount ?? archivedProjectGroups.length,
+  );
   const activeCategoryCount = Number(
     totals.activeProjectCount ?? categorizedProjectGroups.length,
   );
@@ -1333,6 +1458,7 @@ function Projects() {
   const unclassifiedConversationCount = Number(
     totals.unclassifiedConversationCount ?? unclassified.length,
   );
+  const tagCount = Number(totals.tagCount ?? 0);
 
   useEffect(() => {
     let cancelled = false;
@@ -1340,7 +1466,7 @@ function Projects() {
       .then((payload) => {
         if (!cancelled && payload.task && isActiveStatus(payload.task.status)) {
           setClassificationTask(payload.task);
-          setClassificationMessage(payload.task.message ?? "智能归类正在运行");
+          setClassificationMessage(payload.task.message ?? "项目与标签整理正在运行");
         }
       })
       .catch(() => null);
@@ -1392,7 +1518,7 @@ function Projects() {
     }
   }
   async function runClassification() {
-    setClassificationMessage("正在加入智能归类队列…");
+    setClassificationMessage("正在加入项目与标签整理队列…");
     setClassificationTask(null);
     try {
       const payload = await api<{
@@ -1409,7 +1535,7 @@ function Projects() {
       setClassificationTask(payload.task);
       setClassificationMessage(
         payload.reused
-          ? "已有智能归类任务正在运行，已切换到当前任务进度"
+          ? "已有项目与标签整理任务正在运行，已切换到当前任务进度"
           : payload.task.message ?? "已加入队列，等待 Worker 接手",
       );
     } catch (reason) {
@@ -1430,12 +1556,69 @@ function Projects() {
         method: "POST",
         ...jsonBody({ targetProjectId: target.id }),
       });
-      setMergeMessage(`合并完成：迁移 ${result.movedConversationCount ?? 0} 个会话、${result.movedKnowledgeCount ?? 0} 条知识，合并 ${result.mergedKnowledgeCount ?? 0} 条重复知识。`);
+      setMergeMessage(`合并完成：迁移 ${result.movedConversationCount ?? 0} 个会话和 ${result.movedReportCount ?? 0} 份关联报告。`);
       setMergeSourceId("");
       setMergeTargetId("");
       overviewState.reload();
     } catch (reason) {
       setMergeMessage("");
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function editProject(project: UnknownRecord) {
+    const name = window.prompt("项目名称", String(project.name ?? ""));
+    if (!name?.trim()) return;
+    const description = window.prompt("项目说明", String(project.description ?? ""));
+    if (description === null) return;
+    try {
+      await api(`/api/v1/projects/${project.id}`, {
+        method: "PATCH",
+        ...jsonBody({ name: name.trim(), description: description.trim() }),
+      });
+      overviewState.reload();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function setProjectArchived(project: UnknownRecord, archived: boolean) {
+    const action = archived ? "归档" : "恢复";
+    if (!window.confirm(`确认${action}项目“${project.name}”？会话不会被删除。`)) return;
+    try {
+      await api(`/api/v1/projects/${project.id}`, {
+        method: "PATCH",
+        ...jsonBody({ archived }),
+      });
+      overviewState.reload();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function downloadProjectContext(project: UnknownRecord) {
+    setError("");
+    try {
+      const response = await fetch(`/api/v1/projects/${project.id}/context`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ai: true }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(payload.error ?? response.statusText);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "PROJECT-CONTEXT.md";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
   }
@@ -1459,8 +1642,8 @@ function Projects() {
   return (
     <>
       <PageHeader
-        title="分类结果"
-        subtitle="按项目浏览已归类会话和待归类会话。"
+        title="项目与标签"
+        subtitle="用一个主项目与多个稳定标签组织归档会话。"
         actions={
           <div className="button-group">
             <select
@@ -1472,11 +1655,11 @@ function Projects() {
                 )
               }
             >
-              <option value="economy">增量智能归类</option>
-              <option value="full">完整重评未锁定会话</option>
+              <option value="economy">增量整理</option>
+              <option value="full">完整整理未锁定会话</option>
             </select>
             <button disabled={classificationActive} onClick={() => void runClassification()}>
-              {classificationActive ? "智能归类中" : "立即智能归类"}
+              {classificationActive ? "整理中" : "整理项目与标签"}
             </button>
           </div>
         }
@@ -1491,10 +1674,10 @@ function Projects() {
         <h2>结论</h2>
         <p>
           {classificationActive
-            ? "正在重新归类会话，完成后这里会自动刷新。"
+            ? "正在整理会话的项目与标签，完成后这里会自动刷新。"
             : activeCategoryCount > 0
               ? `当前共有 ${activeCategoryCount} 个已启用项目，已归类 ${categorizedConversationCount} 个会话，仍有 ${unclassifiedConversationCount} 个待归类会话。`
-              : "当前还没有可展示的分类结果，先创建项目或运行智能归类。"}
+              : "当前还没有可展示的组织结果，先创建项目或运行一次整理。"}
         </p>
       </section>
       {classificationTask && (
@@ -1502,7 +1685,7 @@ function Projects() {
           <div className="progress-header">
             <div>
               <strong>
-                智能归类 · {statusLabel(classificationTask.status)}
+                项目与标签整理 · {statusLabel(classificationTask.status)}
                 {stats.stage ? ` · ${stageLabel(stats.stage)}` : ""}
               </strong>
               <span>{formatTaskTime(classificationTask.updatedAt)}</span>
@@ -1515,13 +1698,8 @@ function Projects() {
           <div className="progress-stats">
             <span>范围 {classificationScopeLabel}</span>
             <span>已处理 {classificationTask.processedCount ?? 0}/{classificationTask.totalCount ?? 0}</span>
-            <span>AI 调用 {stats.aiCalls ?? 0}</span>
-            <span>AI 兜底 {stats.aiFallbacks ?? 0}</span>
-            <span>本地命中 {stats.localMatches ?? 0}</span>
-            <span>复用 {stats.cached ?? 0}</span>
             <span>已归类 {stats.classified ?? 0}</span>
-            <span>仅建议 {stats.suggested ?? 0}</span>
-            <span>跳过 {stats.skipped ?? 0}</span>
+            <span>标签关联 {stats.tagAssignments ?? 0}</span>
             <span>失败 {classificationTask.failedCount ?? 0}</span>
           </div>
           {classificationDeferredMessage && (
@@ -1554,9 +1732,9 @@ function Projects() {
 
       <section className="project-metrics">
         <article className="metric">
-          <span>类别</span>
+          <span>项目</span>
           <strong>{activeCategoryCount}</strong>
-          <small>共 {totalProjectCount} 个项目</small>
+          <small>共 {totalProjectCount} 个项目{archivedProjectCount > 0 ? `，另 ${archivedProjectCount} 个已归档` : ""}</small>
         </article>
         <article className="metric">
           <span>已归类会话</span>
@@ -1568,12 +1746,17 @@ function Projects() {
           <strong>{unclassifiedConversationCount}</strong>
           <small>含仅有建议的会话</small>
         </article>
+        <article className="metric">
+          <span>标签</span>
+          <strong>{tagCount}</strong>
+          <small>可跨项目组合筛选</small>
+        </article>
       </section>
 
       <section className="panel project-create-panel">
         <div className="project-action-copy">
           <h2>新建项目</h2>
-          <p className="panel-subtitle">新增项目后，可重新运行智能归类或在会话详情中人工锁定。</p>
+          <p className="panel-subtitle">新增项目后，可重新运行项目与标签整理或在会话详情中人工锁定。</p>
         </div>
         <form className="project-create-form" onSubmit={createProject}>
           <input name="name" aria-label="项目名称" placeholder="新项目名称" required />
@@ -1585,20 +1768,20 @@ function Projects() {
       <section className="panel project-admin-panel">
         <div className="project-action-copy">
           <h2>合并项目</h2>
-          <p className="panel-subtitle">把 A 项目的会话、知识和关联报告迁移到 B 项目；完成后删除 A 项目。</p>
+          <p className="panel-subtitle">把 A 项目的会话和关联报告迁移到 B 项目；完成后删除 A 项目。</p>
         </div>
         <form className="project-merge-form" onSubmit={mergeProjects}>
           <label>A · 源项目
             <select value={mergeSourceId} onChange={(event) => setMergeSourceId(event.target.value)} required>
               <option value="">请选择</option>
-              {projectGroups.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+              {activeProjectGroups.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
             </select>
           </label>
           <span className="merge-arrow">→</span>
           <label>B · 目标项目
             <select value={mergeTargetId} onChange={(event) => setMergeTargetId(event.target.value)} required>
               <option value="">请选择</option>
-              {projectGroups.filter((project) => project.id !== mergeSourceId).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+              {activeProjectGroups.filter((project) => project.id !== mergeSourceId).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
             </select>
           </label>
           <button className="danger" disabled={!mergeSourceId || !mergeTargetId || mergeSourceId === mergeTargetId}>确认合并</button>
@@ -1609,14 +1792,14 @@ function Projects() {
       <section className="project-board">
         <div className="section-title-row">
           <div>
-            <h2>分类结果</h2>
-            <p className="panel-subtitle">展开项目即可查看归到该类别下的会话。</p>
+            <h2>项目</h2>
+            <p className="panel-subtitle">展开项目可查看会话、标签分布、时间线与导出入口。</p>
           </div>
-          <span className="pill">{activeCategoryCount} 个类别</span>
+          <span className="pill">{activeCategoryCount} 个活跃项目</span>
         </div>
         {overviewState.loading ? (
-          <Loading label="加载分类结果中…" />
-        ) : projectGroups.length ? (
+          <Loading label="加载项目中…" />
+        ) : activeProjectGroups.length ? (
           <div className="project-group-list">
             {categorizedProjectGroups.map((project, index) => {
               const conversations = Array.isArray(project.conversations)
@@ -1635,12 +1818,25 @@ function Projects() {
                     </div>
                     <div className="project-group-counts">
                       <span>{conversationCount} 会话</span>
-                      <span>{project.knowledgeCount ?? 0} 知识</span>
+                      <span>近 7 日 +{project.growth7d ?? 0}</span>
+                      <span>近 30 日 +{project.growth30d ?? 0}</span>
                     </div>
                   </summary>
                   <div className="project-group-actions">
                     <ExportLinks path={`/api/v1/projects/${project.id}/export`} />
+                    <button className="secondary small" onClick={() => void downloadProjectContext(project)}>生成项目上下文</button>
+                    <button className="secondary small" onClick={() => void editProject(project)}>编辑</button>
+                    <button className="danger small" onClick={() => void setProjectArchived(project, true)}>归档</button>
                   </div>
+                  {Array.isArray(project.commonTags) && project.commonTags.length > 0 && (
+                    <div className="project-common-tags">
+                      {project.commonTags.map((tag: UnknownRecord) => (
+                        <Link className="pill" key={tag.id} to={`/conversations?projectId=${project.id}&tagIds=${tag.id}`}>
+                          {tag.name} · {tag.count}
+                        </Link>
+                      ))}
+                    </div>
+                  )}
                   {conversations.length ? (
                     <div className="project-conversation-list">
                       {conversations.map((conversation: UnknownRecord) => (
@@ -1668,6 +1864,7 @@ function Projects() {
                   ) : (
                     <p className="project-empty">这个项目暂时还没有归入会话。</p>
                   )}
+                  <ProjectTimeline projectId={String(project.id)} />
                 </details>
               );
             })}
@@ -1686,7 +1883,11 @@ function Projects() {
                   {emptyProjectGroups.map((project) => (
                     <div className="empty-project-item" key={project.id}>
                       <span>{project.name}</span>
-                      <ExportLinks path={`/api/v1/projects/${project.id}/export`} />
+                      <div className="button-group">
+                        <ExportLinks path={`/api/v1/projects/${project.id}/export`} />
+                        <button className="secondary small" onClick={() => void editProject(project)}>编辑</button>
+                        <button className="danger small" onClick={() => void setProjectArchived(project, true)}>归档</button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1694,9 +1895,61 @@ function Projects() {
             )}
           </div>
         ) : (
-          <Loading label="还没有项目。创建项目或运行智能归类后会在这里显示。" />
+          <Loading label="还没有项目。创建项目或运行整理后会在这里显示。" />
         )}
       </section>
+
+      {archivedProjectGroups.length > 0 && (
+        <section className="project-board">
+          <div className="section-title-row">
+            <div>
+              <h2>已归档项目</h2>
+              <p className="panel-subtitle">保留原有会话、标签、时间线和导出；恢复后可重新接收归类。</p>
+            </div>
+            <span className="pill">{archivedProjectCount} 个</span>
+          </div>
+          <div className="project-group-list">
+            {archivedProjectGroups.map((project) => {
+              const conversations = Array.isArray(project.conversations)
+                ? project.conversations
+                : [];
+              return (
+                <details className="project-group empty-project-group" key={project.id}>
+                  <summary>
+                    <div className="project-group-title">
+                      <strong>{project.name}</strong>
+                      <p>{project.description || "暂无描述"}</p>
+                    </div>
+                    <div className="project-group-counts">
+                      <span>{project.conversationCount ?? conversations.length} 会话</span>
+                      <span>已归档</span>
+                    </div>
+                  </summary>
+                  <div className="project-group-actions">
+                    <ExportLinks path={`/api/v1/projects/${project.id}/export`} />
+                    <button className="secondary small" onClick={() => void downloadProjectContext(project)}>生成项目上下文</button>
+                    <button className="secondary small" onClick={() => void editProject(project)}>编辑</button>
+                    <button className="secondary small" onClick={() => void setProjectArchived(project, false)}>恢复项目</button>
+                  </div>
+                  {conversations.length > 0 && (
+                    <div className="project-conversation-list">
+                      {conversations.map((conversation: UnknownRecord) => (
+                        <Link className="project-conversation-row" key={conversation.id} to={`/conversations/${conversation.id}`}>
+                          <div className="project-conversation-main">
+                            <strong>{conversation.title || conversation.id}</strong>
+                            <span>{providerLabels[conversation.provider as Provider] ?? conversation.provider} · {formatTaskTime(conversation.updatedAt)}</span>
+                          </div>
+                        </Link>
+                      ))}
+                    </div>
+                  )}
+                  <ProjectTimeline projectId={String(project.id)} />
+                </details>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       <section className="project-board">
         <div className="section-title-row">
@@ -1734,318 +1987,117 @@ function Projects() {
         )}
       </section>
 
+      <TagManager />
+
     </>
   );
 }
 
-function KnowledgePage() {
-  const knowledgeState = useLoad(
-    () => api<UnknownRecord[]>("/api/v1/knowledge?status=active"),
-    [],
-  );
-  const overviewState = useLoad(() => api<UnknownRecord>("/api/v1/projects/overview"), []);
-  const [message, setMessage] = useState("");
-  const [task, setTask] = useState<UnknownRecord | null>(null);
-  const [projectFilter, setProjectFilter] = useState("");
-  const [typeFilter, setTypeFilter] = useState("");
+function TagManager() {
+  const state = useLoad(() => api<UnknownRecord[]>("/api/v1/tags"), []);
   const [query, setQuery] = useState("");
-  const active = isActiveStatus(task?.status);
-  const knowledgeClock = useTaskClock(active);
-  const knowledgeTaskStats = taskStats(task);
-  const knowledgeDeferredMessage = deferredAiTaskMessage(
-    knowledgeTaskStats,
-    knowledgeClock,
+  const [message, setMessage] = useState("");
+  const tags = (state.data ?? []).filter((tag) =>
+    String(tag.name ?? "").toLocaleLowerCase().includes(query.toLocaleLowerCase()),
   );
-  const visibleKnowledgeMessage = knowledgeDeferredMessage || message;
-  const knowledge = knowledgeState.data ?? [];
-  const overview = overviewState.data ?? {};
-  const projectGroups = Array.isArray(overview.projects) ? overview.projects : [];
-  const projectCount = Number(overview.totals?.projectCount ?? projectGroups.length);
-  const knowledgeCount = knowledge.length;
-  const activeProjects = Number(overview.totals?.activeProjectCount ?? 0);
-  const sourceProjectCount = new Set(knowledge.map((item) => item.projectId)).size;
-  const projectsWithKnowledge = Array.from(
-    new Map(
-      knowledge.map((item) => [String(item.projectId), String(item.projectName)]),
-    ).entries(),
-  ).sort((left, right) => left[1].localeCompare(right[1], "zh-CN"));
-  const availableTypes = [...new Set(knowledge.map((item) => String(item.type)))]
-    .sort((left, right) => {
-      const leftIndex = knowledgeTypeOrder.indexOf(left);
-      const rightIndex = knowledgeTypeOrder.indexOf(right);
-      return (leftIndex < 0 ? 99 : leftIndex) - (rightIndex < 0 ? 99 : rightIndex);
-    });
-  const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
-  const filteredKnowledge = knowledge.filter((item) => {
-    if (projectFilter && item.projectId !== projectFilter) return false;
-    if (typeFilter && item.type !== typeFilter) return false;
-    if (!normalizedQuery) return true;
-    return `${item.title ?? ""}\n${item.body ?? ""}\n${item.projectName ?? ""}`
-      .toLocaleLowerCase("zh-CN")
-      .includes(normalizedQuery);
-  });
-  const knowledgeGroups = new Map<
-    string,
-    { id: string; name: string; items: UnknownRecord[] }
-  >();
-  for (const item of filteredKnowledge) {
-    const key = String(item.projectId);
-    const group = knowledgeGroups.get(key) ?? {
-      id: key,
-      name: String(item.projectName ?? "未命名项目"),
-      items: [],
-    };
-    group.items.push(item);
-    knowledgeGroups.set(key, group);
-  }
-  const groupedKnowledge = [...knowledgeGroups.values()]
-    .map((group) => ({
-      ...group,
-      items: group.items.sort((left, right) => {
-        const leftIndex = knowledgeTypeOrder.indexOf(String(left.type));
-        const rightIndex = knowledgeTypeOrder.indexOf(String(right.type));
-        if (leftIndex !== rightIndex) {
-          return (leftIndex < 0 ? 99 : leftIndex) - (rightIndex < 0 ? 99 : rightIndex);
-        }
-        return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
-      }),
-    }))
-    .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
 
-  useEffect(() => {
-    let cancelled = false;
-    void api<{ task: UnknownRecord | null }>("/api/v1/knowledge/rebuild/latest")
-      .then((payload) => {
-        if (!cancelled && payload.task && isActiveStatus(payload.task.status)) {
-          setTask(payload.task);
-          setMessage(payload.task.message ?? "项目知识重建正在运行");
-        }
-      })
-      .catch(() => null);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!task?.id || !active) return;
-    const timer = window.setInterval(() => {
-      void api<UnknownRecord>(`/api/v1/knowledge/rebuild/${task.id}`)
-        .then((nextTask) => {
-          setTask(nextTask);
-          setMessage(nextTask.message ?? statusLabel(nextTask.status));
-          if (!isActiveStatus(nextTask.status)) {
-            knowledgeState.reload();
-            overviewState.reload();
-          }
-        })
-        .catch((reason) => setMessage(reason instanceof Error ? reason.message : String(reason)));
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [task?.id, active, knowledgeState.reload, overviewState.reload]);
-
-  async function runRebuild() {
-    setMessage("正在加入项目知识重建队列…");
-    setTask(null);
+  async function createTag(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     try {
-      const payload = await api<{ jobId: string | null; task: UnknownRecord; reused?: boolean }>(
-        "/api/v1/knowledge/rebuild",
-        { method: "POST" },
-      );
-      setTask(payload.task);
-      setMessage(
-        payload.reused
-          ? "已有重建任务正在运行，已切换到当前进度"
-          : payload.task.message ?? "已加入队列，等待 Worker 接手",
-      );
+      await api("/api/v1/tags", {
+        method: "POST",
+        ...jsonBody({ name: form.get("name") }),
+      });
+      formElement.reset();
+      state.reload();
+      setMessage("标签已创建");
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : String(reason));
     }
   }
 
-  const conclusion =
-    knowledgeCount > 0
-      ? `已沉淀 ${knowledgeCount} 条有效知识，覆盖 ${sourceProjectCount} 个项目。`
-      : "当前还没有项目知识，先完成归类或重建一次知识库。";
+  async function renameTag(tag: UnknownRecord) {
+    const name = window.prompt("新标签名称", String(tag.name ?? ""));
+    if (!name?.trim()) return;
+    try {
+      await api(`/api/v1/tags/${tag.id}`, {
+        method: "PATCH",
+        ...jsonBody({ name: name.trim() }),
+      });
+      state.reload();
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function mergeTag(tag: UnknownRecord) {
+    const targetName = window.prompt("合并到哪个标签？请输入目标标签的完整名称");
+    if (!targetName) return;
+    const target = (state.data ?? []).find(
+      (item) => String(item.name).toLocaleLowerCase() === targetName.trim().toLocaleLowerCase(),
+    );
+    if (!target || target.id === tag.id) {
+      setMessage("没有找到可用的目标标签");
+      return;
+    }
+    try {
+      await api(`/api/v1/tags/${tag.id}/merge`, {
+        method: "POST",
+        ...jsonBody({ targetTagId: target.id }),
+      });
+      state.reload();
+      setMessage(`已合并到 ${target.name}`);
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function deleteTag(tag: UnknownRecord) {
+    if (!window.confirm(`删除标签“${tag.name}”？只会删除标签关联，不会删除会话。`)) return;
+    try {
+      await api(`/api/v1/tags/${tag.id}`, { method: "DELETE" });
+      state.reload();
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
 
   return (
-    <>
-      <PageHeader
-        title="项目知识"
-        subtitle="把会话整理成可追溯、可复用、可继续维护的中文项目知识。"
-        actions={
-          <div className="button-group">
-            <button disabled={active} onClick={() => void runRebuild()}>
-              {active ? "重建中" : "按新标准重建"}
-            </button>
-          </div>
-        }
-      />
-      <ErrorBanner message={knowledgeState.error || overviewState.error} />
-      {visibleKnowledgeMessage && (
-        <div
-          className={`alert ${
-            task?.status === "failed"
-              ? "error"
-              : knowledgeDeferredMessage
-                ? "warning"
-                : "success"
-          }`}
-        >
-          {visibleKnowledgeMessage}
-        </div>
-      )}
-      <section className="panel summary-panel">
-        <h2>结论</h2>
-        <p>{conclusion}</p>
-      </section>
-      <section className="panel knowledge-definition-panel">
+    <section className="project-board tag-manager">
+      <div className="section-title-row">
         <div>
-          <h2>这里保存什么</h2>
-          <p>已确认的决策、稳定需求、事实结论、风险、资源，以及仍需跟进的重要问题。</p>
+          <h2>标签</h2>
+          <p className="panel-subtitle">搜索、重命名、合并或删除标签；删除标签不会删除 Conversation。</p>
         </div>
-        <div>
-          <h2>这里不会保存什么</h2>
-          <p>助手的实施计划、代码生成步骤、过程播报、重复摘要、临时状态和无证据猜测。</p>
-        </div>
-      </section>
-      {task && (
-        <section className="panel progress-panel">
-          <div className="progress-header">
-            <div>
-              <strong>
-                项目知识 · {statusLabel(task.status)}
-                {knowledgeTaskStats.stage
-                  ? ` · ${stageLabel(knowledgeTaskStats.stage)}`
-                  : ""}
-              </strong>
-              <span>{formatTaskTime(task.updatedAt)}</span>
+        <span className="pill">{state.data?.length ?? 0} 个</span>
+      </div>
+      <div className="toolbar">
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索标签…" />
+        <form className="inline-form" onSubmit={createTag}>
+          <input name="name" placeholder="新标签" required />
+          <button>创建</button>
+        </form>
+      </div>
+      {message && <div className="alert success">{message}</div>}
+      {state.loading ? <Loading label="加载标签中…" /> : state.error ? <ErrorBanner message={state.error} /> : (
+        <div className="tag-admin-list">
+          {tags.map((tag) => (
+            <div className="list-row" key={tag.id}>
+              <Link to={`/conversations?tagIds=${tag.id}`}><strong>{tag.name}</strong></Link>
+              <span>{tag.conversationCount ?? 0} 个会话</span>
+              <div className="button-group">
+                <button className="secondary small" onClick={() => void renameTag(tag)}>重命名</button>
+                <button className="secondary small" onClick={() => void mergeTag(tag)}>合并</button>
+                <button className="danger small" onClick={() => void deleteTag(tag)}>删除</button>
+              </div>
             </div>
-            <span>{taskPercent(task)}%</span>
-          </div>
-          <div className="progress-bar">
-            <span style={{ width: `${taskPercent(task)}%` }} />
-          </div>
-          <div className="progress-stats">
-            <span>已处理 {task.processedCount ?? 0}/{task.totalCount ?? 0}</span>
-            <span>成功 {task.succeededCount ?? 0}</span>
-            <span>失败 {task.failedCount ?? 0}</span>
-          </div>
-          {knowledgeDeferredMessage && (
-            <p className="ai-deferred-notice">{knowledgeDeferredMessage}</p>
-          )}
-          {task.error && !knowledgeDeferredMessage && (
-            <p className="progress-error">{task.error}</p>
-          )}
-        </section>
+          ))}
+          {!tags.length && <p className="muted">没有匹配的标签。</p>}
+        </div>
       )}
-      <section className="project-metrics">
-        <article className="metric">
-          <span>项目</span>
-          <strong>{projectCount}</strong>
-          <small>已启用项目 {activeProjects} 个</small>
-        </article>
-        <article className="metric">
-          <span>知识条目</span>
-          <strong>{knowledgeCount}</strong>
-          <small>仅显示当前有效知识</small>
-        </article>
-        <article className="metric">
-          <span>来源项目</span>
-          <strong>{sourceProjectCount}</strong>
-          <small>按项目聚合展示</small>
-        </article>
-      </section>
-      <section className="panel">
-        <div className="section-title-row">
-          <div>
-            <h2>知识库</h2>
-            <p className="panel-subtitle">按项目整理；每条知识都能回到原始消息核对。</p>
-          </div>
-          <span className="pill">{filteredKnowledge.length} / {knowledge.length} 条</span>
-        </div>
-        <div className="toolbar knowledge-toolbar">
-          <input
-            aria-label="搜索项目知识"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索标题、正文或项目"
-          />
-          <select
-            aria-label="按项目筛选知识"
-            value={projectFilter}
-            onChange={(event) => setProjectFilter(event.target.value)}
-          >
-            <option value="">全部项目</option>
-            {projectsWithKnowledge.map(([id, name]) => (
-              <option key={id} value={id}>{name}</option>
-            ))}
-          </select>
-          <select
-            aria-label="按类型筛选知识"
-            value={typeFilter}
-            onChange={(event) => setTypeFilter(event.target.value)}
-          >
-            <option value="">全部类型</option>
-            {availableTypes.map((type) => (
-              <option key={type} value={type}>{knowledgeTypeLabels[type] ?? type}</option>
-            ))}
-          </select>
-        </div>
-        {knowledgeState.loading ? (
-          <Loading />
-        ) : groupedKnowledge.length === 0 ? (
-          <p className="empty-state">没有符合当前条件的知识</p>
-        ) : (
-          <div className="knowledge-project-list">
-            {groupedKnowledge.map((group) => (
-              <section className="knowledge-project-section" key={group.id}>
-                <header className="knowledge-project-header">
-                  <div>
-                    <span>项目</span>
-                    <h3>{group.name}</h3>
-                  </div>
-                  <span className="pill">{group.items.length} 条知识</span>
-                </header>
-                <div className="knowledge-grid">
-                  {group.items.map((item) => {
-                    const references = Array.isArray(item.sourceReferences)
-                      ? item.sourceReferences
-                      : [];
-                    return (
-                      <article className="knowledge-card" key={item.id}>
-                        <header>
-                          <span className={`pill knowledge-type ${String(item.type)}`}>
-                            {knowledgeTypeLabels[String(item.type)] ?? String(item.type)}
-                          </span>
-                          <time>{new Date(item.updatedAt).toLocaleDateString("zh-CN")}</time>
-                        </header>
-                        <h3>{item.title}</h3>
-                        <p>{item.body}</p>
-                        <footer>
-                          <span>置信度 {Math.round(Number(item.confidence) * 100)}%</span>
-                          <div className="knowledge-evidence-links">
-                            <span>原始依据 {references.length} 条</span>
-                            {references.map((reference: UnknownRecord, index: number) => (
-                              <Link
-                                key={`${reference.revisionId}-${reference.messageOrdinal}-${index}`}
-                                to={`/conversations/${reference.conversationId}?revisionId=${reference.revisionId}#message-${reference.messageOrdinal}`}
-                              >
-                                查看依据 {index + 1}（消息 #{reference.messageOrdinal}）
-                              </Link>
-                            ))}
-                          </div>
-                        </footer>
-                      </article>
-                    );
-                  })}
-                </div>
-              </section>
-            ))}
-          </div>
-        )}
-      </section>
-    </>
+    </section>
   );
 }
 
@@ -2104,7 +2156,7 @@ function Reports() {
     <>
       <PageHeader
         title="报告"
-        subtitle="每周知识增量与每月项目演进"
+        subtitle="每周会话进展与每月项目演进"
         actions={
           <div className="button-group">
             <button disabled={weeklyActive} onClick={() => void run("weekly")}>
@@ -2160,8 +2212,8 @@ function Reports() {
                             ? ` · 会话 ${stats.analyzedConversations}`
                             : ""
                         }${
-                          typeof stats.knowledgeCount === "number"
-                            ? ` · 知识 ${stats.knowledgeCount}`
+                          typeof stats.tagCount === "number"
+                            ? ` · 标签 ${stats.tagCount}`
                             : ""
                         }${error ? ` · ${error}` : ""}`}
                     </small>
@@ -2436,7 +2488,7 @@ function Devices() {
 
 const settingsSections = [
   { id: "ai", label: "模型与额度", hint: "MiniMax、模型连接与 Token Plan", icon: "✦" },
-  { id: "classification", label: "智能归类", hint: "自动归类与结果复用", icon: "◇" },
+  { id: "classification", label: "项目与标签", hint: "自动整理与稳定结果复用", icon: "◇" },
   { id: "email", label: "邮件与报告", hint: "SMTP、周报与月报", icon: "✉" },
   { id: "backup", label: "备份与恢复", hint: "业务数据导入与导出", icon: "▤" },
   { id: "redaction", label: "脱敏与安全", hint: "安全规则与历史清理", icon: "⌁" },
@@ -2815,7 +2867,7 @@ function Settings() {
 
   async function importBackup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!window.confirm("导入系统备份会替换当前会话、项目、分类、报告、设备、设置和日志等业务数据；当前管理员账号会保留。确认继续？")) return;
+    if (!window.confirm("导入系统备份会替换当前会话、项目、标签、报告、设备、设置和日志等业务数据；当前管理员账号会保留。确认继续？")) return;
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     setBackupBusy(true);
@@ -2899,17 +2951,17 @@ function Settings() {
                       <label>调用起始最小间隔（秒）<input type="number" min={0} max={3600} step={1} name="ai.requestIntervalSeconds" defaultValue={settings["ai.requestIntervalSeconds"] || "82"} /></label>
                       <label>每日夜间维护<select name="ai.nightlyMaintenanceEnabled" defaultValue={settings["ai.nightlyMaintenanceEnabled"] || "true"}><option value="true">每天 22:00 启用</option><option value="false">停用</option></select></label>
                     </div>
-                    <p className="muted">夜间维护按照“增量智能归类 → 项目知识分析”串行执行；遇到额度上限时会显示恢复时间并自动续跑。</p>
+                    <p className="muted">夜间维护只增量整理发生变化的会话项目与标签；没有候选时直接结束。遇到额度上限会显示恢复时间并自动续跑。</p>
                   </section>
                 </>
               )}
 
               {activeSection === "classification" && (
                 <section className="panel">
-                  <h2>智能归类策略</h2>
+                  <h2>项目与标签整理策略</h2>
                   <div className="form-grid">
-                    <label>新采集后自动归类<select name="classification.autoOnCapture" defaultValue={settings["classification.autoOnCapture"] || "false"}><option value="false">停用</option><option value="true">启用</option></select></label>
-                    <label>项目/周报后自动重评<select name="classification.autoReclassify" defaultValue={settings["classification.autoReclassify"] || "false"}><option value="false">停用</option><option value="true">启用</option></select></label>
+                    <label>新采集后自动整理<select name="classification.autoOnCapture" defaultValue={settings["classification.autoOnCapture"] || "false"}><option value="false">停用</option><option value="true">启用</option></select></label>
+                    <label>项目变更后自动重评<select name="classification.autoReclassify" defaultValue={settings["classification.autoReclassify"] || "false"}><option value="false">停用</option><option value="true">启用</option></select></label>
                     <label>默认运行方式<select name="classification.runMode" defaultValue={settings["classification.runMode"] || "economy"}><option value="economy">节能归类</option><option value="full">完整重评</option></select></label>
                     <label>稳定结果复用<select name="classification.reuseStable" defaultValue={settings["classification.reuseStable"] || "true"}><option value="true">启用</option><option value="false">停用</option></select></label>
                     <label>单会话正文上限<input type="number" min={2000} max={40000} step={1000} name="classification.maxConversationChars" defaultValue={settings["classification.maxConversationChars"] || "8000"} /></label>
@@ -3084,5 +3136,5 @@ function Settings() {
 export default function App() {
   const [authenticated,setAuthenticated]=useState<boolean|null>(null);const navigate=useNavigate();useEffect(()=>{void api("/api/v1/auth/me").then(()=>setAuthenticated(true)).catch((reason)=>setAuthenticated(reason instanceof ApiError&&reason.status===401?false:false));},[]);async function logout(){await api("/api/v1/auth/logout",{method:"POST"});setAuthenticated(false);navigate("/");}
   if(authenticated===null)return<Loading/>;if(!authenticated)return<AuthScreen onAuthenticated={()=>setAuthenticated(true)}/>;
-  return <Shell onLogout={()=>void logout()}><Routes><Route path="/" element={<Dashboard/>}/><Route path="/conversations" element={<Conversations/>}/><Route path="/conversations/:id" element={<ConversationDetail/>}/><Route path="/classification" element={<Projects/>}/><Route path="/knowledge" element={<KnowledgePage/>}/><Route path="/projects" element={<Navigate to="/classification" replace/>}/><Route path="/reports" element={<Reports/>}/><Route path="/reports/:id" element={<ReportDetail/>}/><Route path="/imports" element={<Imports/>}/><Route path="/devices" element={<Devices/>}/><Route path="/logs" element={<Logs/>}/><Route path="/settings" element={<Settings/>}/><Route path="/changelog" element={<ChangelogPage/>}/><Route path="*" element={<Navigate to="/" replace/>}/></Routes></Shell>;
+  return <Shell onLogout={()=>void logout()}><Routes><Route path="/" element={<Dashboard/>}/><Route path="/conversations" element={<Conversations/>}/><Route path="/conversations/:id" element={<ConversationDetail/>}/><Route path="/projects" element={<Projects/>}/><Route path="/classification" element={<Navigate to="/projects" replace/>}/><Route path="/reports" element={<Reports/>}/><Route path="/reports/:id" element={<ReportDetail/>}/><Route path="/imports" element={<Imports/>}/><Route path="/devices" element={<Devices/>}/><Route path="/logs" element={<Logs/>}/><Route path="/settings" element={<Settings/>}/><Route path="/changelog" element={<ChangelogPage/>}/><Route path="*" element={<Navigate to="/" replace/>}/></Routes></Shell>;
 }

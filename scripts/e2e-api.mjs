@@ -62,7 +62,7 @@ for (let attempt = 0; attempt < 30; attempt += 1) {
 }
 
 const health = await expectOk(await fetch(`${base}/healthz`));
-const expectedVersion = process.env.E2E_EXPECTED_VERSION ?? "V2.0.2";
+const expectedVersion = process.env.E2E_EXPECTED_VERSION ?? "V2.1.0";
 if (health.version !== expectedVersion) {
   throw new Error(`Expected server ${expectedVersion}, received ${String(health.version)}`);
 }
@@ -273,6 +273,143 @@ const detailAfter = await expectOk(
   }),
 );
 
+const nasTag = await expectOk(
+  await fetch(`${base}/api/v1/conversations/${first.conversationId}/tags`, {
+    method: "POST",
+    headers: webHeaders,
+    body: JSON.stringify({ name: "ＮＡＳ" }),
+  }),
+);
+const ddnsTag = await expectOk(
+  await fetch(`${base}/api/v1/conversations/${first.conversationId}/tags`, {
+    method: "POST",
+    headers: webHeaders,
+    body: JSON.stringify({ name: "DDNS" }),
+  }),
+);
+const normalizedNasTag = await expectOk(
+  await fetch(`${base}/api/v1/tags`, {
+    method: "POST",
+    headers: webHeaders,
+    body: JSON.stringify({ name: "nas" }),
+  }),
+);
+const projectAndTagFilter = await expectOk(
+  await fetch(
+    `${base}/api/v1/conversations?projectId=${project.id}&tagIds=${nasTag.tagId},${ddnsTag.tagId}`,
+    { headers: { cookie } },
+  ),
+);
+const unlockedTag = await expectOk(
+  await fetch(
+    `${base}/api/v1/conversations/${first.conversationId}/tags/${ddnsTag.tagId}`,
+    {
+      method: "PATCH",
+      headers: webHeaders,
+      body: JSON.stringify({ lockedByUser: false }),
+    },
+  ),
+);
+const renamedNasTag = await expectOk(
+  await fetch(`${base}/api/v1/tags/${nasTag.tagId}`, {
+    method: "PATCH",
+    headers: webHeaders,
+    body: JSON.stringify({ name: "NAS 存储" }),
+  }),
+);
+const networkTag = await expectOk(
+  await fetch(`${base}/api/v1/tags`, {
+    method: "POST",
+    headers: webHeaders,
+    body: JSON.stringify({ name: "网络" }),
+  }),
+);
+const mergedTag = await expectOk(
+  await fetch(`${base}/api/v1/tags/${ddnsTag.tagId}/merge`, {
+    method: "POST",
+    headers: webHeaders,
+    body: JSON.stringify({ targetTagId: networkTag.id }),
+  }),
+);
+const detailAfterTagMerge = await expectOk(
+  await fetch(`${base}/api/v1/conversations/${first.conversationId}`, {
+    headers: { cookie },
+  }),
+);
+const timeline = await expectOk(
+  await fetch(`${base}/api/v1/projects/${project.id}/timeline`, {
+    headers: { cookie },
+  }),
+);
+const contextResponse = await fetch(`${base}/api/v1/projects/${project.id}/context`, {
+  method: "POST",
+  headers: webHeaders,
+  body: JSON.stringify({ ai: false }),
+});
+const contextMarkdown = await expectOk(contextResponse);
+const projectExportResponse = await fetch(
+  `${base}/api/v1/projects/${project.id}/export?format=md`,
+  { headers: { cookie } },
+);
+const projectExportMarkdown = await expectOk(projectExportResponse);
+const mergeTargetProject = await expectOk(
+  await fetch(`${base}/api/v1/projects`, {
+    method: "POST",
+    headers: webHeaders,
+    body: JSON.stringify({ name: "Archive E2E Merged", description: "Merge target" }),
+  }),
+);
+const projectMerge = await expectOk(
+  await fetch(`${base}/api/v1/projects/${project.id}/merge`, {
+    method: "POST",
+    headers: webHeaders,
+    body: JSON.stringify({ targetProjectId: mergeTargetProject.id }),
+  }),
+);
+const detailAfterProjectMerge = await expectOk(
+  await fetch(`${base}/api/v1/conversations/${first.conversationId}`, {
+    headers: { cookie },
+  }),
+);
+const archivedProject = await expectOk(
+  await fetch(`${base}/api/v1/projects/${mergeTargetProject.id}`, {
+    method: "PATCH",
+    headers: webHeaders,
+    body: JSON.stringify({ archived: true }),
+  }),
+);
+const projectsWhileArchived = await expectOk(
+  await fetch(`${base}/api/v1/projects`, { headers: { cookie } }),
+);
+const overviewWhileArchived = await expectOk(
+  await fetch(`${base}/api/v1/projects/overview`, { headers: { cookie } }),
+);
+const archivedAssignmentResponse = await fetch(
+  `${base}/api/v1/conversations/${first.conversationId}/project`,
+  {
+    method: "PUT",
+    headers: webHeaders,
+    body: JSON.stringify({ projectId: mergeTargetProject.id, mode: "lock" }),
+  },
+);
+await expectOk(
+  await fetch(`${base}/api/v1/projects/${mergeTargetProject.id}`, {
+    method: "PATCH",
+    headers: webHeaders,
+    body: JSON.stringify({ archived: false }),
+  }),
+);
+const deleteTagResponse = await fetch(`${base}/api/v1/tags/${nasTag.tagId}`, {
+  method: "DELETE",
+  headers: { cookie, origin: base },
+});
+await expectOk(deleteTagResponse);
+const detailAfterTagDelete = await expectOk(
+  await fetch(`${base}/api/v1/conversations/${first.conversationId}`, {
+    headers: { cookie },
+  }),
+);
+
 const deleteConversationResponse = await fetch(
   `${base}/api/v1/conversations/${first.conversationId}`,
   {
@@ -416,10 +553,42 @@ const summary = {
   invalidIssue: Boolean(invalidBody.issues?.length),
   titleSearch: titleSearch.length,
   bodySearch: bodySearch.length,
+  titleSearchReason: titleSearch[0]?.searchHit?.reason,
+  bodySearchReason: bodySearch[0]?.searchHit?.reason,
+  bodySearchMessageOrdinal: bodySearch[0]?.searchHit?.messageOrdinal,
   invalidProviderStatus: invalidProviderResponse.status,
   revisions: detailBefore.revisions.length,
   titleUpdatedWithoutRevision: detailBefore.conversation.title === metadataOnly.title,
   projectLocked: detailAfter.projectAssignment?.lockedByUser,
+  normalizedTagReused: normalizedNasTag.id === nasTag.tagId,
+  multiTagAndProjectFilter: projectAndTagFilter.length,
+  tagUnlocked: unlockedTag.lockedByUser === false,
+  renamedTag: renamedNasTag.name,
+  mergedTagTarget: mergedTag.targetTagId,
+  mergedTagVisible: detailAfterTagMerge.tags.some((tag) => tag.id === networkTag.id),
+  timelineItems: timeline.items?.length,
+  timelineProvider: timeline.items?.[0]?.provider,
+  timelineLinkExact:
+    timeline.items?.[0]?.href ===
+    `/conversations/${first.conversationId}?revisionId=${timeline.items?.[0]?.revisionId}`,
+  contextDownloaded:
+    contextResponse.status === 200 &&
+    contextResponse.headers.get("content-disposition")?.includes("PROJECT-CONTEXT.md") &&
+    contextMarkdown.includes("## 原始来源"),
+  projectExported:
+    projectExportResponse.status === 200 && projectExportMarkdown.includes("Archive E2E"),
+  projectMerged: detailAfterProjectMerge.projectAssignment?.projectId === mergeTargetProject.id,
+  projectArchived: archivedProject.archived === true,
+  archivedProjectVisible:
+    projectsWhileArchived.find((item) => item.id === mergeTargetProject.id)
+      ?.conversationCount === 1 &&
+    overviewWhileArchived.projects?.some(
+      (item) => item.id === mergeTargetProject.id && item.archived === true,
+    ),
+  archivedProjectRejectedForAssignment: archivedAssignmentResponse.status === 400,
+  tagDeleteKeptConversation:
+    detailAfterTagDelete.conversation.id === first.conversationId &&
+    !detailAfterTagDelete.tags.some((tag) => tag.id === nasTag.tagId),
   deleteStatus: deleteConversationResponse.status,
   deletedDetailStatus: deletedConversationResponse.status,
   recapturedStatus: recapturedResponse.status,
@@ -459,10 +628,38 @@ if (
   invalidResponse.status !== 400 ||
   titleSearch.length !== 1 ||
   bodySearch.length < 1 ||
+  titleSearch[0]?.searchHit?.reason !== "标题命中" ||
+  bodySearch[0]?.searchHit?.reason !== "正文命中" ||
+  bodySearch[0]?.searchHit?.messageOrdinal !== 1 ||
   invalidProviderResponse.status !== 400 ||
   detailBefore.revisions.length !== 2 ||
   detailBefore.conversation.title !== metadataOnly.title ||
   !detailAfter.projectAssignment?.lockedByUser ||
+  normalizedNasTag.id !== nasTag.tagId ||
+  projectAndTagFilter.length !== 1 ||
+  unlockedTag.lockedByUser !== false ||
+  renamedNasTag.name !== "NAS 存储" ||
+  mergedTag.targetTagId !== networkTag.id ||
+  !detailAfterTagMerge.tags.some((tag) => tag.id === networkTag.id) ||
+  timeline.items?.length !== 1 ||
+  timeline.items?.[0]?.provider !== "deepseek" ||
+  timeline.items?.[0]?.href !==
+    `/conversations/${first.conversationId}?revisionId=${timeline.items?.[0]?.revisionId}` ||
+  contextResponse.status !== 200 ||
+  !contextResponse.headers.get("content-disposition")?.includes("PROJECT-CONTEXT.md") ||
+  !contextMarkdown.includes("## 原始来源") ||
+  projectExportResponse.status !== 200 ||
+  !projectExportMarkdown.includes("Archive E2E") ||
+  detailAfterProjectMerge.projectAssignment?.projectId !== mergeTargetProject.id ||
+  archivedProject.archived !== true ||
+  projectsWhileArchived.find((item) => item.id === mergeTargetProject.id)
+    ?.conversationCount !== 1 ||
+  !overviewWhileArchived.projects?.some(
+    (item) => item.id === mergeTargetProject.id && item.archived === true,
+  ) ||
+  archivedAssignmentResponse.status !== 400 ||
+  detailAfterTagDelete.conversation.id !== first.conversationId ||
+  detailAfterTagDelete.tags.some((tag) => tag.id === nasTag.tagId) ||
   deleteConversationResponse.status !== 204 ||
   deletedConversationResponse.status !== 404 ||
   recapturedResponse.status !== 201 ||

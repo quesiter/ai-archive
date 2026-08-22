@@ -1,13 +1,15 @@
-import { and, asc, desc, eq, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db } from "../db.js";
 import { requireWebUser } from "../http.js";
 import {
   conversationProjects,
+  conversationRevisions,
+  conversationTags,
   conversations,
-  knowledgeItems,
   projects,
+  tags,
 } from "../schema.js";
 import {
   createBackgroundTask,
@@ -18,7 +20,6 @@ import {
 } from "../services/background-tasks.js";
 import {
   enqueueConversationClassification,
-  enqueueKnowledgeRebuild,
   enqueueUnlockedReclassification,
 } from "../services/queue.js";
 import { getBooleanSetting, getSetting } from "../services/settings.js";
@@ -28,6 +29,8 @@ import {
   type ConversationExportFormat,
 } from "../services/conversation-export.js";
 import { mergeProjectIntoProject } from "../services/project-merge.js";
+import { generateProjectContext } from "../services/project-context.js";
+import { selectLatestTimelineRevisions } from "../services/timeline.js";
 import { safeStoredError, writeOperationLog } from "../services/operation-log.js";
 
 const ProjectInputSchema = z.object({
@@ -60,151 +63,140 @@ async function enqueueAutoReclassification(
 ): Promise<void> {
   if (!(await getBooleanSetting("classification.autoReclassify", false))) return;
   await enqueueUnlockedReclassification().catch((error) =>
-    log.warn({ error }, "Failed to queue project reclassification"),
+    log.warn({ error }, "Failed to queue project and tag organization"),
   );
+}
+
+async function loadProjectsOverview() {
+  const since7d = Date.now() - 7 * 86_400_000;
+  const since30d = Date.now() - 30 * 86_400_000;
+  const [projectRows, assignmentRows, unclassifiedRows, tagRows, allTags] =
+    await Promise.all([
+      db
+        .select()
+        .from(projects)
+        .orderBy(asc(projects.name)),
+      db
+        .select({
+          id: conversations.id,
+          provider: conversations.provider,
+          title: conversations.title,
+          updatedAt: conversations.updatedAt,
+          projectId: conversationProjects.projectId,
+          confidence: conversationProjects.confidence,
+          lockedByUser: conversationProjects.lockedByUser,
+          suggestedName: conversationProjects.suggestedName,
+        })
+        .from(conversationProjects)
+        .innerJoin(conversations, eq(conversations.id, conversationProjects.conversationId))
+        .where(isNull(conversations.deletedAt))
+        .orderBy(desc(conversations.updatedAt)),
+      db
+        .select({
+          id: conversations.id,
+          provider: conversations.provider,
+          title: conversations.title,
+          updatedAt: conversations.updatedAt,
+          suggestedName: conversationProjects.suggestedName,
+          confidence: conversationProjects.confidence,
+        })
+        .from(conversations)
+        .leftJoin(conversationProjects, eq(conversationProjects.conversationId, conversations.id))
+        .where(
+          and(
+            isNull(conversationProjects.projectId),
+            isNull(conversations.deletedAt),
+          ),
+        )
+        .orderBy(desc(conversations.updatedAt)),
+      db
+        .select({
+          projectId: conversationProjects.projectId,
+          conversationId: conversationTags.conversationId,
+          tagId: tags.id,
+          tagName: tags.name,
+        })
+        .from(conversationTags)
+        .innerJoin(tags, eq(tags.id, conversationTags.tagId))
+        .innerJoin(
+          conversationProjects,
+          eq(conversationProjects.conversationId, conversationTags.conversationId),
+        ),
+      db.select({ id: tags.id }).from(tags),
+    ]);
+  const visibleIds = new Set(projectRows.map((project) => project.id));
+  const conversationsByProject = new Map<string, typeof assignmentRows>();
+  for (const assignment of assignmentRows) {
+    if (!assignment.projectId || !visibleIds.has(assignment.projectId)) continue;
+    const rows = conversationsByProject.get(assignment.projectId) ?? [];
+    rows.push(assignment);
+    conversationsByProject.set(assignment.projectId, rows);
+  }
+  const tagsByProject = new Map<string, Map<string, { id: string; name: string; count: number }>>();
+  for (const row of tagRows) {
+    if (!row.projectId || !visibleIds.has(row.projectId)) continue;
+    const values = tagsByProject.get(row.projectId) ?? new Map();
+    const value = values.get(row.tagId) ?? { id: row.tagId, name: row.tagName, count: 0 };
+    value.count += 1;
+    values.set(row.tagId, value);
+    tagsByProject.set(row.projectId, values);
+  }
+  const groupedProjects = projectRows
+    .map((project) => {
+      const assigned = conversationsByProject.get(project.id) ?? [];
+      const latestActivityAt = assigned[0]?.updatedAt ?? project.updatedAt;
+      return {
+        ...project,
+        conversationCount: assigned.length,
+        latestActivityAt,
+        growth7d: assigned.filter((row) => row.updatedAt.getTime() >= since7d).length,
+        growth30d: assigned.filter((row) => row.updatedAt.getTime() >= since30d).length,
+        commonTags: [...(tagsByProject.get(project.id)?.values() ?? [])]
+          .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name))
+          .slice(0, 8),
+        conversations: assigned.map(({ projectId: _projectId, ...row }) => row),
+      };
+    })
+    .sort(
+      (left, right) =>
+        right.conversationCount - left.conversationCount ||
+        left.name.localeCompare(right.name),
+    );
+  return {
+    totals: {
+      projectCount: groupedProjects.filter((project) => !project.archived).length,
+      archivedProjectCount: groupedProjects.filter((project) => project.archived).length,
+      activeProjectCount: groupedProjects.filter(
+        (project) => !project.archived && project.conversationCount > 0,
+      ).length,
+      categorizedConversationCount: groupedProjects.reduce(
+        (total, project) => total + project.conversationCount,
+        0,
+      ),
+      unclassifiedConversationCount: unclassifiedRows.length,
+      tagCount: allTags.length,
+    },
+    projects: groupedProjects,
+    unclassified: unclassifiedRows,
+  };
 }
 
 export async function projectRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/v1/projects", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
-    const rows = await db.select().from(projects).orderBy(asc(projects.name));
-    return Promise.all(
-      rows.map(async (project) => {
-        const assignments = await db
-          .select({ conversationId: conversationProjects.conversationId })
-          .from(conversationProjects)
-          .where(eq(conversationProjects.projectId, project.id));
-        const knowledge = await db
-          .select({ id: knowledgeItems.id })
-          .from(knowledgeItems)
-          .where(eq(knowledgeItems.projectId, project.id));
-        return {
-          ...project,
-          conversationCount: assignments.length,
-          knowledgeCount: knowledge.length,
-        };
-      }),
-    );
+    const overview = await loadProjectsOverview();
+    return overview.projects;
   });
 
   app.get("/api/v1/projects/overview", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
-    const [projectRows, assignmentRows, knowledgeRows, unclassifiedRows] =
-      await Promise.all([
-        db
-          .select()
-          .from(projects)
-          .where(eq(projects.archived, false))
-          .orderBy(asc(projects.name)),
-        db
-          .select({
-            id: conversations.id,
-            provider: conversations.provider,
-            title: conversations.title,
-            updatedAt: conversations.updatedAt,
-            projectId: conversationProjects.projectId,
-            confidence: conversationProjects.confidence,
-            lockedByUser: conversationProjects.lockedByUser,
-            suggestedName: conversationProjects.suggestedName,
-          })
-          .from(conversationProjects)
-          .innerJoin(
-            conversations,
-            eq(conversations.id, conversationProjects.conversationId),
-          )
-          .where(isNull(conversations.deletedAt))
-          .orderBy(desc(conversations.updatedAt)),
-        db
-          .select({
-            id: knowledgeItems.id,
-            projectId: knowledgeItems.projectId,
-          })
-          .from(knowledgeItems),
-        db
-          .select({
-            id: conversations.id,
-            provider: conversations.provider,
-            title: conversations.title,
-            updatedAt: conversations.updatedAt,
-            suggestedName: conversationProjects.suggestedName,
-            confidence: conversationProjects.confidence,
-          })
-          .from(conversations)
-          .leftJoin(
-            conversationProjects,
-            eq(conversationProjects.conversationId, conversations.id),
-          )
-          .where(
-            and(
-              isNull(conversationProjects.projectId),
-              isNull(conversations.deletedAt),
-            ),
-          )
-          .orderBy(desc(conversations.updatedAt)),
-      ]);
-
-    const visibleProjectIds = new Set(projectRows.map((project) => project.id));
-    const conversationsByProject = new Map<string, typeof assignmentRows>();
-    let categorizedConversationCount = 0;
-    for (const assignment of assignmentRows) {
-      if (!assignment.projectId || !visibleProjectIds.has(assignment.projectId)) continue;
-      categorizedConversationCount += 1;
-      const rows = conversationsByProject.get(assignment.projectId) ?? [];
-      rows.push(assignment);
-      conversationsByProject.set(assignment.projectId, rows);
-    }
-
-    const knowledgeCountByProject = new Map<string, number>();
-    let visibleKnowledgeCount = 0;
-    for (const item of knowledgeRows) {
-      if (!visibleProjectIds.has(item.projectId)) continue;
-      visibleKnowledgeCount += 1;
-      knowledgeCountByProject.set(
-        item.projectId,
-        (knowledgeCountByProject.get(item.projectId) ?? 0) + 1,
-      );
-    }
-
-    const groupedProjects = projectRows
-      .map((project) => {
-        const assignedConversations = conversationsByProject.get(project.id) ?? [];
-        return {
-          ...project,
-          conversationCount: assignedConversations.length,
-          knowledgeCount: knowledgeCountByProject.get(project.id) ?? 0,
-          conversations: assignedConversations.map(
-            ({ projectId: _projectId, ...row }) => row,
-          ),
-        };
-      })
-      .sort(
-        (left, right) =>
-          right.conversationCount - left.conversationCount ||
-          left.name.localeCompare(right.name),
-      );
-
-    return {
-      totals: {
-        projectCount: groupedProjects.length,
-        activeProjectCount: groupedProjects.filter(
-          (project) => project.conversationCount > 0,
-        ).length,
-        categorizedConversationCount,
-        unclassifiedConversationCount: unclassifiedRows.length,
-        knowledgeCount: visibleKnowledgeCount,
-      },
-      projects: groupedProjects,
-      unclassified: unclassifiedRows,
-    };
+    return loadProjectsOverview();
   });
 
   app.post("/api/v1/projects", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
     const input = ProjectInputSchema.parse(request.body);
-    const [project] = await db
-      .insert(projects)
-      .values(input)
-      .returning();
+    const [project] = await db.insert(projects).values(input).returning();
     await enqueueAutoReclassification(request.log);
     return reply.code(201).send(project);
   });
@@ -214,9 +206,9 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
       const params = z.object({ id: z.string().uuid() }).parse(request.params);
-      const input = ProjectInputSchema.partial().extend({
-        archived: z.boolean().optional(),
-      }).parse(request.body);
+      const input = ProjectInputSchema.partial()
+        .extend({ archived: z.boolean().optional() })
+        .parse(request.body);
       const [project] = await db
         .update(projects)
         .set({ ...input, updatedAt: new Date() })
@@ -240,12 +232,116 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       const filename = `${safeProjectExportFilename(data.scopeName)}.${format}`;
       reply
         .header("Content-Type", projectExportMimeType(format))
-        .header(
-          "Content-Disposition",
-          `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
-        )
+        .header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`)
         .header("Cache-Control", "no-store");
       return reply.send(content);
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/v1/projects/:id/context",
+    async (request, reply) => {
+      if (!(await requireWebUser(request, reply))) return;
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const input = z.object({ ai: z.boolean().default(true) }).parse(request.body ?? {});
+      const context = await generateProjectContext(params.id, input);
+      if (!context) return reply.code(404).send({ error: "Project not found" });
+      reply
+        .header("Content-Type", "text/markdown; charset=utf-8")
+        .header("Content-Disposition", "attachment; filename=PROJECT-CONTEXT.md")
+        .header("Cache-Control", "no-store");
+      return reply.send(context.markdown);
+    },
+  );
+
+  app.get<{ Params: { id: string }; Querystring: { limit?: number; offset?: number } }>(
+    "/api/v1/projects/:id/timeline",
+    async (request, reply) => {
+      if (!(await requireWebUser(request, reply))) return;
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const query = z.object({
+        limit: z.coerce.number().int().min(1).max(200).default(100),
+        offset: z.coerce.number().int().min(0).default(0),
+      }).parse(request.query);
+      const [project] = await db
+        .select()
+        .from(projects)
+        .where(eq(projects.id, params.id))
+        .limit(1);
+      if (!project) return reply.code(404).send({ error: "Project not found" });
+      const conversationRows = await db
+        .select({
+          id: conversations.id,
+          provider: conversations.provider,
+          title: conversations.title,
+          updatedAt: conversations.updatedAt,
+        })
+        .from(conversationProjects)
+        .innerJoin(conversations, eq(conversations.id, conversationProjects.conversationId))
+        .where(
+          and(
+            eq(conversationProjects.projectId, params.id),
+            isNull(conversations.deletedAt),
+          ),
+        );
+      if (!conversationRows.length) return { project, total: 0, items: [] };
+      const ids = conversationRows.map((row) => row.id);
+      const revisions = await db
+        .select({
+          id: conversationRevisions.id,
+          conversationId: conversationRevisions.conversationId,
+          capturedAt: conversationRevisions.capturedAt,
+          createdAt: conversationRevisions.createdAt,
+          completeness: conversationRevisions.completeness,
+        })
+        .from(conversationRevisions)
+        .where(inArray(conversationRevisions.conversationId, ids))
+        .orderBy(
+          asc(conversationRevisions.conversationId),
+          desc(sql`${conversationRevisions.completeness} = 'complete'`),
+          desc(conversationRevisions.capturedAt),
+          desc(conversationRevisions.createdAt),
+        );
+      const newestRevision = selectLatestTimelineRevisions(revisions);
+      const tagLinks = await db
+        .select({
+          conversationId: conversationTags.conversationId,
+          id: tags.id,
+          name: tags.name,
+        })
+        .from(conversationTags)
+        .innerJoin(tags, eq(tags.id, conversationTags.tagId))
+        .where(inArray(conversationTags.conversationId, ids));
+      const tagsByConversation = new Map<string, Array<{ id: string; name: string }>>();
+      for (const link of tagLinks) {
+        const values = tagsByConversation.get(link.conversationId) ?? [];
+        values.push({ id: link.id, name: link.name });
+        tagsByConversation.set(link.conversationId, values);
+      }
+      const items = conversationRows
+        .flatMap((conversation) => {
+          const revision = newestRevision.get(conversation.id);
+          if (!revision) return [];
+          return [{
+            conversationId: conversation.id,
+            revisionId: revision.id,
+            capturedAt: revision.capturedAt,
+            provider: conversation.provider,
+            title: conversation.title,
+            tags: tagsByConversation.get(conversation.id) ?? [],
+            href: `/conversations/${conversation.id}?revisionId=${revision.id}`,
+          }];
+        })
+        .sort(
+          (left, right) =>
+            right.capturedAt.getTime() - left.capturedAt.getTime() ||
+            right.revisionId.localeCompare(left.revisionId),
+        );
+      return {
+        project,
+        total: items.length,
+        items: items.slice(query.offset, query.offset + query.limit),
+      };
     },
   );
 
@@ -257,17 +353,13 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       const params = z.object({ id: z.string().uuid() }).parse(request.params);
       const input = z.object({ targetProjectId: z.string().uuid() }).parse(request.body);
       if (input.targetProjectId === params.id) {
-        return reply.code(400).send({
-          error: "Source and target projects must be different",
-        });
+        return reply.code(400).send({ error: "Source and target projects must be different" });
       }
       const result = await mergeProjectIntoProject({
         sourceProjectId: params.id,
         targetProjectId: input.targetProjectId,
       });
-      if (!result) {
-        return reply.code(404).send({ error: "Source or target project not found" });
-      }
+      if (!result) return reply.code(404).send({ error: "Source or target project not found" });
       await writeOperationLog({
         scope: "classification",
         message: `项目“${result.sourceProjectName}”已合并到“${result.targetProjectName}”`,
@@ -285,84 +377,61 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
       const params = z.object({ id: z.string().uuid() }).parse(request.params);
-      const input = z
-        .object({
-          projectId: z.string().uuid().nullable(),
-          mode: z.enum(["lock", "auto"]).default("lock"),
-        })
-        .parse(request.body);
+      const input = z.object({
+        projectId: z.string().uuid().nullable(),
+        mode: z.enum(["lock", "auto"]).default("lock"),
+      }).parse(request.body);
       const [conversation] = await db
         .select({ id: conversations.id })
         .from(conversations)
-        .where(eq(conversations.id, params.id))
+        .where(and(eq(conversations.id, params.id), isNull(conversations.deletedAt)))
         .limit(1);
-      if (!conversation) {
-        return reply.code(404).send({ error: "Conversation not found" });
-      }
+      if (!conversation) return reply.code(404).send({ error: "Conversation not found" });
       if (input.projectId) {
         const [project] = await db
           .select({ id: projects.id })
           .from(projects)
-          .where(eq(projects.id, input.projectId))
+          .where(and(eq(projects.id, input.projectId), eq(projects.archived, false)))
           .limit(1);
         if (!project) return reply.code(400).send({ error: "Project not found" });
       }
-      if (input.mode === "auto") {
-        await db
-          .insert(conversationProjects)
-          .values({
-            conversationId: conversation.id,
-            projectId: input.projectId,
-            confidence: null,
-            lockedByUser: false,
-            updatedAt: new Date(),
-          })
-          .onConflictDoUpdate({
-            target: conversationProjects.conversationId,
-            set: {
-              projectId: input.projectId,
-              lockedByUser: false,
-              updatedAt: new Date(),
-            },
-          });
-        await enqueueConversationClassification(conversation.id).catch((error) =>
-          request.log.warn(
-            { error: safeStoredError(error) },
-            "Failed to queue AI classification",
-          ),
-        );
-        return { ok: true, lockedByUser: false };
-      }
+      const lockedByUser = input.mode === "lock";
       await db
         .insert(conversationProjects)
         .values({
           conversationId: conversation.id,
           projectId: input.projectId,
-          confidence: 1,
-          lockedByUser: true,
+          confidence: lockedByUser ? 1 : null,
+          lockedByUser,
           updatedAt: new Date(),
         })
         .onConflictDoUpdate({
           target: conversationProjects.conversationId,
           set: {
             projectId: input.projectId,
-            confidence: 1,
-            lockedByUser: true,
+            confidence: lockedByUser ? 1 : null,
+            lockedByUser,
             updatedAt: new Date(),
           },
         });
-      return { ok: true };
+      if (!lockedByUser) {
+        await enqueueConversationClassification(conversation.id).catch((error) =>
+          request.log.warn(
+            { error: safeStoredError(error) },
+            "Failed to queue AI organization",
+          ),
+        );
+      }
+      return { ok: true, lockedByUser };
     },
   );
 
   app.post("/api/v1/classification/run", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
-    const input = z
-      .object({
-        mode: z.enum(["economy", "full"]).optional(),
-        scope: z.enum(["incremental", "all"]).optional(),
-      })
-      .parse(request.body ?? {});
+    const input = z.object({
+      mode: z.enum(["economy", "full"]).optional(),
+      scope: z.enum(["incremental", "all"]).optional(),
+    }).parse(request.body ?? {});
     const savedMode = await getSetting("classification.runMode");
     const mode = input.mode ?? (savedMode === "full" ? "full" : "economy");
     const scope = input.scope ?? (mode === "full" ? "all" : "incremental");
@@ -376,17 +445,17 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     }
     const task = await createBackgroundTask(
       "classification_rebuild",
-      `已加入队列，等待 Worker 以${mode === "full" ? "完整" : "节能"}模式${scope === "incremental" ? "增量处理候选会话" : "重评未锁定会话"}`,
+      `已加入队列，等待 Worker ${scope === "incremental" ? "增量" : "完整"}整理项目与标签`,
     );
     const jobId = await enqueueUnlockedReclassification({ taskId: task.id, mode, scope });
     if (!jobId) {
       await updateBackgroundTask(task.id, {
         status: "failed",
-        error: "智能归类任务没有成功进入队列",
+        error: "项目与标签整理任务没有成功进入队列",
         message: "任务入队失败",
         completedAt: new Date(),
       });
-      return reply.code(409).send({ error: "Failed to queue classification task" });
+      return reply.code(409).send({ error: "Failed to queue organization task" });
     }
     return reply.code(202).send({ jobId, task });
   });
@@ -394,9 +463,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/v1/classification/tasks/latest", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
     await failStaleBackgroundTasks("classification_rebuild");
-    return {
-      task: await getLatestBackgroundTask("classification_rebuild"),
-    };
+    return { task: await getLatestBackgroundTask("classification_rebuild") };
   });
 
   app.get<{ Params: { id: string } }>(
@@ -405,81 +472,6 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       if (!(await requireWebUser(request, reply))) return;
       const params = z.object({ id: z.string().uuid() }).parse(request.params);
       await failStaleBackgroundTasks("classification_rebuild");
-      const task = await getBackgroundTask(params.id);
-      if (!task) return reply.code(404).send({ error: "Task not found" });
-      return task;
-    },
-  );
-
-  app.get("/api/v1/knowledge", async (request, reply) => {
-    if (!(await requireWebUser(request, reply))) return;
-    const query = z
-      .object({
-        projectId: z.string().uuid().optional(),
-        status: z.string().optional(),
-      })
-      .parse(request.query);
-    const rows = await db
-      .select({
-        id: knowledgeItems.id,
-        projectId: knowledgeItems.projectId,
-        projectName: projects.name,
-        type: knowledgeItems.type,
-        title: knowledgeItems.title,
-        body: knowledgeItems.body,
-        status: knowledgeItems.status,
-        confidence: knowledgeItems.confidence,
-        sourceReferences: knowledgeItems.sourceReferences,
-        updatedAt: knowledgeItems.updatedAt,
-      })
-      .from(knowledgeItems)
-      .innerJoin(projects, eq(projects.id, knowledgeItems.projectId))
-      .orderBy(desc(knowledgeItems.updatedAt));
-    return rows.filter(
-      (row) =>
-        (!query.projectId || row.projectId === query.projectId) &&
-      (!query.status || row.status === query.status),
-    );
-  });
-
-  app.post("/api/v1/knowledge/rebuild", async (request, reply) => {
-    if (!(await requireWebUser(request, reply))) return;
-    await failStaleBackgroundTasks("knowledge_rebuild");
-    const activeTask = await getLatestBackgroundTask("knowledge_rebuild", ["queued", "running"]);
-    if (activeTask) {
-      return reply.code(202).send({ jobId: null, task: activeTask, reused: true });
-    }
-    const task = await createBackgroundTask(
-      "knowledge_rebuild",
-      "正在加入队列，等待 Worker 重建项目知识",
-    );
-    const jobId = await enqueueKnowledgeRebuild({ taskId: task.id });
-    if (!jobId) {
-      await updateBackgroundTask(task.id, {
-        status: "failed",
-        error: "项目知识重建任务没有成功进入队列",
-        message: "任务入队失败",
-        completedAt: new Date(),
-      });
-      return reply.code(409).send({ error: "Failed to queue knowledge rebuild task" });
-    }
-    return reply.code(202).send({ jobId, task });
-  });
-
-  app.get("/api/v1/knowledge/rebuild/latest", async (request, reply) => {
-    if (!(await requireWebUser(request, reply))) return;
-    await failStaleBackgroundTasks("knowledge_rebuild");
-    return {
-      task: await getLatestBackgroundTask("knowledge_rebuild"),
-    };
-  });
-
-  app.get<{ Params: { id: string } }>(
-    "/api/v1/knowledge/rebuild/:id",
-    async (request, reply) => {
-      if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
-      await failStaleBackgroundTasks("knowledge_rebuild");
       const task = await getBackgroundTask(params.id);
       if (!task) return reply.code(404).send({ error: "Task not found" });
       return task;
@@ -498,10 +490,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         confidence: conversationProjects.confidence,
       })
       .from(conversations)
-      .leftJoin(
-        conversationProjects,
-        eq(conversationProjects.conversationId, conversations.id),
-      )
+      .leftJoin(conversationProjects, eq(conversationProjects.conversationId, conversations.id))
       .where(
         and(
           isNull(conversationProjects.projectId),

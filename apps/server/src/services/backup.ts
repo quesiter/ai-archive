@@ -15,10 +15,10 @@ import {
   captureRuns,
   conversationProjects,
   conversationRevisions,
+  conversationTags,
   conversations,
   devices,
   importJobs,
-  knowledgeItems,
   messageSegments,
   messages,
   operationLogs,
@@ -26,6 +26,7 @@ import {
   redactionRules,
   reports,
   settings,
+  tags,
 } from "../schema.js";
 import { APP_VERSION } from "../version.js";
 import {
@@ -63,7 +64,8 @@ const tableSpecs = [
   { key: "captureRuns", table: captureRuns, dateFields: ["capturedAt", "createdAt"] },
   { key: "projects", table: projects, dateFields: ["updatedAt", "createdAt"] },
   { key: "conversationProjects", table: conversationProjects, dateFields: ["updatedAt"] },
-  { key: "knowledgeItems", table: knowledgeItems, dateFields: ["updatedAt", "createdAt"] },
+  { key: "tags", table: tags, dateFields: ["updatedAt", "createdAt"] },
+  { key: "conversationTags", table: conversationTags, dateFields: ["updatedAt", "createdAt"] },
   { key: "analysisRuns", table: analysisRuns, dateFields: ["windowStart", "windowEnd", "completedAt", "updatedAt", "createdAt"] },
   { key: "backgroundTasks", table: backgroundTasks, dateFields: ["completedAt", "updatedAt", "createdAt"] },
   { key: "reports", table: reports, dateFields: ["periodStart", "periodEnd", "createdAt"] },
@@ -86,8 +88,9 @@ const BackupEnvelopeSchema = z.object({
   tables: z.record(z.array(z.record(z.unknown())).max(MAX_BACKUP_ROWS_PER_TABLE)),
 }).superRefine((value, context) => {
   const allowedTables = new Set(tableSpecs.map((spec) => spec.key));
+  const legacyIgnoredTables = new Set(["knowledgeItems", "knowledge_items"]);
   for (const key of Object.keys(value.tables)) {
-    if (!allowedTables.has(key)) {
+    if (!allowedTables.has(key) && !legacyIgnoredTables.has(key)) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["tables", key],
@@ -243,7 +246,7 @@ export function sanitizeRestoredBackupTables(tables: BackupTables): BackupTables
     captureRuns: ["error"],
     projects: ["name", "description"],
     conversationProjects: ["suggestedName"],
-    knowledgeItems: ["title", "body"],
+    tags: ["name", "normalizedName"],
     analysisRuns: ["error"],
     backgroundTasks: ["message", "error"],
     reports: ["title", "summary", "bodyMarkdown"],
@@ -346,13 +349,44 @@ export async function parseBackupArchive(
   return BackupEnvelopeSchema.parse(parsed);
 }
 
+export function prepareRestoredBackupTables(input: BackupTables): {
+  tables: BackupTables;
+  warnings: string[];
+} {
+  const tables: BackupTables = { ...input };
+  const warnings: string[] = [];
+  const legacyDerivedRowCount =
+    (tables.knowledgeItems?.length ?? 0) +
+    (tables.knowledge_items?.length ?? 0);
+  if (legacyDerivedRowCount > 0) {
+    warnings.push(
+      `旧版备份包含 ${legacyDerivedRowCount} 条项目知识数据，V2.1 已取消项目知识模块，该部分数据未导入。`,
+    );
+  }
+  delete tables.knowledgeItems;
+  delete tables.knowledge_items;
+  const obsoleteBackgroundTaskCount = (tables.backgroundTasks ?? []).filter(
+    (row) => row.kind === "knowledge_rebuild",
+  ).length;
+  if (obsoleteBackgroundTaskCount > 0) {
+    tables.backgroundTasks = (tables.backgroundTasks ?? []).filter(
+      (row) => row.kind !== "knowledge_rebuild",
+    );
+    warnings.push(
+      `已忽略 ${obsoleteBackgroundTaskCount} 个旧版项目知识后台任务。`,
+    );
+  }
+  return { tables, warnings };
+}
+
 export async function restoreBackupArchive(
   filename: string,
   buffer: Buffer,
 ): Promise<BackupImportResult> {
   const backup = await parseBackupArchive(filename, buffer);
-  const warnings: string[] = [];
-  let tables: BackupTables = { ...backup.tables };
+  const prepared = prepareRestoredBackupTables(backup.tables);
+  let tables = prepared.tables;
+  const warnings = prepared.warnings;
   const requiredTables = ["conversations", "conversationRevisions", "messages", "messageSegments"];
   const missingRequiredTables = requiredTables.filter(
     (key) => !Object.prototype.hasOwnProperty.call(tables, key),
