@@ -25,7 +25,7 @@ import {
 import { api, ApiError, jsonBody } from "./api.js";
 
 type UnknownRecord = Record<string, any>;
-const WEB_VERSION = "V260822-4";
+const WEB_VERSION = "V260822-5";
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -2396,7 +2396,177 @@ function Devices() {
   </>;
 }
 
+const settingsSections = [
+  { id: "ai", label: "模型与额度", hint: "MiniMax、模型连接与 Token Plan", icon: "✦" },
+  { id: "classification", label: "智能归类", hint: "自动归类与结果复用", icon: "◇" },
+  { id: "email", label: "邮件与报告", hint: "SMTP、周报与月报", icon: "✉" },
+  { id: "backup", label: "备份与恢复", hint: "业务数据导入与导出", icon: "▤" },
+  { id: "redaction", label: "脱敏与安全", hint: "安全规则与历史清理", icon: "⌁" },
+  { id: "system", label: "系统状态", hint: "主机资源与 PostgreSQL", icon: "⌁" },
+] as const;
+
+type SettingsSection = (typeof settingsSections)[number]["id"];
+
+function formatBytes(value: unknown): string {
+  const bytes = Math.max(0, Number(value ?? 0));
+  if (bytes < 1024) return `${bytes.toFixed(0)} B`;
+  const units = ["KB", "MB", "GB", "TB", "PB"];
+  let amount = bytes;
+  let unit = -1;
+  do {
+    amount /= 1024;
+    unit += 1;
+  } while (amount >= 1024 && unit < units.length - 1);
+  return `${amount >= 100 ? amount.toFixed(0) : amount.toFixed(1)} ${units[unit]}`;
+}
+
+function formatDuration(value: unknown): string {
+  let seconds = Math.max(0, Math.floor(Number(value ?? 0)));
+  const days = Math.floor(seconds / 86_400);
+  seconds %= 86_400;
+  const hours = Math.floor(seconds / 3_600);
+  seconds %= 3_600;
+  const minutes = Math.floor(seconds / 60);
+  return [days ? `${days}天` : "", hours ? `${hours}小时` : "", `${minutes}分钟`]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function ResourceGauge({
+  label,
+  percent,
+  detail,
+}: {
+  label: string;
+  percent: number;
+  detail: string;
+}) {
+  const normalized = Math.min(100, Math.max(0, Number(percent || 0)));
+  const tone = normalized >= 95 ? "critical" : normalized >= 85 ? "warning" : "normal";
+  return (
+    <article className={`resource-gauge ${tone}`}>
+      <div><strong>{label}</strong><b>{normalized.toFixed(1)}%</b></div>
+      <div className="resource-gauge-track"><span style={{ width: `${normalized}%` }} /></div>
+      <small>{detail}</small>
+    </article>
+  );
+}
+
+function SystemStatus() {
+  const state = useLoad(() => api<UnknownRecord>("/api/v1/system/status"), []);
+  useEffect(() => {
+    const timer = window.setInterval(() => state.reload(), 10_000);
+    return () => window.clearInterval(timer);
+  }, [state.reload]);
+
+  if (state.loading && !state.data) return <Loading label="正在读取主机运行状态…" />;
+  const data = state.data;
+  const host = data?.host;
+  const database = data?.database;
+  const history = Array.isArray(host?.history) ? host.history : [];
+  const services = data?.services ?? {};
+
+  return (
+    <>
+      <ErrorBanner message={state.error} />
+      <section className="panel system-service-panel">
+        <div className="section-title-row">
+          <div>
+            <h2>运行环境</h2>
+            <p className="panel-subtitle">每 10 秒自动刷新；监测容器仅使用只读主机指标挂载。</p>
+          </div>
+          <button className="secondary small" type="button" onClick={() => state.reload()}>
+            {state.loading ? "刷新中" : "立即刷新"}
+          </button>
+        </div>
+        <div className="service-status-grid">
+          {[
+            ["应用服务", services.app?.online, services.app?.version || "API"],
+            ["主机监测", services.hostMonitor?.online, services.hostMonitor?.online ? "Docker 内部服务" : "连接异常"],
+            ["PostgreSQL", services.postgres?.online, services.postgres?.online ? "数据库可用" : "连接异常"],
+          ].map(([label, online, detail]) => (
+            <div className="service-status" key={String(label)}>
+              <span className={online ? "online" : "offline"} />
+              <div><strong>{String(label)}</strong><small>{String(detail)}</small></div>
+              <b>{online ? "正常" : "异常"}</b>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {!host?.available ? (
+        <div className="alert warning">{host?.error || "暂时无法读取主机指标，请检查 host-monitor 容器。"}</div>
+      ) : (
+        <>
+          {Array.isArray(host.alerts) && host.alerts.length > 0 && (
+            <section className="panel system-alert-panel">
+              <h2>资源告警</h2>
+              {host.alerts.map((alert: UnknownRecord) => (
+                <div className={`system-alert ${alert.level}`} key={`${alert.metric}-${alert.message}`}>
+                  <strong>{alert.level === "critical" ? "CRITICAL" : "WARNING"} · {alert.metric}</strong>
+                  <span>{alert.message}</span>
+                  <small>采样于 {new Date(host.collectedAt).toLocaleString()}</small>
+                </div>
+              ))}
+            </section>
+          )}
+          <section className="panel host-resource-panel">
+            <div className="section-title-row">
+              <div>
+                <h2>主机资源</h2>
+                <p className="panel-subtitle">
+                  已运行 {formatDuration(host.uptimeSeconds)} · Load {host.load.map((value: number) => Number(value).toFixed(2)).join(" / ")}
+                </p>
+              </div>
+              <span className="status-sampled-at">采样 {new Date(host.collectedAt).toLocaleTimeString()}</span>
+            </div>
+            <div className="resource-gauge-grid">
+              <ResourceGauge label="CPU" percent={host.cpuPercent} detail={`当前负载 ${Number(host.load[0]).toFixed(2)}`} />
+              <ResourceGauge label="内存" percent={host.memory.percent} detail={`${formatBytes(host.memory.usedBytes)} / ${formatBytes(host.memory.totalBytes)}`} />
+              <ResourceGauge label="Swap" percent={host.swap.percent} detail={host.swap.totalBytes ? `${formatBytes(host.swap.usedBytes)} / ${formatBytes(host.swap.totalBytes)}` : "主机未配置 Swap"} />
+              <ResourceGauge label="磁盘" percent={host.storage.percent} detail={`${formatBytes(host.storage.usedBytes)} / ${formatBytes(host.storage.totalBytes)}`} />
+              <ResourceGauge label="inode" percent={host.storage.inodePercent} detail={host.storage.inodesTotal ? `${Number(host.storage.inodesUsed).toLocaleString()} / ${Number(host.storage.inodesTotal).toLocaleString()}` : "文件系统未提供 inode 统计"} />
+            </div>
+            <div className="system-trend">
+              <div className="system-trend-title"><strong>最近趋势</strong><span>CPU / 内存 · 最近 {history.length} 个采样点</span></div>
+              <div className="system-trend-chart" aria-label="CPU 与内存最近趋势">
+                {history.map((sample: UnknownRecord) => (
+                  <div className="system-trend-sample" key={String(sample.collectedAt)} title={`${new Date(sample.collectedAt).toLocaleTimeString()} · CPU ${Number(sample.cpuPercent).toFixed(1)}% · 内存 ${Number(sample.memoryPercent).toFixed(1)}%`}>
+                    <span className="cpu" style={{ height: `${Math.max(2, Number(sample.cpuPercent))}%` }} />
+                    <span className="memory" style={{ height: `${Math.max(2, Number(sample.memoryPercent))}%` }} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+        </>
+      )}
+
+      {database && (
+        <section className="panel database-status-panel">
+          <div className="section-title-row">
+            <div><h2>PostgreSQL</h2><p className="panel-subtitle">数据库大小 {formatBytes(database.sizeBytes)} · 已运行 {formatDuration(database.uptimeSeconds)}</p></div>
+            <span className="pill complete">运行正常</span>
+          </div>
+          <div className="database-metric-grid">
+            <div><span>连接数</span><strong>{database.connections} / {database.maxConnections}</strong></div>
+            <div><span>活跃连接</span><strong>{database.activeConnections}</strong></div>
+            <div><span>最长查询</span><strong>{Number(database.longestQuerySeconds).toFixed(1)} 秒</strong></div>
+            <div><span>最近 Web 备份</span><strong>{database.lastBackupAt ? new Date(database.lastBackupAt).toLocaleString() : "暂无记录"}</strong></div>
+            <div><span>最近备份失败</span><strong>{database.lastBackupFailureAt ? new Date(database.lastBackupFailureAt).toLocaleString() : "暂无"}</strong></div>
+          </div>
+        </section>
+      )}
+    </>
+  );
+}
+
 function Settings() {
+  const [searchParams] = useSearchParams();
+  const requestedSection = searchParams.get("section") as SettingsSection | null;
+  const activeSection: SettingsSection = settingsSections.some((item) => item.id === requestedSection)
+    ? requestedSection!
+    : "ai";
   const state = useLoad(() => api<UnknownRecord>("/api/v1/settings"), []);
   const cleanupState = useLoad(
     () => api<UnknownRecord>("/api/v1/redaction/storage-cleanup"),
@@ -2598,180 +2768,101 @@ function Settings() {
     }
   }
 
-  if (state.loading) return <Loading />;
+  if (state.loading && activeSection !== "system") return <Loading />;
   if (state.error) return <ErrorBanner message={state.error} />;
-  const settings = state.data!.settings;
+  const settings = state.data?.settings ?? {};
+  const activeMeta = settingsSections.find((item) => item.id === activeSection)!;
+  const configurable = activeSection === "ai" || activeSection === "classification" || activeSection === "email";
 
   return (
     <>
-      <PageHeader title="设置" subtitle="模型密钥与 SMTP 密码加密存储" />
-      <form ref={formRef} className="settings-form" onSubmit={save}>
-        <section className="panel">
-          <div className="section-title-row">
-            <h2>OpenAI 兼容分析接口</h2>
-            <button
-              type="button"
-              className="secondary small"
-              disabled={testingLlm}
-              onClick={() => void testLlm()}
-            >
-              {testingLlm ? "测试中" : "测试连接"}
-            </button>
-          </div>
-          <label>
-            Base URL
-            <input
-              name="llm.baseUrl"
-              defaultValue={settings["llm.baseUrl"] || ""}
-              placeholder="https://api.example.com/v1"
-            />
-          </label>
-          <label>
-            API Key
-            <input
-              type="password"
-              name="llm.apiKey"
-              defaultValue={settings["llm.apiKey"] || ""}
-            />
-          </label>
-          <label>
-            模型
-            <input
-              name="llm.model"
-              defaultValue={settings["llm.model"] || ""}
-              placeholder="model-name"
-            />
-          </label>
-          {llmTestMessage && (
-            <div
-              className={`alert ${
-                llmTestMessage.startsWith("连接正常") ? "success" : "error"
-              }`}
-            >
-              {llmTestMessage}
-            </div>
+      <PageHeader title="设置" subtitle="按功能分区管理系统配置、数据安全与运行环境" />
+      <div className="settings-layout">
+        <aside className="panel settings-subnav">
+          <span className="settings-subnav-label">设置项目</span>
+          <nav>
+            {settingsSections.map((item) => (
+              <Link
+                key={item.id}
+                className={item.id === activeSection ? "active" : ""}
+                to={`/settings?section=${item.id}`}
+              >
+                <span className="settings-subnav-icon">{item.icon}</span>
+                <div><strong>{item.label}</strong><small>{item.hint}</small></div>
+              </Link>
+            ))}
+          </nav>
+        </aside>
+        <div className="settings-workspace">
+          <header className="settings-section-header">
+            <div><span>{activeMeta.icon}</span><div><h2>{activeMeta.label}</h2><p>{activeMeta.hint}</p></div></div>
+          </header>
+
+          {configurable && (
+            <form ref={formRef} className="settings-form" onSubmit={save}>
+              {activeSection === "ai" && (
+                <>
+                  <section className="panel">
+                    <div className="section-title-row">
+                      <div><h2>OpenAI 兼容分析接口</h2><p className="panel-subtitle">API Key 使用主密钥加密保存，页面不会返回明文。</p></div>
+                      <button type="button" className="secondary small" disabled={testingLlm} onClick={() => void testLlm()}>
+                        {testingLlm ? "测试中" : "测试连接"}
+                      </button>
+                    </div>
+                    <div className="form-grid">
+                      <label>Base URL<input name="llm.baseUrl" defaultValue={settings["llm.baseUrl"] || ""} placeholder="https://api.example.com/v1" /></label>
+                      <label>API Key<input type="password" name="llm.apiKey" defaultValue={settings["llm.apiKey"] || ""} /></label>
+                      <label>模型<input name="llm.model" defaultValue={settings["llm.model"] || ""} placeholder="model-name" /></label>
+                    </div>
+                    {llmTestMessage && <div className={`alert ${llmTestMessage.startsWith("连接正常") ? "success" : "error"}`}>{llmTestMessage}</div>}
+                  </section>
+                  <section className="panel">
+                    <h2>Token Plan 共享调度</h2>
+                    <p className="panel-subtitle">默认按实测吞吐将请求匀速分布在约 5.5 小时内，为共用套餐的其他程序保留空间。</p>
+                    <div className="form-grid">
+                      <label>AI 调用节流<select name="ai.pacingEnabled" defaultValue={settings["ai.pacingEnabled"] || "true"}><option value="true">启用</option><option value="false">停用</option></select></label>
+                      <label>调用起始最小间隔（秒）<input type="number" min={0} max={3600} step={1} name="ai.requestIntervalSeconds" defaultValue={settings["ai.requestIntervalSeconds"] || "82"} /></label>
+                      <label>每日夜间维护<select name="ai.nightlyMaintenanceEnabled" defaultValue={settings["ai.nightlyMaintenanceEnabled"] || "true"}><option value="true">每天 22:00 启用</option><option value="false">停用</option></select></label>
+                    </div>
+                    <p className="muted">夜间维护按照“增量智能归类 → 项目知识分析”串行执行；遇到额度上限时会显示恢复时间并自动续跑。</p>
+                  </section>
+                </>
+              )}
+
+              {activeSection === "classification" && (
+                <section className="panel">
+                  <h2>智能归类策略</h2>
+                  <div className="form-grid">
+                    <label>新采集后自动归类<select name="classification.autoOnCapture" defaultValue={settings["classification.autoOnCapture"] || "false"}><option value="false">停用</option><option value="true">启用</option></select></label>
+                    <label>项目/周报后自动重评<select name="classification.autoReclassify" defaultValue={settings["classification.autoReclassify"] || "false"}><option value="false">停用</option><option value="true">启用</option></select></label>
+                    <label>默认运行方式<select name="classification.runMode" defaultValue={settings["classification.runMode"] || "economy"}><option value="economy">节能归类</option><option value="full">完整重评</option></select></label>
+                    <label>稳定结果复用<select name="classification.reuseStable" defaultValue={settings["classification.reuseStable"] || "true"}><option value="true">启用</option><option value="false">停用</option></select></label>
+                    <label>单会话正文上限<input type="number" min={2000} max={40000} step={1000} name="classification.maxConversationChars" defaultValue={settings["classification.maxConversationChars"] || "8000"} /></label>
+                  </div>
+                </section>
+              )}
+
+              {activeSection === "email" && (
+                <section className="panel">
+                  <h2>报告邮件</h2>
+                  <div className="form-grid">
+                    <label>SMTP 主机<input name="smtp.host" defaultValue={settings["smtp.host"] || ""} /></label>
+                    <label>端口<input name="smtp.port" defaultValue={settings["smtp.port"] || "587"} /></label>
+                    <label>安全连接<select name="smtp.secure" defaultValue={settings["smtp.secure"] || "false"}><option value="false">STARTTLS/普通</option><option value="true">TLS</option></select></label>
+                    <label>用户名<input name="smtp.username" defaultValue={settings["smtp.username"] || ""} /></label>
+                    <label>密码<input type="password" name="smtp.password" defaultValue={settings["smtp.password"] || ""} /></label>
+                    <label>发件人<input name="smtp.from" defaultValue={settings["smtp.from"] || ""} /></label>
+                    <label>收件人<input name="smtp.to" defaultValue={settings["smtp.to"] || ""} /></label>
+                    <label>周报<select name="reports.weeklyEnabled" defaultValue={settings["reports.weeklyEnabled"] || "true"}><option value="true">启用</option><option value="false">停用</option></select></label>
+                    <label>月报<select name="reports.monthlyEnabled" defaultValue={settings["reports.monthlyEnabled"] || "true"}><option value="true">启用</option><option value="false">停用</option></select></label>
+                  </div>
+                </section>
+              )}
+              <div className="settings-save-row"><button>保存设置</button><span>{message}</span></div>
+            </form>
           )}
-        </section>
 
-        <section className="panel">
-          <h2>智能归类</h2>
-          <div className="form-grid">
-            <label>
-              新采集后自动归类
-              <select
-                name="classification.autoOnCapture"
-                defaultValue={settings["classification.autoOnCapture"] || "false"}
-              >
-                <option value="false">停用</option>
-                <option value="true">启用</option>
-              </select>
-            </label>
-            <label>
-              项目/周报后自动重评
-              <select
-                name="classification.autoReclassify"
-                defaultValue={settings["classification.autoReclassify"] || "false"}
-              >
-                <option value="false">停用</option>
-                <option value="true">启用</option>
-              </select>
-            </label>
-            <label>
-              默认运行方式
-              <select
-                name="classification.runMode"
-                defaultValue={settings["classification.runMode"] || "economy"}
-              >
-                <option value="economy">节能归类</option>
-                <option value="full">完整重评</option>
-              </select>
-            </label>
-            <label>
-              稳定结果复用
-              <select
-                name="classification.reuseStable"
-                defaultValue={settings["classification.reuseStable"] || "true"}
-              >
-                <option value="true">启用</option>
-                <option value="false">停用</option>
-              </select>
-            </label>
-            <label>
-              单会话正文上限
-              <input
-                type="number"
-                min={2000}
-                max={40000}
-                step={1000}
-                name="classification.maxConversationChars"
-                defaultValue={settings["classification.maxConversationChars"] || "8000"}
-              />
-            </label>
-          </div>
-        </section>
-
-        <section className="panel">
-          <h2>Token Plan 共享调度</h2>
-          <p className="panel-subtitle">
-            根据最近 244 次调用耗尽五小时额度的实测结果，默认将 AI 调用起始间隔设为 82 秒，约用 5.5 小时完成同等调用量，为其他程序保留使用空间。
-          </p>
-          <div className="form-grid">
-            <label>
-              AI 调用节流
-              <select
-                name="ai.pacingEnabled"
-                defaultValue={settings["ai.pacingEnabled"] || "true"}
-              >
-                <option value="true">启用</option>
-                <option value="false">停用</option>
-              </select>
-            </label>
-            <label>
-              调用起始最小间隔（秒）
-              <input
-                type="number"
-                min={0}
-                max={3600}
-                step={1}
-                name="ai.requestIntervalSeconds"
-                defaultValue={settings["ai.requestIntervalSeconds"] || "82"}
-              />
-            </label>
-            <label>
-              每日夜间维护
-              <select
-                name="ai.nightlyMaintenanceEnabled"
-                defaultValue={settings["ai.nightlyMaintenanceEnabled"] || "true"}
-              >
-                <option value="true">每天 22:00 启用</option>
-                <option value="false">停用</option>
-              </select>
-            </label>
-          </div>
-          <p className="muted">
-            夜间维护按照“增量智能归类 → 项目知识分析”串行执行；遇到额度上限时会显示恢复时间并自动续跑。
-          </p>
-        </section>
-
-        <section className="panel">
-          <h2>报告邮件</h2>
-          <div className="form-grid">
-            <label>SMTP 主机<input name="smtp.host" defaultValue={settings["smtp.host"] || ""} /></label>
-            <label>端口<input name="smtp.port" defaultValue={settings["smtp.port"] || "587"} /></label>
-            <label>安全连接<select name="smtp.secure" defaultValue={settings["smtp.secure"] || "false"}><option value="false">STARTTLS/普通</option><option value="true">TLS</option></select></label>
-            <label>用户名<input name="smtp.username" defaultValue={settings["smtp.username"] || ""} /></label>
-            <label>密码<input type="password" name="smtp.password" defaultValue={settings["smtp.password"] || ""} /></label>
-            <label>发件人<input name="smtp.from" defaultValue={settings["smtp.from"] || ""} /></label>
-            <label>收件人<input name="smtp.to" defaultValue={settings["smtp.to"] || ""} /></label>
-            <label>周报<select name="reports.weeklyEnabled" defaultValue={settings["reports.weeklyEnabled"] || "true"}><option value="true">启用</option><option value="false">停用</option></select></label>
-            <label>月报<select name="reports.monthlyEnabled" defaultValue={settings["reports.monthlyEnabled"] || "true"}><option value="true">启用</option><option value="false">停用</option></select></label>
-          </div>
-        </section>
-
-        <button>保存设置</button>
-        <span>{message}</span>
-      </form>
-      <section className="panel">
+          {activeSection === "backup" && <section className="panel">
         <div className="section-title-row">
           <div>
             <h2>备份与恢复</h2>
@@ -2799,8 +2890,9 @@ function Settings() {
         <p className="muted">
           备份不包含后台管理员密码、登录会话和一次性配对码。若重建时更换了 APP_MASTER_KEY，加密的 API Key/SMTP 密码会被跳过，导入后需要重新填写。
         </p>
-      </section>
-      <section className="panel">
+          </section>}
+
+          {activeSection === "redaction" && <section className="panel">
         <div className="section-title-row">
           <div>
             <h2>自定义脱敏规则</h2>
@@ -2852,7 +2944,7 @@ function Settings() {
           <input name="replacement" defaultValue="[CUSTOM_REDACTED]" required />
           <button>添加</button>
         </form>
-        {state.data!.redactionRules.map((rule: UnknownRecord) => (
+        {(state.data?.redactionRules ?? []).map((rule: UnknownRecord) => (
           <div className="list-row redaction-rule-row" key={rule.id}>
             <div>
               <strong>{rule.name || "自定义规则"}</strong>
@@ -2905,7 +2997,11 @@ function Settings() {
             <small>共匹配并替换 {Number(redactionPreview.replacements ?? 0)} 处。</small>
           )}
         </form>
-      </section>
+          </section>}
+
+          {activeSection === "system" && <SystemStatus />}
+        </div>
+      </div>
     </>
   );
 }

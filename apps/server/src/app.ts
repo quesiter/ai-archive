@@ -22,6 +22,7 @@ import { logRoutes } from "./routes/logs.js";
 import { projectRoutes } from "./routes/projects.js";
 import { reportRoutes } from "./routes/reports.js";
 import { settingsRoutes } from "./routes/settings.js";
+import { systemStatusRoutes } from "./routes/system-status.js";
 import { APP_VERSION } from "./version.js";
 
 const JSON_BODY_LIMIT = 50 * 1024 * 1024;
@@ -165,6 +166,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await activityRoutes(app);
   await logRoutes(app);
   await settingsRoutes(app);
+  await systemStatusRoutes(app);
   await importRoutes(app);
   await backupRoutes(app);
   await reportRoutes(app);

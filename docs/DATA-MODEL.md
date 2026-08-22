@@ -497,6 +497,8 @@ Web 后台登录会话表。
 
 ## 9. 数据生命周期
 
+主机 CPU、内存、Swap、磁盘、inode 和趋势由 `host-monitor` 在内存中采样，不新增数据库表，也不进入业务备份。PostgreSQL 状态由请求时查询系统视图得到；最近 Web 备份时间来自已有 `operation_logs`。
+
 1. 采集或导入产生会话和修订。
 2. 最新完整修订进入分析窗口。
 3. 智能归类写入 `conversation_projects`。

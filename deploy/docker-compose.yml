@@ -1,6 +1,39 @@
 name: ai-conversation-archive
 
 services:
+  host-monitor:
+    image: ${ARCHIVE_IMAGE:-ai-conversation-archive:latest}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["node", "dist/host-monitor.js"]
+    environment:
+      HOST_MONITOR_PORT: 9091
+      HOST_PROC_ROOT: /host/proc
+      HOST_STORAGE_ROOT: /host/storage
+      HOST_SAMPLE_INTERVAL_MS: ${HOST_SAMPLE_INTERVAL_MS:-10000}
+      HOST_HISTORY_LIMIT: ${HOST_HISTORY_LIMIT:-27}
+      TZ: Asia/Shanghai
+    volumes:
+      - /proc:/host/proc:ro
+      - ${ARCHIVE_DATA_DIR:-./data}:/host/storage:ro
+    expose:
+      - "9091"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9091/healthz').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    mem_limit: 96m
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
@@ -53,6 +86,7 @@ services:
       IMPORT_PROCESSED: /data/imports/processed
       IMPORT_FAILED: /data/imports/failed
       COMPONENT_RELEASE_DIR: /app/release
+      HOST_MONITOR_URL: http://host-monitor:9091
       TZ: Asia/Shanghai
       LOG_LEVEL: ${LOG_LEVEL:-info}
       WEB_DIST: /app/apps/web/dist

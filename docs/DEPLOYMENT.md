@@ -1,6 +1,6 @@
 # 知言归藏部署文档
 
-本文面向群晖 NAS、Chrome 插件、Windows/macOS 本地同步代理和数据备份恢复。当前服务端、Web、Chrome 插件和同步代理版本均为 `V260822-4`。
+本文面向群晖 NAS、Chrome 插件、Windows/macOS 本地同步代理和数据备份恢复。当前服务端与 Web 为 `V260822-5`，Chrome 插件和同步代理为 `V260822-4`。
 
 ## 1. 群晖 NAS 全新安装
 
@@ -9,7 +9,7 @@
 1. 上传源码包到 NAS：
 
 ```sh
-/volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz
+/volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-5-clean-install.tar.gz
 ```
 
 2. 创建源码目录和数据目录：
@@ -23,7 +23,7 @@ mkdir -p /volume1/docker/ai-conversation-archive/data/imports/failed
 chown -R 1000:1000 /volume1/docker/ai-conversation-archive/data/imports
 chmod -R u+rwX,go-rwx /volume1/docker/ai-conversation-archive/data/imports
 cd /volume1/docker/ai-conversation-archive/source
-tar -xzf /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz
+tar -xzf /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-5-clean-install.tar.gz
 ```
 
 3. 生成配置文件、数据库密码和主密钥：
@@ -44,6 +44,7 @@ sed -i "s|^APP_MASTER_KEY=.*|APP_MASTER_KEY=$APP_MASTER_KEY|" deploy/.env
 - `EXTENSION_ORIGINS` 默认只允许官方固定 ID `chrome-extension://daolmhnfgimkgnnadojnmhkkjdolplfi`。自行重签 Chrome 扩展时，必须改为新扩展 ID；多个来源用英文逗号分隔。
 - `ALLOW_PRIVATE_NETWORK_TARGETS` 默认 `false`，此时 LLM 和 SMTP 会阻止回环、内网、链路本地、云元数据和保留地址，并将连接固定到已验证 DNS 结果。只有明确使用可信内网模型或 SMTP 时才设为 `true`。
 - app 和 worker 镜像以非 root 用户运行。NAS 上已有的 `data/imports` 目录必须允许容器中的 Node 用户（UID 1000）读写；如出现 `EACCES`，请在宿主机调整该目录权限后再启动。
+- `host-monitor` 以非 root、只读根文件系统运行，仅只读挂载宿主 `/proc` 与 `ARCHIVE_DATA_DIR`，不挂载 Docker Socket，也不发布宿主端口。不要为它额外增加特权或端口映射。
 
 4. 构建并启动：
 
@@ -55,7 +56,7 @@ docker compose --env-file .env ps
 curl -fsS http://127.0.0.1:18080/healthz
 ```
 
-健康响应中的 `version` 应为 `V260822-4`；app 与 postgres 应为 healthy，worker 应保持运行。
+健康响应中的 `version` 应为 `V260822-5`；app、host-monitor 与 postgres 应为 healthy，worker 应保持运行。
 
 5. 首次访问 Web 后台，创建管理员账号。系统会显示 TOTP Secret/URI，请立即加入验证器，之后用密码和六位验证码登录。
 
@@ -82,16 +83,16 @@ curl -fsS http://127.0.0.1:18080/healthz
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-5-clean-install.tar.gz
 ```
 
-脚本会保留现有 `deploy/.env`，创建必要数据目录，尝试数据库备份，解压新版源码包，构建镜像，切换源码目录，强制重建 app/worker 容器，并检查 `/healthz` 返回的版本号。脚本会先尝试直接访问 Docker；若 NAS 账户只能执行免交互的 `sudo docker`，则自动切换到该方式。数据目录无法由宿主账户直接维护时，会复用本机已有的应用镜像以 root 容器完成 UID 1000 所需的目录创建和授权。
+脚本会保留现有 `deploy/.env`，创建必要数据目录，尝试数据库备份，解压新版源码包，构建镜像，切换源码目录，强制重建 app、worker 与 host-monitor 容器，并检查 `/healthz` 返回的版本号。脚本会先尝试直接访问 Docker；若 NAS 账户只能执行免交互的 `sudo docker`，则自动切换到该方式。数据目录无法由宿主账户直接维护时，会复用本机已有的应用镜像以 root 容器完成 UID 1000 所需的目录创建和授权。
 
 测试环境如果确认不需要备份，可以跳过备份：
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz
+SKIP_BACKUP=1 sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-5-clean-install.tar.gz
 ```
 
 如果已经手动把源码覆盖到 `source` 目录，可以原地构建重启：

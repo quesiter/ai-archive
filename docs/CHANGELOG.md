@@ -2,6 +2,16 @@
 
 本文件合并原 `docs/UPDATE-*.md` 的版本说明。具体部署、升级、备份和排错步骤统一查看 [运维手册](OPERATIONS.md)。
 
+## 2026-08-22 V260822-5：设置二级菜单与主机运行监测
+
+- 设置页重构为左侧二级菜单和右侧当前功能面板，按模型与额度、智能归类、邮件与报告、备份恢复、脱敏安全、系统状态拆分；窄屏自动切换为顶部网格菜单。
+- Docker Compose 新增不暴露宿主端口的 `host-monitor` 容器，只读采集宿主 `/proc` 和归档数据所在文件系统，不挂载 Docker Socket，并保持非 root、只读根文件系统、无 capabilities。
+- 系统状态页展示应用、监测容器和 PostgreSQL 可用性，以及 CPU、内存、Swap、磁盘、inode、Uptime、Load、最近 27 个 CPU/内存趋势点和 85%/95% 两级资源告警。
+- 新增 PostgreSQL 数据库大小、连接数、活跃连接、最长查询、运行时间和 Web 备份记录展示；监测趋势只保存在监测容器内存中，不进入业务数据库或备份。
+- 服务端和 Web 版本更新为 `V260822-5`；Chrome 插件与 Windows/macOS 同步代理继续使用 `V260822-4`。
+
+发布包：`release/ai-conversation-archive-nas-V260822-5-clean-install.tar.gz`。
+
 ## 2026-08-22 V260822-4：知言归藏品牌、Codex 最新修订与文档基线
 
 - 产品正式命名为“知言归藏”，标语为“汇智能之言，成项目之知。”；Web、登录页、Chrome 插件、本地同步终端、TOTP issuer、导出元数据和 README 同步更新。

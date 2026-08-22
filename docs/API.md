@@ -42,7 +42,7 @@ Web 写操作同时受严格同源、SameSite Cookie 和全局速率限制保护
 GET /healthz
 ```
 
-不需要认证。数据库可用时返回 `{"ok":true,"version":"V260822-4","time":"..."}`，不可用时返回 503 和 `ok:false`；所有响应同时设置 `X-AI-Archive-Version`。该接口不在 `/api/v1` 基础路径下。
+不需要认证。数据库可用时返回 `{"ok":true,"version":"V260822-5","time":"..."}`，不可用时返回 503 和 `ok:false`；所有响应同时设置 `X-AI-Archive-Version`。该接口不在 `/api/v1` 基础路径下。
 
 ## 2. 认证接口
 
@@ -1118,7 +1118,54 @@ GET /api/v1/redaction/storage-cleanup
 
 清理在 Worker 中异步执行。该操作会永久替换消息正文、搜索索引、知识、报告和日志中匹配到的敏感文本。
 
-## 12. 状态码约定
+## 12. 系统状态
+
+### 12.1 获取主机与数据库运行状态
+
+```http
+GET /api/v1/system/status
+```
+
+需要 Web 登录。服务端并行读取 Docker 内部 `host-monitor` 指标和 PostgreSQL 状态。主机监测不可用时接口仍返回 200，`host.available` 为 `false`，便于页面继续展示应用和数据库状态。
+
+响应示例：
+
+```json
+{
+  "collectedAt": "2026-08-22T05:30:00.000Z",
+  "services": {
+    "app": { "online": true, "version": "V260822-5", "uptimeSeconds": 3600 },
+    "hostMonitor": { "online": true },
+    "postgres": { "online": true }
+  },
+  "host": {
+    "available": true,
+    "uptimeSeconds": 691200,
+    "load": [0.31, 0.37, 0.25],
+    "cpuPercent": 6.4,
+    "memory": { "totalBytes": 4294967296, "usedBytes": 2147483648, "availableBytes": 2147483648, "percent": 50 },
+    "swap": { "totalBytes": 2147483648, "usedBytes": 104857600, "availableBytes": 2042626048, "percent": 4.9 },
+    "storage": { "totalBytes": 4398046511104, "usedBytes": 3518437208883, "availableBytes": 879609302221, "percent": 80, "inodesTotal": 10000000, "inodesUsed": 1200000, "inodesAvailable": 8800000, "inodePercent": 12 },
+    "history": [],
+    "alerts": []
+  },
+  "database": {
+    "online": true,
+    "sizeBytes": 268435456,
+    "connections": 7,
+    "activeConnections": 1,
+    "maxConnections": 100,
+    "uptimeSeconds": 345600,
+    "longestQuerySeconds": 0,
+    "lastBackupAt": null,
+    "lastBackupFailureAt": null
+  }
+}
+```
+
+`history` 最多返回监测容器内存中的最近 120 个采样点，Compose 默认保留 27 个；监测数据不写入业务数据库。资源使用率达到 85% 返回 `warning` 告警，达到 95% 返回 `critical` 告警。文件系统不提供可靠 inode 数据时，inode 总量和使用率返回 0。
+
+## 13. 状态码约定
 
 | 状态码 | 说明 |
 | --- | --- |

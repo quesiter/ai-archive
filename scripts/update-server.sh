@@ -7,7 +7,7 @@ usage() {
 
 Usage:
   sh scripts/update-server.sh
-  sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz
+  sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-5-clean-install.tar.gz
 
 Environment:
   APP_ROOT=/volume1/docker/ai-conversation-archive
@@ -286,9 +286,9 @@ else
   EXPECTED_VERSION=$(expected_app_version "$SOURCE_DIR")
 fi
 
-log "Starting services with forced app/worker recreation..."
+log "Starting services with forced host-monitor/app/worker recreation..."
 compose_with "$ENV_FILE" "$COMPOSE_FILE" up -d postgres
-compose_with "$ENV_FILE" "$COMPOSE_FILE" up -d --force-recreate app worker
+compose_with "$ENV_FILE" "$COMPOSE_FILE" up -d --force-recreate host-monitor app worker
 
 if wait_health "$ENV_FILE" "$EXPECTED_VERSION"; then
   compose_with "$ENV_FILE" "$COMPOSE_FILE" ps
@@ -296,5 +296,5 @@ if wait_health "$ENV_FILE" "$EXPECTED_VERSION"; then
 fi
 
 log "Application did not become healthy in time. Recent logs:"
-compose_with "$ENV_FILE" "$COMPOSE_FILE" logs --tail=120 app worker
+compose_with "$ENV_FILE" "$COMPOSE_FILE" logs --tail=120 host-monitor app worker
 exit 1

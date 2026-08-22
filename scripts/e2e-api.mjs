@@ -375,6 +375,9 @@ const allConversations = await expectOk(
 const dashboard = await expectOk(
   await fetch(`${base}/api/v1/dashboard`, { headers: { cookie } }),
 );
+const systemStatus = await expectOk(
+  await fetch(`${base}/api/v1/system/status`, { headers: { cookie } }),
+);
 const rootResponse = await fetch(base);
 const rootHtml = await rootResponse.text();
 
@@ -421,6 +424,11 @@ const summary = {
   duplicateImport: duplicateImport.duplicate,
   conversations: allConversations.length,
   dashboard: dashboard.counts,
+  systemStatus: {
+    app: systemStatus.services?.app?.online,
+    postgres: systemStatus.services?.postgres?.online,
+    hostMonitor: systemStatus.services?.hostMonitor?.online,
+  },
   webServed: rootResponse.status === 200 && rootHtml.includes("知言归藏"),
   revokedStatus: revokedResponse.status,
 };
@@ -457,6 +465,8 @@ if (
   completedImport?.status !== "completed" ||
   !duplicateImport.duplicate ||
   allConversations.length !== 3 ||
+  systemStatus.services?.app?.online !== true ||
+  systemStatus.services?.postgres?.online !== true ||
   !summary.webServed ||
   revokedResponse.status !== 401
 ) {

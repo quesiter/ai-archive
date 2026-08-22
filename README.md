@@ -4,7 +4,7 @@
 
 “知言归藏”是个人自托管的跨平台 AI 会话归档与项目知识系统。它把网页 AI 平台和本地 AI 编程工具中的会话统一保存到 PostgreSQL，并在不影响原始归档的前提下提供项目归类、中文知识沉淀、周报、月报、检索、导出和备份恢复。
 
-当前发布版本：服务端与 Web `V260822-4`；Chrome 插件与本地同步代理 `V260822-4`。
+当前发布版本：服务端与 Web `V260822-5`；Chrome 插件与本地同步代理 `V260822-4`。
 
 ## 已实现能力
 
@@ -18,7 +18,7 @@
 - AI 额度治理：所有结构化 AI 调用共用可配置节流；识别 MiniMax Token Plan/速率限制，优先读取实际刷新时间，增加 10 分钟缓冲后自动续跑，无法读取时一小时后重试；每天 22:00 可自动串行执行增量归类和知识分析。
 - 安全：单用户密码与 TOTP 登录、设备配对与撤销、HTTPS/同源检查、敏感设置加密、网络目标校验、上传限额和速率限制。
 - 脱敏：密码、API Token、Authorization、私钥、数据库连接串、带认证 URL 和 SSH/SFTP 登录信息在消息入库前不可逆打码；支持自定义规则、一键安全规则包、规则预览和历史数据清理。
-- 运维：Docker Compose 部署、自动迁移、健康检查、业务备份导入导出、PostgreSQL 脚本备份恢复、操作日志和 API 冒烟测试。
+- 运维：Docker Compose 部署、自动迁移、健康检查、业务备份导入导出、PostgreSQL 脚本备份恢复、操作日志和 API 冒烟测试；设置页提供只读主机资源、磁盘/inode、趋势、告警与 PostgreSQL 状态监测。
 
 未配置 OpenAI 兼容模型时，网页采集、本地同步、历史导入、会话搜索、修订查看、导出和备份恢复仍可使用；模型只影响归类、知识和报告等可选能力。
 
@@ -26,7 +26,7 @@
 
 | 包 | 路径 |
 | --- | --- |
-| NAS 服务端源码包 | `release/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz` |
+| NAS 服务端源码包 | `release/ai-conversation-archive-nas-V260822-5-clean-install.tar.gz` |
 | Chrome 插件 | `release/ai-archiveextension-V260822-4-chrome.zip` |
 | Windows 同步代理 | `release/ai-conversation-archive-windows-sync-V260822-4.zip` |
 | macOS 同步代理 | `release/ai-conversation-archive-macos-sync-V260822-4.tar.gz` |
@@ -37,7 +37,7 @@ NAS 更新：
 
 ```sh
 cd /volume1/docker/ai-conversation-archive/source
-sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-4-clean-install.tar.gz
+sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V260822-5-clean-install.tar.gz
 ```
 
 ## 文档
@@ -61,7 +61,7 @@ sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversat
 
 | 模块 | 路径 | 职责 |
 | --- | --- | --- |
-| 服务端 | `apps/server` | Fastify API、认证、采集入库、Drizzle/PostgreSQL、pg-boss Worker、分析、脱敏、备份、邮件和日志。 |
+| 服务端 | `apps/server` | Fastify API、认证、采集入库、Drizzle/PostgreSQL、pg-boss Worker、分析、脱敏、备份、邮件、日志和只读主机监测进程。 |
 | Web | `apps/web` | React 单用户管理后台。 |
 | Chrome 插件 | `apps/extension` | Manifest V3 网页适配、轻量变化检测、完整/增量采集、本地 outbox 和悬浮状态。 |
 | 本地同步代理 | `apps/openclaw-sync` | OpenClaw、Codex、Claude Code JSONL 解析、增量读取、监听和上传。 |
