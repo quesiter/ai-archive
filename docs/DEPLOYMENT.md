@@ -111,7 +111,10 @@ Chrome 不允许普通扩展自动固定工具栏或默认启用无痕；需由�
 
 ~~~powershell
 pnpm --filter @ai-archive/openclaw-sync build
+python scripts/package-macos-sync.py
 ~~~
+
+macOS 发布包必须通过脚本生成；脚本会把 `AI-Archive-Sync.command` 固定为 `0755` 和纯 LF 换行，其余文件固定为 `0644`，并在覆盖发布包前校验目录结构、执行权限、换行和入口 shebang。可再次运行 `python scripts/package-macos-sync.py --verify release/ai-conversation-archive-macos-sync-V2.1.0.tar.gz` 独立复核。
 
 Windows 使用 sync-local-windows.bat 完成配对，可用 install/uninstall 管理登录后隐藏计划任务，日志位于 %LOCALAPPDATA%\AIArchive\Sync\Logs。
 

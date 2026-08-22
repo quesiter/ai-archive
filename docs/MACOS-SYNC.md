@@ -20,6 +20,14 @@
 
 再次双击 `AI-Archive-Sync.command` 可以重新安装、前台运行、导入近期历史或卸载后台同步。
 
+默认安全窗口是最近 14 天。需要补同步最近 30 天时，在解压目录运行：
+
+```sh
+AI_ARCHIVE_SAFE_RECENT_DAYS=30 ./AI-Archive-Sync.command rebuild
+```
+
+命令结束时应看到 `Rebuild completed from ... eligible transcript files`；如果只出现 `bad interpreter`，说明脚本没有启动，也不会产生任何同步。
+
 `V2.0.1` 会合并扫描期间发生的文件变化、稳定记录 Codex 后续修订，并兼容 JSONL 记录内部的独立回车空白。升级后可先选择近期历史重建，再重新安装 LaunchAgent；既有配对配置不需要删除。
 
 ## 默认路径
