@@ -169,14 +169,20 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .toolbar input, .toolbar select { padding: .58rem .72rem; }
 .toolbar input { flex: 1; min-width: 180px; }
 .compact-toolbar { gap: .5rem; }
-.conversation-filter-toolbar { align-items: center; flex-wrap: nowrap; overflow-x: auto; }
-.conversation-filter-toolbar > input:first-child { flex: 1 0 180px; }
-.conversation-filter-toolbar > select { flex: 0 0 auto; }
+.conversation-filter-toolbar {
+  align-items: center;
+  flex-wrap: wrap;
+  overflow: visible;
+}
+.conversation-filter-toolbar > input:first-child { flex: 1 1 160px; min-width: 140px; }
+.conversation-filter-toolbar > select { flex: 0 1 150px; min-width: 84px; max-width: 168px; }
+.conversation-filter-toolbar > select:last-of-type { flex: 1 1 180px; min-width: 150px; max-width: 320px; }
 .date-range-filter { display: flex; align-items: center; gap: .38rem; flex: 0 0 auto; padding-left: .18rem; white-space: nowrap; }
 .date-range-filter > strong { color: var(--muted); font-size: .7rem; }
 .date-range-filter label { flex-direction: row; align-items: center; gap: .25rem; color: var(--muted); font-size: .68rem; }
 .date-range-filter input { flex: 0 0 132px; width: 132px; min-width: 132px; padding: .58rem .62rem; }
 .conversation-pagination { display: flex; align-items: center; gap: .42rem; flex: 0 0 auto; }
+.conversation-filter-toolbar > .conversation-pagination { margin-left: auto; }
 .toolbar-count { color: var(--muted); font-size: .76rem; min-width: 88px; text-align: right; }
 .section-title-row, .progress-header, .run-row { display: flex; align-items: center; justify-content: space-between; gap: .8rem; }
 .section-title-row { margin-bottom: 1rem; }
