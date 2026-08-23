@@ -14,13 +14,17 @@ export type ConversationListQuery = {
 
 function dateParamToIso(value: string): string {
   if (!value) return "";
-  const date = new Date(value);
+  const date = new Date(`${value}T00:00:00`);
   return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
 export function buildConversationListSearch(query: ConversationListQuery): string {
   const from = dateParamToIso(query.from);
-  const to = dateParamToIso(query.to);
+  const toDate = query.to ? new Date(`${query.to}T00:00:00`) : null;
+  if (toDate && !Number.isNaN(toDate.getTime())) {
+    toDate.setDate(toDate.getDate() + 1);
+  }
+  const to = toDate?.toISOString() ?? "";
   return new URLSearchParams({
     limit: String(query.limit),
     offset: String(Math.max(0, query.offset)),

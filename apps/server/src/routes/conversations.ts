@@ -8,8 +8,9 @@ import {
   ilike,
   inArray,
   isNull,
-  lte,
+  lt,
   or,
+  sql,
 } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { ProviderSchema } from "@ai-archive/contracts";
@@ -138,27 +139,35 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       matchingIds = revisionMatches.map((row) => row.id);
     }
     let revisionScopedIds: string[] | undefined;
-    const revisionFilters = [];
+    const currentRevisionFilters = [sql`ranked.revision_rank = 1`];
     if (query.completeness) {
-      revisionFilters.push(eq(conversationRevisions.completeness, query.completeness));
+      currentRevisionFilters.push(sql`ranked.completeness = ${query.completeness}`);
     }
     if (query.captureMode) {
-      revisionFilters.push(eq(conversationRevisions.captureMode, query.captureMode));
+      currentRevisionFilters.push(sql`ranked.capture_mode = ${query.captureMode}`);
     }
     if (query.source === "historical_import") {
-      revisionFilters.push(eq(conversationRevisions.captureMode, "import"));
+      currentRevisionFilters.push(sql`ranked.capture_mode = 'import'`);
     }
-    if (query.from) {
-      revisionFilters.push(gte(conversationRevisions.capturedAt, new Date(query.from)));
-    }
-    if (query.to) {
-      revisionFilters.push(lte(conversationRevisions.capturedAt, new Date(query.to)));
-    }
-    if (revisionFilters.length) {
-      const rows = await db
-        .selectDistinct({ id: conversationRevisions.conversationId })
-        .from(conversationRevisions)
-        .where(and(...revisionFilters));
+    if (currentRevisionFilters.length > 1) {
+      const rows = await db.execute<{ id: string }>(sql`
+        select ranked.id
+        from (
+          select
+            ${conversationRevisions.conversationId} as id,
+            ${conversationRevisions.completeness} as completeness,
+            ${conversationRevisions.captureMode} as capture_mode,
+            row_number() over (
+              partition by ${conversationRevisions.conversationId}
+              order by
+                (${conversationRevisions.completeness} = 'complete') desc,
+                ${conversationRevisions.capturedAt} desc,
+                ${conversationRevisions.createdAt} desc
+            ) as revision_rank
+          from ${conversationRevisions}
+        ) ranked
+        where ${sql.join(currentRevisionFilters, sql` and `)}
+      `);
       revisionScopedIds = rows.map((row) => row.id);
       if (!revisionScopedIds.length) return [];
     }
@@ -181,6 +190,8 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     if (query.source === "codex") filters.push(eq(conversations.provider, "codex"));
     if (query.source === "claude_code") filters.push(eq(conversations.provider, "claude_code"));
     if (query.projectId) filters.push(eq(conversationProjects.projectId, query.projectId));
+    if (query.from) filters.push(gte(conversations.updatedAt, new Date(query.from)));
+    if (query.to) filters.push(lt(conversations.updatedAt, new Date(query.to)));
     if (revisionScopedIds) filters.push(inArray(conversations.id, revisionScopedIds));
     if (tagScopedIds) filters.push(inArray(conversations.id, tagScopedIds));
     if (query.q) {

@@ -351,13 +351,19 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       const user = await requireWebUser(request, reply);
       if (!user) return;
       const params = z.object({ id: z.string().uuid() }).parse(request.params);
-      const input = z.object({ targetProjectId: z.string().uuid() }).parse(request.body);
+      const input = z.object({
+        targetProjectId: z.string().uuid(),
+        targetName: z.string().trim().min(1).max(200).optional(),
+      }).parse(request.body);
       if (input.targetProjectId === params.id) {
         return reply.code(400).send({ error: "Source and target projects must be different" });
       }
       const result = await mergeProjectIntoProject({
         sourceProjectId: params.id,
         targetProjectId: input.targetProjectId,
+        ...(input.targetName !== undefined
+          ? { targetProjectName: input.targetName }
+          : {}),
       });
       if (!result) return reply.code(404).send({ error: "Source or target project not found" });
       await writeOperationLog({

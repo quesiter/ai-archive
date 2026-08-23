@@ -10,6 +10,7 @@ import {
   setSettings,
 } from "../services/settings.js";
 import { testLlmConnection } from "../services/llm.js";
+import { testReportEmail } from "../services/email.js";
 import {
   SECURITY_RULE_PACK,
   redactForCloud,
@@ -48,20 +49,36 @@ const ALLOWED_SETTINGS = new Set([
   "classification.maxConversationChars",
 ]);
 
+export function securityPackStatus(
+  rules: Array<{ pattern: string; enabled: boolean }>,
+): { total: number; installed: number; enabled: number; fullyEnabled: boolean } {
+  const matches = SECURITY_RULE_PACK.map((template) =>
+    rules.find((rule) => rule.pattern === template.pattern),
+  );
+  return {
+    total: SECURITY_RULE_PACK.length,
+    installed: matches.filter(Boolean).length,
+    enabled: matches.filter((rule) => rule?.enabled).length,
+    fullyEnabled: matches.every((rule) => rule?.enabled === true),
+  };
+}
+
 export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/v1/settings", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
+    const storedRedactionRules = await db
+      .select()
+      .from(redactionRules)
+      .orderBy(asc(redactionRules.createdAt));
     return {
       settings: await getPublicSettings(),
-      redactionRules: (await db
-        .select()
-        .from(redactionRules)
-        .orderBy(asc(redactionRules.createdAt))).map((rule) => ({
+      redactionRules: storedRedactionRules.map((rule) => ({
           ...rule,
           name:
             SECURITY_RULE_PACK.find((template) => template.pattern === rule.pattern)
               ?.name ?? null,
         })),
+      securityPack: securityPackStatus(storedRedactionRules),
     };
   });
 
@@ -93,6 +110,27 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     try {
       const result = await testLlmConnection(input);
       return { ok: true, ...result };
+    } catch (error) {
+      return reply.code(400).send({
+        ok: false,
+        error: safeStoredError(error),
+      });
+    }
+  });
+
+  app.post("/api/v1/settings/email/test", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    const input = z.object({
+      host: z.string().max(253).default(""),
+      port: z.string().max(5).default(""),
+      secure: z.enum(["true", "false"]).default("false"),
+      username: z.string().max(1_000).default(""),
+      password: z.string().max(20_000).default(""),
+      from: z.string().max(1_000).default(""),
+      to: z.string().max(5_000).default(""),
+    }).parse(request.body ?? {});
+    try {
+      return { ok: true, ...(await testReportEmail(input)) };
     } catch (error) {
       return reply.code(400).send({
         ok: false,
@@ -175,7 +213,7 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     if (active) return { task: active, jobId: null, reused: true };
     const task = await createBackgroundTask(
       "storage_redaction",
-      "已有归档敏感信息清理已入队",
+      "历史归档敏感信息脱敏已入队",
     );
     const jobId = await enqueueStorageRedaction(task.id);
     if (!jobId) {

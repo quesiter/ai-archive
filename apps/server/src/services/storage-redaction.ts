@@ -81,7 +81,7 @@ async function updateProgress(
     {
       processedCount: progress.processed,
       succeededCount: progress.redactedRows,
-      message: `正在清理已有归档：${stage}`,
+      message: `正在脱敏历史归档：${stage}`,
       stats: {
         stage,
         totalRows: total,
@@ -338,7 +338,7 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
       processedCount: progress.processed,
       succeededCount: progress.redactedRows,
       failedCount: 0,
-      message: "已有归档敏感信息清理完成",
+      message: "历史归档敏感信息脱敏完成",
       stats: {
         stage: "completed",
         totalRows: total,

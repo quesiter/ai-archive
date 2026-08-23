@@ -18,6 +18,7 @@ export interface ProjectMergeResult {
 export async function mergeProjectIntoProject(input: {
   sourceProjectId: string;
   targetProjectId: string;
+  targetProjectName?: string;
 }): Promise<ProjectMergeResult | null> {
   if (input.sourceProjectId === input.targetProjectId) {
     throw new Error("Source and target projects must be different");
@@ -65,17 +66,18 @@ export async function mergeProjectIntoProject(input: {
       .update(reports)
       .set({ projectId: target.id })
       .where(eq(reports.projectId, source.id));
+    await tx.delete(projects).where(eq(projects.id, source.id));
+    const targetProjectName = input.targetProjectName ?? target.name;
     await tx
       .update(projects)
-      .set({ updatedAt: new Date() })
+      .set({ name: targetProjectName, updatedAt: new Date() })
       .where(eq(projects.id, target.id));
-    await tx.delete(projects).where(eq(projects.id, source.id));
 
     return {
       sourceProjectId: source.id,
       sourceProjectName: source.name,
       targetProjectId: target.id,
-      targetProjectName: target.name,
+      targetProjectName,
       movedConversationCount: sourceAssignments.length,
       movedReportCount: sourceReports.length,
     };

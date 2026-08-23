@@ -169,6 +169,14 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .toolbar input, .toolbar select { padding: .58rem .72rem; }
 .toolbar input { flex: 1; min-width: 180px; }
 .compact-toolbar { gap: .5rem; }
+.conversation-filter-toolbar { align-items: center; flex-wrap: nowrap; overflow-x: auto; }
+.conversation-filter-toolbar > input:first-child { flex: 1 0 180px; }
+.conversation-filter-toolbar > select { flex: 0 0 auto; }
+.date-range-filter { display: flex; align-items: center; gap: .38rem; flex: 0 0 auto; padding-left: .18rem; white-space: nowrap; }
+.date-range-filter > strong { color: var(--muted); font-size: .7rem; }
+.date-range-filter label { flex-direction: row; align-items: center; gap: .25rem; color: var(--muted); font-size: .68rem; }
+.date-range-filter input { flex: 0 0 132px; width: 132px; min-width: 132px; padding: .58rem .62rem; }
+.conversation-pagination { display: flex; align-items: center; gap: .42rem; flex: 0 0 auto; }
 .toolbar-count { color: var(--muted); font-size: .76rem; min-width: 88px; text-align: right; }
 .section-title-row, .progress-header, .run-row { display: flex; align-items: center; justify-content: space-between; gap: .8rem; }
 .section-title-row { margin-bottom: 1rem; }
@@ -270,7 +278,7 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .log-table { min-width: 980px; }
 .log-table-head, .log-table-row {
   display: grid;
-  grid-template-columns: 132px 64px 64px 112px 84px 150px minmax(260px, 1fr);
+  grid-template-columns: 132px 64px 64px 104px 130px 84px 140px minmax(240px, 1fr);
   align-items: start;
   gap: .55rem;
   padding: .5rem .78rem;
@@ -297,6 +305,9 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.log-device-cell { min-width: 0; display: flex; flex-direction: column; gap: .12rem; }
+.log-device-cell strong { overflow: hidden; color: #35545a; font-size: .73rem; text-overflow: ellipsis; white-space: nowrap; }
+.log-device-cell small { color: var(--muted); font-size: .62rem; }
 .log-entity-cell { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .7rem; }
 .log-message-cell { min-width: 0; display: flex; flex-direction: column; gap: .22rem; }
 .log-message-cell strong { color: #213946; font-size: .78rem; line-height: 1.4; word-break: break-word; }

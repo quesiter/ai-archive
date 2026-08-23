@@ -338,6 +338,13 @@ function statusClass(status: unknown): string {
   )[String(status)] ?? "partial";
 }
 
+function storageRedactionMessage(message: unknown): string {
+  return String(message ?? "")
+    .replace("正在清理已有归档", "正在脱敏历史归档")
+    .replace("已有归档敏感信息清理完成", "历史归档敏感信息脱敏完成")
+    .replace("已有归档敏感信息清理已入队", "历史归档敏感信息脱敏已入队");
+}
+
 const sourceLabels: Record<string, string> = {
   web: "网页",
   openclaw: "OpenClaw",
@@ -747,6 +754,7 @@ function Logs() {
   const scope = searchParams.get("scope") ?? "";
   const level = searchParams.get("level") ?? "";
   const provider = searchParams.get("provider") ?? "";
+  const deviceId = searchParams.get("deviceId") ?? "";
   const status = searchParams.get("status") ?? "";
   const q = searchParams.get("q") ?? "";
   const [draftQ, setDraftQ] = useState(q);
@@ -755,15 +763,20 @@ function Logs() {
     ...(scope ? { scope } : {}),
     ...(level ? { level } : {}),
     ...(provider ? { provider } : {}),
+    ...(deviceId ? { deviceId } : {}),
     ...(status ? { status } : {}),
     ...(q ? { q } : {}),
   });
   const state = useLoad(
     () => api<{ items: UnknownRecord[] }>(`/api/v1/logs?${params}`),
-    [scope, level, provider, status, q],
+    [scope, level, provider, deviceId, status, q],
   );
   const providerCountsState = useLoad(
     () => api<UnknownRecord[]>("/api/v1/conversations/provider-counts"),
+    [],
+  );
+  const devicesState = useLoad(
+    () => api<UnknownRecord[]>("/api/v1/devices"),
     [],
   );
 
@@ -778,7 +791,7 @@ function Logs() {
   }
 
   function updateQuery(next: Record<string, string>) {
-    const merged = { scope, level, provider, status, q, ...next };
+    const merged = { scope, level, provider, deviceId, status, q, ...next };
     const updated = new URLSearchParams();
     for (const [key, value] of Object.entries(merged)) {
       if (value) updated.set(key, value);
@@ -803,6 +816,15 @@ function Logs() {
           <option value="">全部范围</option>
           {Object.entries(logScopeLabels).map(([key, label]) => (
             <option key={key} value={key}>{label}</option>
+          ))}
+        </select>
+        <select
+          value={deviceId}
+          onChange={(event) => updateQuery({ deviceId: event.target.value })}
+        >
+          <option value="">全部设备</option>
+          {(devicesState.data ?? []).map((device) => (
+            <option key={device.id} value={device.id}>{device.name}</option>
           ))}
         </select>
         <select
@@ -874,6 +896,7 @@ function Logs() {
               <span>范围</span>
               <span>等级</span>
               <span>平台</span>
+              <span>设备来源</span>
               <span>状态</span>
               <span>对象</span>
               <span>消息</span>
@@ -894,6 +917,18 @@ function Logs() {
               const entityLabel = item.entityType
                 ? `${item.entityType} ${shortValue(item.entityId)}`
                 : shortValue(item.entityId);
+              const deviceName = typeof item.device?.name === "string"
+                ? item.device.name
+                : metadata && typeof metadata.name === "string" && item.entityType === "device"
+                  ? metadata.name
+                  : item.scope === "capture"
+                    ? "未知设备"
+                    : "系统服务";
+              const deviceKind = typeof item.device?.kind === "string"
+                ? item.device.kind
+                : metadata && typeof metadata.kind === "string"
+                  ? metadata.kind
+                  : "";
               return (
                 <article className={`log-table-row ${item.level ?? "info"}`} key={item.id}>
                   <time>{formatTaskTime(item.createdAt)}</time>
@@ -905,6 +940,10 @@ function Logs() {
                     {metadataProvider
                       ? providerLabels[metadataProvider as Provider] ?? metadataProvider
                       : "-"}
+                  </span>
+                  <span className="log-device-cell" title={deviceName}>
+                    <strong>{deviceName}</strong>
+                    {deviceKind && <small>{deviceKind === "chrome_extension" ? "Chrome 扩展" : deviceKind === "openclaw_sync" ? "同步代理" : deviceKind}</small>}
                   </span>
                   <span>
                     {item.status ? (
@@ -1032,7 +1071,7 @@ function Conversations() {
   return (
     <>
       <PageHeader title="会话" subtitle="按 Session 自动去重的完整可见分支" />
-      <div className="toolbar compact-toolbar">
+      <div className="toolbar compact-toolbar conversation-filter-toolbar">
         <input
           key={q}
           placeholder="搜索全部会话…"
@@ -1114,33 +1153,40 @@ function Conversations() {
             )}
           </div>
         </details>
-        <input
-          type="date"
-          value={from}
-          onChange={(event) => updateQuery({ from: event.target.value, offset: 0 })}
-        />
-        <input
-          type="date"
-          value={to}
-          onChange={(event) => updateQuery({ to: event.target.value, offset: 0 })}
-        />
-        <span className="toolbar-count">
-          {state.loading ? "加载中" : `第 ${pageStart}-${pageEnd} 条`}
-        </span>
-        <button
-          className="secondary small"
-          disabled={offset <= 0}
-          onClick={() => updateQuery({ offset: Math.max(0, offset - limit) })}
-        >
-          上一页
-        </button>
-        <button
-          className="secondary small"
-          disabled={!hasNextPage}
-          onClick={() => updateQuery({ offset: offset + limit })}
-        >
-          下一页
-        </button>
+        <div className="date-range-filter" aria-label="会话更新时间范围">
+          <strong>更新时间</strong>
+          <label>从<input
+            aria-label="更新时间起始日期"
+            type="date"
+            value={from}
+            onChange={(event) => updateQuery({ from: event.target.value, offset: 0 })}
+          /></label>
+          <label>至<input
+            aria-label="更新时间结束日期"
+            type="date"
+            value={to}
+            onChange={(event) => updateQuery({ to: event.target.value, offset: 0 })}
+          /></label>
+        </div>
+        <div className="conversation-pagination">
+          <span className="toolbar-count">
+            {state.loading ? "加载中" : `第 ${pageStart}-${pageEnd} 条`}
+          </span>
+          <button
+            className="secondary small"
+            disabled={offset <= 0}
+            onClick={() => updateQuery({ offset: Math.max(0, offset - limit) })}
+          >
+            上一页
+          </button>
+          <button
+            className="secondary small"
+            disabled={!hasNextPage}
+            onClick={() => updateQuery({ offset: offset + limit })}
+          >
+            下一页
+          </button>
+        </div>
       </div>
       {state.loading ? (
         <Loading />
@@ -1497,6 +1543,7 @@ function Projects() {
   const [classificationRunMode, setClassificationRunMode] = useState<"economy" | "full">("economy");
   const [mergeSourceId, setMergeSourceId] = useState("");
   const [mergeTargetId, setMergeTargetId] = useState("");
+  const [mergeTargetName, setMergeTargetName] = useState("");
   const [mergeMessage, setMergeMessage] = useState("");
   const [projectDialog, setProjectDialog] = useState<"create" | "merge" | null>(null);
   const classificationActive = isActiveStatus(classificationTask?.status);
@@ -1620,18 +1667,20 @@ function Projects() {
     event.preventDefault();
     const source = projectGroups.find((project) => project.id === mergeSourceId);
     const target = projectGroups.find((project) => project.id === mergeTargetId);
-    if (!source || !target || source.id === target.id) return;
-    if (!window.confirm(`确认把项目“${source.name}”合并到“${target.name}”？源项目将在迁移完成后删除，此操作不可撤销。`)) return;
+    const targetName = mergeTargetName.trim();
+    if (!source || !target || source.id === target.id || !targetName) return;
+    if (!window.confirm(`确认把项目“${source.name}”合并到“${target.name}”，并将合并后的项目命名为“${targetName}”？源项目将在迁移完成后删除，此操作不可撤销。`)) return;
     setError("");
     setMergeMessage("正在合并项目…");
     try {
       const result = await api<UnknownRecord>(`/api/v1/projects/${source.id}/merge`, {
         method: "POST",
-        ...jsonBody({ targetProjectId: target.id }),
+        ...jsonBody({ targetProjectId: target.id, targetName }),
       });
       setMergeMessage(`合并完成：迁移 ${result.movedConversationCount ?? 0} 个会话和 ${result.movedReportCount ?? 0} 份关联报告。`);
       setMergeSourceId("");
       setMergeTargetId("");
+      setMergeTargetName("");
       setProjectDialog(null);
       overviewState.reload();
     } catch (reason) {
@@ -1826,6 +1875,10 @@ function Projects() {
               className="secondary small"
               onClick={() => {
                 setError("");
+                setMergeMessage("");
+                setMergeSourceId("");
+                setMergeTargetId("");
+                setMergeTargetName("");
                 setProjectDialog("merge");
               }}
             >合并项目</button>
@@ -2062,15 +2115,34 @@ function Projects() {
             </label>
             <div className="modal-merge-arrow">↓ 会话和报告迁移至</div>
             <label>B · 目标项目
-              <select value={mergeTargetId} onChange={(event) => setMergeTargetId(event.target.value)} required>
+              <select
+                value={mergeTargetId}
+                onChange={(event) => {
+                  const targetId = event.target.value;
+                  setMergeTargetId(targetId);
+                  const selectedProject = activeProjectGroups.find((project) => project.id === targetId);
+                  setMergeTargetName(String(selectedProject?.name ?? ""));
+                }}
+                required
+              >
                 <option value="">请选择保留的目标项目</option>
                 {activeProjectGroups.filter((project) => project.id !== mergeSourceId).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select>
             </label>
+            <label>合并后项目名称
+              <input
+                disabled={!mergeTargetId}
+                maxLength={200}
+                onChange={(event) => setMergeTargetName(event.target.value)}
+                placeholder="请先选择目标项目"
+                required
+                value={mergeTargetName}
+              />
+            </label>
             <p className="modal-warning">合并后无法撤销，请确认源项目与目标项目选择正确。</p>
             <div className="modal-actions">
               <button className="secondary" onClick={() => setProjectDialog(null)} type="button">取消</button>
-              <button className="danger" disabled={!mergeSourceId || !mergeTargetId || mergeSourceId === mergeTargetId}>确认合并</button>
+              <button className="danger" disabled={!mergeSourceId || !mergeTargetId || !mergeTargetName.trim() || mergeSourceId === mergeTargetId}>确认合并</button>
             </div>
           </form>
         </Modal>
@@ -2683,7 +2755,7 @@ const settingsSections = [
   { id: "classification", label: "项目与标签", hint: "自动整理与稳定结果复用", icon: "◇" },
   { id: "email", label: "邮件与报告", hint: "SMTP、周报与月报", icon: "✉" },
   { id: "backup", label: "备份与恢复", hint: "业务数据导入与导出", icon: "▤" },
-  { id: "redaction", label: "脱敏与安全", hint: "安全规则与历史清理", icon: "⊘" },
+  { id: "redaction", label: "脱敏与安全", hint: "安全规则与历史脱敏", icon: "⊘" },
   { id: "system", label: "系统状态", hint: "项目资源与 PostgreSQL", icon: "⌁" },
 ] as const;
 
@@ -2895,6 +2967,8 @@ function Settings() {
   const [message, setMessage] = useState("");
   const [llmTestMessage, setLlmTestMessage] = useState("");
   const [testingLlm, setTestingLlm] = useState(false);
+  const [emailTestMessage, setEmailTestMessage] = useState("");
+  const [testingEmail, setTestingEmail] = useState(false);
   const [backupMessage, setBackupMessage] = useState("");
   const [backupBusy, setBackupBusy] = useState(false);
   const [redactionMessage, setRedactionMessage] = useState("");
@@ -2902,6 +2976,7 @@ function Settings() {
   const [redactionPreview, setRedactionPreview] = useState<UnknownRecord | null>(null);
   const cleanupTask = cleanupState.data?.task;
   const cleanupActive = cleanupTask && isActiveStatus(cleanupTask.status);
+  const securityPackEnabled = state.data?.securityPack?.fullyEnabled === true;
 
   useEffect(() => {
     if (!cleanupActive) return;
@@ -2943,6 +3018,32 @@ function Settings() {
       setLlmTestMessage(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setTestingLlm(false);
+    }
+  }
+
+  async function testEmail() {
+    if (!formRef.current) return;
+    const form = new FormData(formRef.current);
+    setTestingEmail(true);
+    setEmailTestMessage("正在连接 SMTP 并发送测试邮件…");
+    try {
+      const result = await api<UnknownRecord>("/api/v1/settings/email/test", {
+        method: "POST",
+        ...jsonBody({
+          host: form.get("smtp.host"),
+          port: form.get("smtp.port"),
+          secure: form.get("smtp.secure"),
+          username: form.get("smtp.username"),
+          password: form.get("smtp.password"),
+          from: form.get("smtp.from"),
+          to: form.get("smtp.to"),
+        }),
+      });
+      setEmailTestMessage(`测试邮件已发送至 ${result.to}`);
+    } catch (reason) {
+      setEmailTestMessage(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setTestingEmail(false);
     }
   }
 
@@ -2993,14 +3094,15 @@ function Settings() {
   }
 
   async function enableSecurityPack() {
+    if (securityPackEnabled) return;
     setRedactionBusy(true);
-    setRedactionMessage("正在启用安全规则包并安排已有归档清理…");
+    setRedactionMessage("正在启用安全规则包并安排历史归档脱敏…");
     try {
       const result = await api<UnknownRecord>("/api/v1/redaction-rules/security-pack", {
         method: "POST",
       });
       setRedactionMessage(
-        `安全规则包已启用：新增 ${result.added ?? 0} 条、启用 ${result.enabled ?? 0} 条；已有归档清理已进入队列。`,
+        `安全规则包已启用：新增 ${result.added ?? 0} 条、启用 ${result.enabled ?? 0} 条；历史归档脱敏已进入队列。`,
       );
       state.reload();
       cleanupState.reload();
@@ -3012,12 +3114,12 @@ function Settings() {
   }
 
   async function runStorageCleanup() {
-    if (!window.confirm("该操作会永久替换已有归档中匹配到的密码、密钥和登录信息，无法从系统内恢复。确认继续？")) return;
+    if (!window.confirm("该操作只会将历史归档中匹配到的密码、密钥和登录信息替换为脱敏标记，不会删除会话或报告；替换后无法恢复原文。确认继续？")) return;
     setRedactionBusy(true);
-    setRedactionMessage("已有归档敏感信息清理正在加入队列…");
+    setRedactionMessage("历史归档敏感信息脱敏正在加入队列…");
     try {
       await api("/api/v1/redaction/storage-cleanup", { method: "POST" });
-      setRedactionMessage("已有归档敏感信息清理已进入队列。");
+      setRedactionMessage("历史归档敏感信息脱敏已进入队列，不会删除会话或报告。");
       cleanupState.reload();
     } catch (reason) {
       setRedactionMessage(reason instanceof Error ? reason.message : String(reason));
@@ -3163,7 +3265,12 @@ function Settings() {
 
               {activeSection === "email" && (
                 <section className="panel">
-                  <h2>报告邮件</h2>
+                  <div className="section-title-row">
+                    <div><h2>报告邮件</h2><p className="panel-subtitle">使用当前表单配置实际发送一封测试邮件，无需先保存。</p></div>
+                    <button type="button" className="secondary small" disabled={testingEmail} onClick={() => void testEmail()}>
+                      {testingEmail ? "测试中" : "发送测试邮件"}
+                    </button>
+                  </div>
                   <div className="form-grid">
                     <label>SMTP 主机<input name="smtp.host" defaultValue={settings["smtp.host"] || ""} /></label>
                     <label>端口<input name="smtp.port" defaultValue={settings["smtp.port"] || "587"} /></label>
@@ -3175,6 +3282,7 @@ function Settings() {
                     <label>周报<select name="reports.weeklyEnabled" defaultValue={settings["reports.weeklyEnabled"] || "true"}><option value="true">启用</option><option value="false">停用</option></select></label>
                     <label>月报<select name="reports.monthlyEnabled" defaultValue={settings["reports.monthlyEnabled"] || "true"}><option value="true">启用</option><option value="false">停用</option></select></label>
                   </div>
+                  {emailTestMessage && <div className={`alert ${emailTestMessage.startsWith("测试邮件已发送") ? "success" : emailTestMessage.startsWith("正在") ? "warning" : "error"}`}>{emailTestMessage}</div>}
                 </section>
               )}
               <div className="settings-save-row"><button>保存设置</button><span>{message}</span></div>
@@ -3222,10 +3330,10 @@ function Settings() {
           <div className="button-group">
             <button
               type="button"
-              disabled={redactionBusy || cleanupActive}
+              disabled={redactionBusy || cleanupActive || securityPackEnabled}
               onClick={() => void enableSecurityPack()}
             >
-              {redactionBusy ? "处理中" : "一键启用安全规则包"}
+              {redactionBusy ? "处理中" : securityPackEnabled ? "安全规则包已启用" : "一键启用安全规则包"}
             </button>
             <button
               type="button"
@@ -3233,7 +3341,7 @@ function Settings() {
               disabled={redactionBusy || cleanupActive}
               onClick={() => void runStorageCleanup()}
             >
-              {cleanupActive ? "正在清理已有归档" : "清理已有归档"}
+              {cleanupActive ? "正在脱敏历史归档" : "脱敏已有归档"}
             </button>
           </div>
         </div>
@@ -3244,8 +3352,8 @@ function Settings() {
         {cleanupTask && (
           <div className="redaction-cleanup-status">
             <div>
-              <strong>已有归档清理 · {statusLabel(cleanupTask.status)}</strong>
-              <span>{cleanupTask.message || "等待处理"}</span>
+              <strong>历史归档脱敏 · {statusLabel(cleanupTask.status)}</strong>
+              <span>{storageRedactionMessage(cleanupTask.message) || "等待处理"}</span>
             </div>
             <span className={`pill ${statusClass(cleanupTask.status)}`}>
               {statusLabel(cleanupTask.status)}

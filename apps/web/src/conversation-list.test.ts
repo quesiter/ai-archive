@@ -28,4 +28,15 @@ describe("buildConversationListSearch", () => {
     expect(buildConversationListSearch({ ...baseQuery, q: "history" })).not.toBe(initial);
     expect(buildConversationListSearch({ ...baseQuery, from: "2026-08-01" })).not.toBe(initial);
   });
+
+  it("treats the end date as inclusive by sending the next local midnight", () => {
+    const search = new URLSearchParams(buildConversationListSearch({
+      ...baseQuery,
+      from: "2026-08-01",
+      to: "2026-08-23",
+    }));
+    const from = new Date(search.get("from")!);
+    const to = new Date(search.get("to")!);
+    expect(to.getTime() - from.getTime()).toBe(23 * 86_400_000);
+  });
 });
