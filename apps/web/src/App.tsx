@@ -31,7 +31,7 @@ import {
 import { releaseNotes } from "./release-notes.js";
 
 type UnknownRecord = Record<string, any>;
-const WEB_VERSION = "V2.1.1";
+const WEB_VERSION = "V2.1.2";
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -270,7 +270,7 @@ function ChangelogPage() {
           <span>当前版本</span>
           <strong>{WEB_VERSION}</strong>
         </div>
-        <p>后续发布继续采用语义化版本：V2.1.1、V2.2.0……</p>
+        <p>后续发布继续采用语义化版本：V2.1.3、V2.2.0……</p>
       </section>
       <div className="release-timeline">
         {releaseNotes.map((note, index) => (

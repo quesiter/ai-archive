@@ -1,6 +1,6 @@
 # 知言归藏 V2.1 文档索引
 
-本文档集以当前 V2.1.1 服务端与 Web 源码、migration 0012、API、测试和 Compose 配置为准，只描述已经实现的能力。历史行为只在 CHANGELOG 中保留。
+本文档集以当前 V2.1.2 服务端与 Web 源码、migration 0012、API、测试和 Compose 配置为准，只描述已经实现的能力。历史行为只在 CHANGELOG 中保留。
 
 ## 文档
 
@@ -22,7 +22,7 @@
 
 | 组件 | 版本 |
 | --- | --- |
-| 服务端与 Web | V2.1.1 |
+| 服务端与 Web | V2.1.2 |
 | Chrome 插件 | V2.1.1 |
 | Windows/macOS 同步代理 | V2.1.0 |
 | 共享协议 | 2.1.0 |
@@ -49,4 +49,4 @@ pnpm build
 docker compose -f infra/docker-compose.yml config
 ~~~
 
-数据库迁移由 app 启动时执行，也可使用 pnpm db:migrate 手动运行。生产升级前必须先做业务备份，并验证 /healthz 返回 V2.1.1。
+数据库迁移由 app 启动时执行，也可使用 pnpm db:migrate 手动运行。生产升级前必须先做业务备份，并验证 /healthz 返回 V2.1.2。

@@ -40,7 +40,7 @@ describe("parseReleaseNotes", () => {
   it("shows the latest maintained changelog entry first", () => {
     expect(releaseNotes[0]).toMatchObject({
       date: "2026-08-23",
-      version: "V2.1.1",
+      version: "V2.1.2",
       title: "管理体验、任务恢复与检索统计完善",
     });
     expect(releaseNotes[0]?.body).toContain("Token 统计");
