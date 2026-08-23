@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildConversationListSearch, type ConversationListQuery } from "./conversation-list.js";
+import {
+  buildConversationListSearch,
+  countActiveConversationListFilters,
+  type ConversationListQuery,
+} from "./conversation-list.js";
 
 const baseQuery: ConversationListQuery = {
   limit: 100,
@@ -38,5 +42,17 @@ describe("buildConversationListSearch", () => {
     const from = new Date(search.get("from")!);
     const to = new Date(search.get("to")!);
     expect(to.getTime() - from.getTime()).toBe(23 * 86_400_000);
+  });
+
+  it("counts active filters without treating pagination as a filter", () => {
+    expect(countActiveConversationListFilters(baseQuery)).toBe(1);
+    expect(countActiveConversationListFilters({
+      ...baseQuery,
+      offset: 400,
+      source: "live",
+      tagIds: "tag-a,tag-b",
+      from: "2026-08-01",
+      to: "2026-08-23",
+    })).toBe(5);
   });
 });

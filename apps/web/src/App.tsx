@@ -23,7 +23,10 @@ import {
   type Provider,
 } from "@ai-archive/contracts";
 import { api, ApiError, jsonBody } from "./api.js";
-import { buildConversationListSearch } from "./conversation-list.js";
+import {
+  buildConversationListSearch,
+  countActiveConversationListFilters,
+} from "./conversation-list.js";
 import { releaseNotes } from "./release-notes.js";
 
 type UnknownRecord = Record<string, any>;
@@ -997,7 +1000,7 @@ function Conversations() {
   const limit = 100;
   const rawOffset = Number(searchParams.get("offset") ?? 0);
   const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.floor(rawOffset)) : 0;
-  const conversationSearch = buildConversationListSearch({
+  const conversationQuery = {
     limit,
     offset,
     q,
@@ -1009,7 +1012,8 @@ function Conversations() {
     tagIds,
     from,
     to,
-  });
+  };
+  const conversationSearch = buildConversationListSearch(conversationQuery);
   const state = useLoad(
     () =>
       api<UnknownRecord[]>(
@@ -1071,127 +1075,194 @@ function Conversations() {
     (sum, value) => sum + value,
     0,
   );
+  const activeFilterCount = countActiveConversationListFilters(conversationQuery);
+
+  function resetFilters() {
+    setSearchParams(new URLSearchParams());
+  }
 
   return (
     <>
       <PageHeader title="会话" subtitle="按 Session 自动去重的完整可见分支" />
-      <div className="toolbar compact-toolbar conversation-filter-toolbar">
-        <input
-          key={q}
-          placeholder="搜索全部会话…"
-          defaultValue={q}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              updateQuery({ q: event.currentTarget.value.trim(), offset: 0 });
-            }
-          }}
-        />
-        <select
-          value={provider}
-          onChange={(event) => updateQuery({ provider: event.target.value, offset: 0 })}
-        >
-          <option value="">全部平台（{formatCount(providerTotal)}）</option>
-          {Object.entries(providerLabels).map(([key]) => (
-            <option key={key} value={key}>
-              {providerLabelWithCount(key, providerCounts)}
-            </option>
-          ))}
-        </select>
-        <select
-          value={source}
-          onChange={(event) => updateQuery({ source: event.target.value, offset: 0 })}
-        >
-          <option value="">全部来源</option>
-          {Object.entries(sourceLabels).map(([key, label]) => (
-            <option key={key} value={key}>{label}</option>
-          ))}
-        </select>
-        <select
-          value={completeness}
-          onChange={(event) => updateQuery({ completeness: event.target.value, offset: 0 })}
-        >
-          <option value="">完整性</option>
-          <option value="complete">完整</option>
-          <option value="partial">不完整</option>
-        </select>
-        <select
-          value={captureMode}
-          onChange={(event) => updateQuery({ captureMode: event.target.value, offset: 0 })}
-        >
-          <option value="">采集模式</option>
-          <option value="full">完整</option>
-          <option value="append">增量</option>
-          <option value="import">导入</option>
-        </select>
-        <select
-          value={projectId}
-          onChange={(event) => updateQuery({ projectId: event.target.value, offset: 0 })}
-        >
-          <option value="">全部项目</option>
-          {(projectsState.data ?? []).filter(
-            (project) => !project.archived || project.id === projectId,
-          ).map((project) => (
-            <option key={project.id} value={project.id}>{project.name}</option>
-          ))}
-        </select>
-        <details className="tag-filter-popover">
-          <summary>标签{selectedTagIds.length ? `（${selectedTagIds.length}）` : ""}</summary>
-          <div>
-            {(tagsState.data ?? []).map((tag) => (
-              <label key={tag.id}>
-                <input
-                  type="checkbox"
-                  checked={selectedTagIds.includes(String(tag.id))}
-                  onChange={() => {
-                    const next = selectedTagIds.includes(String(tag.id))
-                      ? selectedTagIds.filter((id) => id !== String(tag.id))
-                      : [...selectedTagIds, String(tag.id)];
-                    updateQuery({ tagIds: next.join(","), offset: 0 });
-                  }}
-                />
-                {tag.name} ({tag.conversationCount ?? 0})
-              </label>
-            ))}
-            {selectedTagIds.length > 0 && (
-              <button className="ghost small" onClick={() => updateQuery({ tagIds: "", offset: 0 })}>清除标签</button>
-            )}
+      <section className="conversation-filter-panel" aria-label="会话筛选">
+        <div className="conversation-filter-grid">
+          <label className="conversation-filter-field conversation-filter-search">
+            <span>关键词</span>
+            <input
+              key={q}
+              aria-label="搜索全部会话"
+              placeholder="搜索标题、内容或 Session…"
+              defaultValue={q}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  updateQuery({ q: event.currentTarget.value.trim(), offset: 0 });
+                }
+              }}
+            />
+          </label>
+          <label className="conversation-filter-field">
+            <span>平台</span>
+            <select
+              value={provider}
+              onChange={(event) => updateQuery({ provider: event.target.value, offset: 0 })}
+            >
+              <option value="">全部平台（{formatCount(providerTotal)}）</option>
+              {Object.entries(providerLabels).map(([key]) => (
+                <option key={key} value={key}>
+                  {providerLabelWithCount(key, providerCounts)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="conversation-filter-field">
+            <span>来源</span>
+            <select
+              value={source}
+              onChange={(event) => updateQuery({ source: event.target.value, offset: 0 })}
+            >
+              <option value="">全部来源</option>
+              {Object.entries(sourceLabels).map(([key, label]) => (
+                <option key={key} value={key}>{label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="conversation-filter-field">
+            <span>完整性</span>
+            <select
+              value={completeness}
+              onChange={(event) => updateQuery({ completeness: event.target.value, offset: 0 })}
+            >
+              <option value="">全部状态</option>
+              <option value="complete">完整</option>
+              <option value="partial">不完整</option>
+            </select>
+          </label>
+          <label className="conversation-filter-field">
+            <span>采集方式</span>
+            <select
+              value={captureMode}
+              onChange={(event) => updateQuery({ captureMode: event.target.value, offset: 0 })}
+            >
+              <option value="">全部方式</option>
+              <option value="full">完整采集</option>
+              <option value="append">增量采集</option>
+              <option value="import">历史导入</option>
+            </select>
+          </label>
+          <label className="conversation-filter-field conversation-filter-project">
+            <span>项目</span>
+            <select
+              value={projectId}
+              onChange={(event) => updateQuery({ projectId: event.target.value, offset: 0 })}
+            >
+              <option value="">全部项目</option>
+              {(projectsState.data ?? []).filter(
+                (project) => !project.archived || project.id === projectId,
+              ).map((project) => (
+                <option key={project.id} value={project.id}>{project.name}</option>
+              ))}
+            </select>
+          </label>
+          <div className="conversation-filter-field conversation-filter-tags">
+            <span>标签</span>
+            <details className="tag-filter-popover">
+              <summary>
+                {selectedTagIds.length ? `已选 ${selectedTagIds.length} 个标签` : "全部标签"}
+              </summary>
+              <div className="tag-filter-menu">
+                <header>
+                  <strong>选择标签</strong>
+                  <span>可多选</span>
+                </header>
+                <div className="tag-filter-options">
+                  {(tagsState.data ?? []).map((tag) => (
+                    <label key={tag.id}>
+                      <input
+                        type="checkbox"
+                        checked={selectedTagIds.includes(String(tag.id))}
+                        onChange={() => {
+                          const next = selectedTagIds.includes(String(tag.id))
+                            ? selectedTagIds.filter((id) => id !== String(tag.id))
+                            : [...selectedTagIds, String(tag.id)];
+                          updateQuery({ tagIds: next.join(","), offset: 0 });
+                        }}
+                      />
+                      <span>{tag.name}</span>
+                      <small>{tag.conversationCount ?? 0}</small>
+                    </label>
+                  ))}
+                </div>
+                {selectedTagIds.length > 0 && (
+                  <button
+                    type="button"
+                    className="secondary small tag-filter-clear"
+                    onClick={() => updateQuery({ tagIds: "", offset: 0 })}
+                  >
+                    清除已选标签
+                  </button>
+                )}
+              </div>
+            </details>
           </div>
-        </details>
-        <div className="date-range-filter" aria-label="会话更新时间范围">
-          <strong>更新时间</strong>
-          <label>从<input
-            aria-label="更新时间起始日期"
-            type="date"
-            value={from}
-            onChange={(event) => updateQuery({ from: event.target.value, offset: 0 })}
-          /></label>
-          <label>至<input
-            aria-label="更新时间结束日期"
-            type="date"
-            value={to}
-            onChange={(event) => updateQuery({ to: event.target.value, offset: 0 })}
-          /></label>
         </div>
-        <div className="conversation-pagination">
-          <span className="toolbar-count">
-            {state.loading ? "加载中" : `第 ${pageStart}-${pageEnd} 条`}
-          </span>
-          <button
-            className="secondary small"
-            disabled={offset <= 0}
-            onClick={() => updateQuery({ offset: Math.max(0, offset - limit) })}
-          >
-            上一页
-          </button>
-          <button
-            className="secondary small"
-            disabled={!hasNextPage}
-            onClick={() => updateQuery({ offset: offset + limit })}
-          >
-            下一页
-          </button>
+        <div className="conversation-filter-footer">
+          <div className="conversation-date-filter" aria-label="会话更新时间范围">
+            <span className="conversation-filter-label">更新时间</span>
+            <label>
+              <span>从</span>
+              <input
+                aria-label="更新时间起始日期"
+                type="date"
+                value={from}
+                onChange={(event) => updateQuery({ from: event.target.value, offset: 0 })}
+              />
+            </label>
+            <label>
+              <span>至</span>
+              <input
+                aria-label="更新时间结束日期"
+                type="date"
+                value={to}
+                onChange={(event) => updateQuery({ to: event.target.value, offset: 0 })}
+              />
+            </label>
+          </div>
+          <div className="conversation-filter-actions">
+            <span className="conversation-filter-summary">
+              {activeFilterCount ? `已启用 ${activeFilterCount} 项筛选` : "当前显示全部会话"}
+            </span>
+            <button
+              type="button"
+              className="secondary small conversation-filter-reset"
+              disabled={!activeFilterCount}
+              onClick={resetFilters}
+            >
+              重置筛选
+            </button>
+            <div className="conversation-pagination">
+              <span className="toolbar-count">
+                {state.loading ? "加载中" : `第 ${pageStart}-${pageEnd} 条`}
+              </span>
+              <button
+                type="button"
+                className="secondary small"
+                disabled={offset <= 0}
+                onClick={() => updateQuery({ offset: Math.max(0, offset - limit) })}
+              >
+                上一页
+              </button>
+              <button
+                type="button"
+                className="secondary small"
+                disabled={!hasNextPage}
+                onClick={() => updateQuery({ offset: offset + limit })}
+              >
+                下一页
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
+      </section>
       {state.loading ? (
         <Loading />
       ) : state.error ? (

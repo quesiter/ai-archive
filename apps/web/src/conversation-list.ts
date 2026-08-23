@@ -12,6 +12,22 @@ export type ConversationListQuery = {
   to: string;
 };
 
+const conversationListFilterKeys = [
+  "q",
+  "provider",
+  "source",
+  "completeness",
+  "captureMode",
+  "projectId",
+  "tagIds",
+  "from",
+  "to",
+] as const;
+
+export function countActiveConversationListFilters(query: ConversationListQuery): number {
+  return conversationListFilterKeys.filter((key) => Boolean(query[key])).length;
+}
+
 function dateParamToIso(value: string): string {
   if (!value) return "";
   const date = new Date(`${value}T00:00:00`);
