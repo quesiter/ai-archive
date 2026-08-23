@@ -7,6 +7,7 @@ import type {
   CaptureTriggerReason,
   MessageRole,
   MessageSegment,
+  TokenUsage,
 } from "@ai-archive/contracts";
 
 const CODEX_TOOL_ARGUMENT_LIMIT = 1_200;
@@ -16,8 +17,8 @@ const TOOL_JSON_DEPTH_LIMIT = 6;
 const TOOL_JSON_ARRAY_LIMIT = 40;
 const TOOL_JSON_OBJECT_KEY_LIMIT = 80;
 const TOOL_JSON_STRING_LIMIT = 2_000;
-const OPENCLAW_ADAPTER_VERSION = "openclaw-jsonl-v2";
-const CODEX_ADAPTER_VERSION = "codex-jsonl-v4";
+const OPENCLAW_ADAPTER_VERSION = "openclaw-jsonl-v3";
+const CODEX_ADAPTER_VERSION = "codex-jsonl-v5";
 const CLAUDE_CODE_ADAPTER_VERSION = "claude-code-jsonl-v2";
 const ANSI_ESCAPE_PATTERN = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 const UNSUPPORTED_CONTROL_PATTERN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
@@ -106,11 +107,205 @@ function text(value: unknown): string {
   return "";
 }
 
+function nonnegativeInteger(...values: unknown[]): number {
+  for (const value of values) {
+    const parsed =
+      typeof value === "number"
+        ? value
+        : typeof value === "string" && value.trim()
+          ? Number(value)
+          : Number.NaN;
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return Math.min(Number.MAX_SAFE_INTEGER, Math.floor(parsed));
+    }
+  }
+  return 0;
+}
+
+function normalizedTokenUsage(
+  value: unknown,
+  scope: TokenUsage["scope"],
+): TokenUsage | null {
+  if (!value || typeof value !== "object") return null;
+  const usage = value as Record<string, unknown>;
+  const outputDetails =
+    usage.output_tokens_details && typeof usage.output_tokens_details === "object"
+      ? (usage.output_tokens_details as Record<string, unknown>)
+      : undefined;
+  const inputTokens = nonnegativeInteger(
+    usage.inputTokens,
+    usage.input_tokens,
+    usage.promptTokens,
+    usage.prompt_tokens,
+    usage.input,
+  );
+  const cachedInputTokens = nonnegativeInteger(
+    usage.cachedInputTokens,
+    usage.cached_input_tokens,
+    usage.cacheReadTokens,
+    usage.cache_read_tokens,
+    usage.cacheRead,
+    usage.cache_read,
+  );
+  const cacheWriteInputTokens = nonnegativeInteger(
+    usage.cacheWriteInputTokens,
+    usage.cache_write_input_tokens,
+    usage.cacheWriteTokens,
+    usage.cache_write_tokens,
+    usage.cacheWrite,
+    usage.cache_write,
+  );
+  const outputTokens = nonnegativeInteger(
+    usage.outputTokens,
+    usage.output_tokens,
+    usage.completionTokens,
+    usage.completion_tokens,
+    usage.output,
+  );
+  const reasoningOutputTokens = nonnegativeInteger(
+    usage.reasoningOutputTokens,
+    usage.reasoning_output_tokens,
+    usage.reasoningTokens,
+    usage.reasoning_tokens,
+    outputDetails?.reasoning_tokens,
+  );
+  const reportedTotal = nonnegativeInteger(
+    usage.totalTokens,
+    usage.total_tokens,
+    usage.total,
+  );
+  const totalTokens =
+    reportedTotal ||
+    inputTokens + cachedInputTokens + cacheWriteInputTokens + outputTokens;
+  return {
+    scope,
+    inputTokens,
+    cachedInputTokens,
+    cacheWriteInputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    totalTokens,
+  };
+}
+
+function addTokenUsage(
+  left: TokenUsage | null,
+  right: TokenUsage | null,
+  scope: TokenUsage["scope"],
+): TokenUsage | null {
+  if (!left) return right ? { ...right, scope } : null;
+  if (!right) return { ...left, scope };
+  return {
+    scope,
+    inputTokens: left.inputTokens + right.inputTokens,
+    cachedInputTokens: left.cachedInputTokens + right.cachedInputTokens,
+    cacheWriteInputTokens:
+      left.cacheWriteInputTokens + right.cacheWriteInputTokens,
+    outputTokens: left.outputTokens + right.outputTokens,
+    reasoningOutputTokens:
+      left.reasoningOutputTokens + right.reasoningOutputTokens,
+    totalTokens: left.totalTokens + right.totalTokens,
+  };
+}
+
+function openClawTokenUsage(
+  records: Array<Record<string, unknown>>,
+  scope: TokenUsage["scope"],
+): TokenUsage | null {
+  let result: TokenUsage | null = null;
+  for (const record of records) {
+    const nested =
+      record.message && typeof record.message === "object"
+        ? (record.message as Record<string, unknown>)
+        : record;
+    result = addTokenUsage(
+      result,
+      normalizedTokenUsage(nested.usage ?? record.usage, "incremental"),
+      scope,
+    );
+  }
+  return result;
+}
+
+function codexTokenUsage(
+  records: Array<Record<string, unknown>>,
+): TokenUsage | null {
+  let latest: TokenUsage | null = null;
+  for (const record of records) {
+    if (record.type !== "event_msg") continue;
+    const payload =
+      record.payload && typeof record.payload === "object"
+        ? (record.payload as Record<string, unknown>)
+        : undefined;
+    if (payload?.type !== "token_count") continue;
+    const info =
+      payload.info && typeof payload.info === "object"
+        ? (payload.info as Record<string, unknown>)
+        : undefined;
+    latest =
+      normalizedTokenUsage(info?.total_token_usage, "cumulative") ?? latest;
+  }
+  return latest;
+}
+
+function structuredContentSegments(value: unknown): {
+  text: string;
+  reasoning: string;
+  tool: string;
+} {
+  if (!Array.isArray(value)) {
+    return { text: text(value), reasoning: "", tool: "" };
+  }
+  const textParts: string[] = [];
+  const reasoningParts: string[] = [];
+  const toolParts: string[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") {
+      const content = text(item);
+      if (content) textParts.push(content);
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    const type = String(record.type ?? "").toLowerCase();
+    if (["thinking", "reasoning", "analysis"].includes(type)) {
+      const content = text(
+        record.thinking ?? record.reasoning ?? record.text ?? record.content,
+      );
+      if (content) reasoningParts.push(content);
+      continue;
+    }
+    if (
+      ["toolcall", "tool_call", "tooluse", "tool_use", "toolresult", "tool_result"].includes(
+        type,
+      )
+    ) {
+      const content = [
+        text(record.name) && `tool: ${text(record.name)}`,
+        text(record.input ?? record.arguments),
+        text(record.result ?? record.output ?? record.content),
+      ]
+        .filter(Boolean)
+        .join("\n");
+      if (content) toolParts.push(content);
+      continue;
+    }
+    const content = text(
+      record.text ?? record.content ?? record.output ?? record.result,
+    );
+    if (content) textParts.push(content);
+  }
+  return {
+    text: textParts.join("\n"),
+    reasoning: reasoningParts.join("\n"),
+    tool: toolParts.join("\n"),
+  };
+}
+
 function normalizeRole(value: unknown, type: unknown): MessageRole {
   const candidate = `${typeof value === "string" ? value : ""} ${typeof type === "string" ? type : ""}`.toLowerCase();
   if (/\b(user|human|input)\b/.test(candidate)) return "user";
   if (/\b(assistant|model|agent|output)\b/.test(candidate)) return "assistant";
-  if (/(^|[\s_-])(tool|function)([\s_-]|$)/.test(candidate)) return "tool";
+  if (/(^|[\s_-])(tool|function)([\s_-]|$)|\b(toolresult|tooluse|toolcall)\b/.test(candidate)) return "tool";
   if (/\b(system)\b/.test(candidate)) return "system";
   return "unknown";
 }
@@ -168,17 +363,25 @@ function messageFromRecord(
     record.type ?? nested.type,
   );
   const segments: MessageSegment[] = [];
-  const main = text(nested.content ?? nested.text ?? nested.message);
-  const reasoning = text(nested.reasoning ?? nested.reasoning_content ?? record.reasoning);
+  const structured = structuredContentSegments(nested.content);
+  const main = [structured.text, text(nested.text ?? nested.message)]
+    .filter(Boolean)
+    .join("\n");
+  const reasoning = [
+    structured.reasoning,
+    text(nested.reasoning ?? nested.reasoning_content ?? record.reasoning),
+  ]
+    .filter(Boolean)
+    .join("\n");
   const toolName = text(nested.toolName ?? nested.tool_name ?? record.toolName);
   const toolInput = text(nested.toolInput ?? nested.tool_input ?? record.toolInput);
   const toolResult = text(nested.toolResult ?? nested.tool_result ?? record.toolResult);
   if (main) segments.push({ type: "text", content: main });
   if (reasoning) segments.push({ type: "reasoning", content: reasoning });
-  if (toolName || toolInput || toolResult) {
+  if (structured.tool || toolName || toolInput || toolResult) {
     segments.push({
       type: "tool_status",
-      content: [toolName && `tool: ${toolName}`, toolInput, toolResult]
+      content: [structured.tool, toolName && `tool: ${toolName}`, toolInput, toolResult]
         .filter(Boolean)
         .join("\n"),
     });
@@ -242,6 +445,7 @@ export function parseOpenClawJsonl(input: {
     .filter((message): message is CaptureMessage => Boolean(message))
     .map((message, ordinal) => ({ ...message, ordinal }));
   if (!messages.length) throw new EmptyOpenClawTranscriptError(sessionId);
+  const tokenUsage = openClawTokenUsage(records, "cumulative");
   const fingerprint = createHash("sha256")
     .update(
       messages
@@ -262,6 +466,7 @@ export function parseOpenClawJsonl(input: {
     capturedAt: (input.capturedAt ?? new Date()).toISOString(),
     captureMode: "import",
     triggerReason: "local_file_rewritten",
+    ...(tokenUsage ? { tokenUsage } : {}),
     completeness: {
       status: trailingPartial ? "partial" : "complete",
       topReached: true,
@@ -464,6 +669,17 @@ function codexMessageFromPayload(
     };
   }
 
+  if (type === "reasoning") {
+    const content = contentItemsText(payload.summary ?? payload.content).trim();
+    if (!content) return null;
+    return {
+      ordinal,
+      role: "assistant",
+      ...(isoDate(timestamp) ? { createdAt: isoDate(timestamp)! } : {}),
+      segments: [{ type: "reasoning", content }],
+    };
+  }
+
   if (type === "function_call" || type === "custom_tool_call") {
     const name = text(payload.name || type);
     const input = conciseJson(
@@ -535,6 +751,7 @@ export function parseCodexRecords(input: {
         .join("\n"),
     )
     .digest("hex");
+  const tokenUsage = codexTokenUsage(input.records);
   return {
     schemaVersion: 1,
     provider: "codex",
@@ -545,6 +762,7 @@ export function parseCodexRecords(input: {
     capturedAt: (input.capturedAt ?? new Date()).toISOString(),
     captureMode: "import",
     triggerReason: "local_file_rewritten",
+    ...(tokenUsage ? { tokenUsage } : {}),
     completeness: {
       status: input.trailingPartial ? "partial" : "complete",
       topReached: true,
@@ -662,7 +880,11 @@ export function parseLocalJsonlDelta(input: {
       ordinal: input.base.messageCount + index,
     }));
 
-  if (!messages.length) return null;
+  const tokenUsage =
+    input.provider === "codex"
+      ? codexTokenUsage(parsed.records)
+      : openClawTokenUsage(parsed.records, "incremental");
+  if (!messages.length && !tokenUsage) return null;
   return {
     schemaVersion: 1,
     captureMode: "append",
@@ -677,6 +899,7 @@ export function parseLocalJsonlDelta(input: {
           : OPENCLAW_ADAPTER_VERSION,
     capturedAt: (input.capturedAt ?? new Date()).toISOString(),
     triggerReason: input.triggerReason ?? "local_file_appended",
+    ...(tokenUsage ? { tokenUsage } : {}),
     ...(input.base.revisionId ? { baseRevisionId: input.base.revisionId } : {}),
     baseMessageCount: input.base.messageCount,
     ...(input.base.lastMessageId ? { baseLastMessageId: input.base.lastMessageId } : {}),

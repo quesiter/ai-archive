@@ -1,4 +1,5 @@
 import {
+  bigint,
   boolean,
   doublePrecision,
   index,
@@ -119,6 +120,29 @@ export const conversationRevisions = pgTable(
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
     messageCount: integer("message_count").notNull(),
     searchText: text("search_text").notNull(),
+    archivedTextUnits: bigint("archived_text_units", { mode: "number" })
+      .notNull()
+      .default(0),
+    reasoningTextUnits: bigint("reasoning_text_units", { mode: "number" })
+      .notNull()
+      .default(0),
+    toolTextUnits: bigint("tool_text_units", { mode: "number" })
+      .notNull()
+      .default(0),
+    reportedInputTokens: bigint("reported_input_tokens", { mode: "number" }),
+    reportedCachedInputTokens: bigint("reported_cached_input_tokens", {
+      mode: "number",
+    }),
+    reportedCacheWriteInputTokens: bigint(
+      "reported_cache_write_input_tokens",
+      { mode: "number" },
+    ),
+    reportedOutputTokens: bigint("reported_output_tokens", { mode: "number" }),
+    reportedReasoningOutputTokens: bigint(
+      "reported_reasoning_output_tokens",
+      { mode: "number" },
+    ),
+    reportedTotalTokens: bigint("reported_total_tokens", { mode: "number" }),
     createdAt,
   },
   (table) => [

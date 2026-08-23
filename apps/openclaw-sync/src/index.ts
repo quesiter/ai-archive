@@ -366,7 +366,14 @@ async function parseCodexJsonlFile(source: TranscriptSource, capturedAt: Date) {
       const parsed = JSON.parse(line) as unknown;
       if (parsed && typeof parsed === "object") {
         const record = parsed as Record<string, unknown>;
-        if (record.type === "session_meta" || record.type === "response_item") {
+        if (
+          record.type === "session_meta" ||
+          record.type === "response_item" ||
+          (record.type === "event_msg" &&
+            record.payload &&
+            typeof record.payload === "object" &&
+            (record.payload as Record<string, unknown>).type === "token_count")
+        ) {
           records.push(record);
         }
       }
@@ -540,8 +547,10 @@ function stateFromDelta(input: {
     messageCount:
       input.result.messageCount ??
       input.delta.baseMessageCount + input.delta.appendedMessages.length,
-    lastMessageId: lastMessage?.externalMessageId,
-    lastMessageTextHash: lastMessage ? captureMessageFingerprint(lastMessage) : undefined,
+    lastMessageId: lastMessage?.externalMessageId ?? input.previous.lastMessageId,
+    lastMessageTextHash: lastMessage
+      ? captureMessageFingerprint(lastMessage)
+      : input.previous.lastMessageTextHash,
     lastSuccessfulSyncAt: new Date().toISOString(),
   };
 }

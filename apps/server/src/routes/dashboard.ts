@@ -14,8 +14,43 @@ import {
   tags,
 } from "../schema.js";
 
-function textUnitCount(value: string): number {
-  return Array.from(value).length;
+type DashboardTokenStatsRow = {
+  text_units?: number | string | null;
+  reasoning_text_units?: number | string | null;
+  tool_text_units?: number | string | null;
+  reported_tokens?: number | string | null;
+  reported_reasoning_tokens?: number | string | null;
+  fallback_estimated_tokens?: number | string | null;
+  model_tokens?: number | string | null;
+  usage_backed_conversations?: number | string | null;
+  fallback_conversations?: number | string | null;
+};
+
+function nonnegativeNumber(value: number | string | null | undefined): number {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+export function dashboardTokenStatsFromRow(
+  row: DashboardTokenStatsRow | undefined,
+) {
+  return {
+    textUnits: nonnegativeNumber(row?.text_units),
+    reasoningTextUnits: nonnegativeNumber(row?.reasoning_text_units),
+    toolTextUnits: nonnegativeNumber(row?.tool_text_units),
+    reportedTokens: nonnegativeNumber(row?.reported_tokens),
+    reportedReasoningTokens: nonnegativeNumber(
+      row?.reported_reasoning_tokens,
+    ),
+    fallbackEstimatedTokens: nonnegativeNumber(
+      row?.fallback_estimated_tokens,
+    ),
+    estimatedTokens: nonnegativeNumber(row?.model_tokens),
+    usageBackedConversationCount: nonnegativeNumber(
+      row?.usage_backed_conversations,
+    ),
+    fallbackConversationCount: nonnegativeNumber(row?.fallback_conversations),
+  };
 }
 
 export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
@@ -33,6 +68,7 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
       assignmentRows,
       projectTagRows,
       latestRevisionRows,
+      tokenStatRows,
     ] =
       await Promise.all([
         db
@@ -94,7 +130,6 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
         db
           .select({
             conversationId: conversationRevisions.conversationId,
-            searchText: conversationRevisions.searchText,
             messageCount: conversationRevisions.messageCount,
           })
           .from(conversationRevisions)
@@ -109,6 +144,103 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
             desc(conversationRevisions.capturedAt),
             desc(conversationRevisions.createdAt),
           ),
+        db.execute(sql`
+          WITH RECURSIVE ranked_revisions AS (
+            SELECT
+              revision.id,
+              revision.conversation_id,
+              revision.base_revision_id,
+              revision.archived_text_units,
+              revision.reasoning_text_units,
+              revision.tool_text_units,
+              revision.reported_reasoning_output_tokens,
+              revision.reported_total_tokens,
+              row_number() OVER (
+                PARTITION BY revision.conversation_id
+                ORDER BY
+                  (revision.completeness = 'complete') DESC,
+                  revision.captured_at DESC,
+                  revision.created_at DESC
+              ) AS rank
+            FROM conversation_revisions revision
+            INNER JOIN conversations conversation
+              ON conversation.id = revision.conversation_id
+            WHERE conversation.deleted_at IS NULL
+          ),
+          canonical_revisions AS (
+            SELECT * FROM ranked_revisions WHERE rank = 1
+          ),
+          revision_chain AS (
+            SELECT
+              canonical.conversation_id,
+              canonical.id AS canonical_revision_id,
+              canonical.id AS revision_id,
+              canonical.base_revision_id,
+              canonical.archived_text_units,
+              canonical.reasoning_text_units,
+              canonical.tool_text_units,
+              ARRAY[canonical.id]::uuid[] AS visited
+            FROM canonical_revisions canonical
+            UNION ALL
+            SELECT
+              chain.conversation_id,
+              chain.canonical_revision_id,
+              base.id,
+              base.base_revision_id,
+              base.archived_text_units,
+              base.reasoning_text_units,
+              base.tool_text_units,
+              chain.visited || base.id
+            FROM revision_chain chain
+            INNER JOIN conversation_revisions base
+              ON base.id = chain.base_revision_id
+            WHERE
+              NOT base.id = ANY(chain.visited)
+              AND cardinality(chain.visited) < 10000
+          ),
+          chain_totals AS (
+            SELECT
+              chain.conversation_id,
+              COALESCE(sum(chain.archived_text_units), 0) AS text_units,
+              COALESCE(sum(chain.reasoning_text_units), 0) AS reasoning_text_units,
+              COALESCE(sum(chain.tool_text_units), 0) AS tool_text_units
+            FROM revision_chain chain
+            GROUP BY chain.conversation_id
+          ),
+          conversation_stats AS (
+            SELECT
+              canonical.conversation_id,
+              COALESCE(chain.text_units, 0) AS text_units,
+              COALESCE(chain.reasoning_text_units, 0) AS reasoning_text_units,
+              COALESCE(chain.tool_text_units, 0) AS tool_text_units,
+              canonical.reported_reasoning_output_tokens,
+              canonical.reported_total_tokens,
+              CASE
+                WHEN canonical.reported_total_tokens IS NOT NULL
+                  THEN canonical.reported_total_tokens
+                ELSE ceil(COALESCE(chain.text_units, 0) / 1.7)
+              END AS model_tokens
+            FROM canonical_revisions canonical
+            LEFT JOIN chain_totals chain
+              ON chain.conversation_id = canonical.conversation_id
+          )
+          SELECT
+            COALESCE(sum(text_units), 0) AS text_units,
+            COALESCE(sum(reasoning_text_units), 0) AS reasoning_text_units,
+            COALESCE(sum(tool_text_units), 0) AS tool_text_units,
+            COALESCE(sum(reported_total_tokens), 0) AS reported_tokens,
+            COALESCE(sum(reported_reasoning_output_tokens), 0)
+              AS reported_reasoning_tokens,
+            COALESCE(sum(
+              CASE WHEN reported_total_tokens IS NULL THEN model_tokens ELSE 0 END
+            ), 0) AS fallback_estimated_tokens,
+            COALESCE(sum(model_tokens), 0) AS model_tokens,
+            count(*) FILTER (WHERE reported_total_tokens IS NOT NULL)
+              AS usage_backed_conversations,
+            count(*) FILTER (WHERE reported_total_tokens IS NULL)
+              AS fallback_conversations
+          FROM conversation_stats
+        `),
       ]);
 
     const captures24h = await db
@@ -189,18 +321,18 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
         category.latestActivityAt = new Date(latestTime).toISOString();
       }
     }
-    const textRevisionIds = new Set<string>();
-    let textUnits = 0;
+    const latestConversationIds = new Set<string>();
     let latestRevisionCount = 0;
     let latestMessageCount = 0;
     for (const revision of latestRevisionRows) {
-      if (textRevisionIds.has(revision.conversationId)) continue;
-      textRevisionIds.add(revision.conversationId);
+      if (latestConversationIds.has(revision.conversationId)) continue;
+      latestConversationIds.add(revision.conversationId);
       latestRevisionCount += 1;
       latestMessageCount += revision.messageCount ?? 0;
-      textUnits += textUnitCount(revision.searchText ?? "");
     }
-    const estimatedTokens = Math.ceil(textUnits / 1.7);
+    const textStats = dashboardTokenStatsFromRow(
+      (tokenStatRows as unknown as DashboardTokenStatsRow[])[0],
+    );
     const sortedCategoryStats = categoryStats.sort(
       (left, right) =>
         right.conversationCount - left.conversationCount ||
@@ -216,11 +348,10 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
         devices: deviceCount?.value ?? 0,
       },
       textStats: {
-        textUnits,
-        estimatedTokens,
+        ...textStats,
         latestRevisionCount,
         latestMessageCount,
-        tokenEstimateRule: "按 1 token≈1.7 个字符粗估",
+        tokenEstimateRule: "源端 usage 优先；其余含思考与工具过程估算",
       },
       categoryTotals: {
         activeCategoryCount: sortedCategoryStats.filter(

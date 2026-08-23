@@ -139,6 +139,40 @@ describe("incremental capture validation", () => {
     });
   });
 
+  it("merges incremental usage into the base cumulative total", async () => {
+    const { cumulativeTokenUsage } = await import("../src/services/capture.js");
+    expect(
+      cumulativeTokenUsage({
+        base: {
+          scope: "cumulative",
+          inputTokens: 100,
+          cachedInputTokens: 50,
+          cacheWriteInputTokens: 10,
+          outputTokens: 20,
+          reasoningOutputTokens: 5,
+          totalTokens: 180,
+        },
+        next: {
+          scope: "incremental",
+          inputTokens: 40,
+          cachedInputTokens: 30,
+          cacheWriteInputTokens: 0,
+          outputTokens: 10,
+          reasoningOutputTokens: 3,
+          totalTokens: 80,
+        },
+      }),
+    ).toEqual({
+      scope: "cumulative",
+      inputTokens: 140,
+      cachedInputTokens: 80,
+      cacheWriteInputTokens: 10,
+      outputTokens: 30,
+      reasoningOutputTokens: 8,
+      totalTokens: 260,
+    });
+  });
+
   it("redacts secrets from captured content and URLs before hashing or storage", async () => {
     const { sanitizeCapturePayloadForStorage } = await import(
       "../src/services/capture.js"
@@ -188,6 +222,7 @@ describe("incremental capture validation", () => {
       databaseSafeSegmentContent,
       REVISION_SEARCH_TEXT_LIMIT,
       REVISION_SEARCH_TEXT_MESSAGE_LIMIT,
+      storedMessageTextStats,
     } = await import("../src/services/capture.js");
     const largeMessages: CaptureMessage[] = [
       {
@@ -227,6 +262,23 @@ describe("incremental capture validation", () => {
     });
     expect(safeToolText).toBe("Finding: ENCRYPTION_KEY=REDACTEDdone");
     expect(safeToolText).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/);
+    expect(
+      storedMessageTextStats([
+        {
+          ordinal: 0,
+          role: "assistant",
+          segments: [
+            { type: "text", content: "正文😀" },
+            { type: "reasoning", content: "思考" },
+          ],
+        },
+        {
+          ordinal: 1,
+          role: "tool",
+          segments: [{ type: "text", content: "结果" }],
+        },
+      ]),
+    ).toEqual({ textUnits: 7, reasoningTextUnits: 2, toolTextUnits: 2 });
   });
 
   it("keeps Codex import search text small enough for trigram indexing", async () => {

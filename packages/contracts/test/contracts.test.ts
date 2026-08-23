@@ -115,4 +115,54 @@ describe("CaptureSnapshotV1", () => {
 
     expect(result.success).toBe(false);
   });
+
+  it("accepts usage-only append metadata and rejects incremental snapshot usage", () => {
+    const usage = {
+      scope: "cumulative" as const,
+      inputTokens: 900,
+      cachedInputTokens: 700,
+      cacheWriteInputTokens: 0,
+      outputTokens: 100,
+      reasoningOutputTokens: 40,
+      totalTokens: 1_000,
+    };
+    const delta = CaptureDeltaV1Schema.safeParse({
+      schemaVersion: 1,
+      captureMode: "append",
+      provider: "codex",
+      sessionId: "session-usage",
+      branchFingerprint: "12345678",
+      adapterVersion: "codex-jsonl-v5",
+      capturedAt: new Date().toISOString(),
+      baseMessageCount: 2,
+      baseLastMessageTextHash: "a".repeat(64),
+      tokenUsage: usage,
+      appendedMessages: [],
+    });
+    expect(delta.success).toBe(true);
+
+    const snapshot = CaptureSnapshotV1Schema.safeParse({
+      schemaVersion: 1,
+      provider: "codex",
+      sessionId: "session-usage",
+      branchFingerprint: "12345678",
+      adapterVersion: "codex-jsonl-v5",
+      capturedAt: new Date().toISOString(),
+      tokenUsage: { ...usage, scope: "incremental" },
+      completeness: {
+        status: "complete",
+        topReached: true,
+        bottomReached: true,
+        stable: true,
+      },
+      messages: [
+        {
+          ordinal: 0,
+          role: "user",
+          segments: [{ type: "text", content: "hello" }],
+        },
+      ],
+    });
+    expect(snapshot.success).toBe(false);
+  });
 });

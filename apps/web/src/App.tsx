@@ -603,14 +603,18 @@ function Dashboard() {
           <small>未归类 {formatCount(categoryTotals.unclassifiedConversationCount)}</small>
         </article>
         <article className="metric">
-          <span>文本量</span>
+          <span>归档文本量</span>
           <strong>{formatCompactCount(textStats.textUnits)}</strong>
-          <small>按一个汉字为一个单位</small>
+          <small>含正文、思考与工具过程</small>
         </article>
         <article className="metric">
-          <span>估算 token</span>
+          <span>模型 token</span>
           <strong>{formatCompactCount(textStats.estimatedTokens)}</strong>
-          <small>{textStats.tokenEstimateRule ?? "粗略估算"}</small>
+          <small>
+            {toFiniteNumber(textStats.usageBackedConversationCount) > 0
+              ? `源端 usage ${formatCount(textStats.usageBackedConversationCount)} 个会话；其余含过程估算`
+              : (textStats.tokenEstimateRule ?? "含思考与工具过程估算")}
+          </small>
         </article>
         <article className="metric">
           <span>标签</span>

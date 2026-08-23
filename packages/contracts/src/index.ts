@@ -135,6 +135,27 @@ export const CaptureTriggerReasonSchema = z.enum([
 ]);
 export type CaptureTriggerReason = z.infer<typeof CaptureTriggerReasonSchema>;
 
+const TokenCountSchema = z
+  .number()
+  .int()
+  .nonnegative()
+  .max(Number.MAX_SAFE_INTEGER);
+
+/**
+ * Normalized model-provider usage. Snapshot values cover the whole source
+ * session; append captures may carry either a cumulative value or a delta.
+ */
+export const TokenUsageSchema = z.object({
+  scope: z.enum(["cumulative", "incremental"]),
+  inputTokens: TokenCountSchema,
+  cachedInputTokens: TokenCountSchema,
+  cacheWriteInputTokens: TokenCountSchema,
+  outputTokens: TokenCountSchema,
+  reasoningOutputTokens: TokenCountSchema,
+  totalTokens: TokenCountSchema,
+});
+export type TokenUsage = z.infer<typeof TokenUsageSchema>;
+
 export const CaptureSnapshotV1Schema = z
   .object({
     schemaVersion: z.literal(1),
@@ -147,6 +168,7 @@ export const CaptureSnapshotV1Schema = z
     capturedAt: z.string().datetime({ offset: true }),
     captureMode: CaptureModeSchema.default("full"),
     triggerReason: CaptureTriggerReasonSchema.optional(),
+    tokenUsage: TokenUsageSchema.optional(),
     baseRevisionId: z.string().uuid().optional(),
     baseMessageCount: z.number().int().nonnegative().optional(),
     baseLastMessageId: z.string().min(1).max(512).optional(),
@@ -155,6 +177,13 @@ export const CaptureSnapshotV1Schema = z
     messages: z.array(CaptureMessageSchema).min(1).max(100_000),
   })
   .superRefine((snapshot, context) => {
+    if (snapshot.tokenUsage?.scope === "incremental") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["tokenUsage", "scope"],
+        message: "snapshot token usage must be cumulative",
+      });
+    }
     const ordinals = snapshot.messages.map((message) => message.ordinal);
     if (new Set(ordinals).size !== ordinals.length) {
       context.addIssue({
@@ -199,13 +228,21 @@ export const CaptureDeltaV1Schema = z
     adapterVersion: z.string().min(1).max(64),
     capturedAt: z.string().datetime({ offset: true }),
     triggerReason: CaptureTriggerReasonSchema.default("new_messages"),
+    tokenUsage: TokenUsageSchema.optional(),
     baseRevisionId: z.string().uuid().optional(),
     baseMessageCount: z.number().int().positive(),
     baseLastMessageId: z.string().min(1).max(512).optional(),
     baseLastMessageTextHash: z.string().min(16).max(128).optional(),
-    appendedMessages: z.array(CaptureMessageSchema).min(1).max(10_000),
+    appendedMessages: z.array(CaptureMessageSchema).max(10_000),
   })
   .superRefine((delta, context) => {
+    if (!delta.appendedMessages.length && !delta.tokenUsage) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["appendedMessages"],
+        message: "append captures require new messages or token usage",
+      });
+    }
     if (!delta.baseLastMessageId && !delta.baseLastMessageTextHash) {
       context.addIssue({
         code: z.ZodIssueCode.custom,

@@ -26,6 +26,55 @@ describe("OpenClaw JSONL parser", () => {
     expect(snapshot.completeness.status).toBe("complete");
   });
 
+  it("captures structured thinking and provider-reported usage", () => {
+    const snapshot = parseOpenClawJsonl({
+      path: "/Users/me/.openclaw/agents/main/sessions/session-usage.jsonl",
+      content: [
+        JSON.stringify({ type: "session", id: "session-usage" }),
+        JSON.stringify({
+          type: "message",
+          message: { role: "user", content: [{ type: "text", text: "question" }] },
+        }),
+        JSON.stringify({
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "private plan" },
+              { type: "text", text: "answer" },
+              { type: "toolCall", name: "search", input: { q: "docs" } },
+            ],
+            usage: {
+              input: 120,
+              output: 30,
+              cacheRead: 80,
+              cacheWrite: 10,
+              total: 240,
+            },
+          },
+        }),
+      ].join("\n"),
+    });
+
+    expect(snapshot.adapterVersion).toBe("openclaw-jsonl-v3");
+    expect(snapshot.messages[1]?.segments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "text", content: "answer" }),
+        expect.objectContaining({ type: "reasoning", content: "private plan" }),
+        expect.objectContaining({ type: "tool_status" }),
+      ]),
+    );
+    expect(snapshot.tokenUsage).toEqual({
+      scope: "cumulative",
+      inputTokens: 120,
+      cachedInputTokens: 80,
+      cacheWriteInputTokens: 10,
+      outputTokens: 30,
+      reasoningOutputTokens: 0,
+      totalTokens: 240,
+    });
+  });
+
   it("uses the session record ID when OpenClaw calls it id", () => {
     const snapshot = parseOpenClawJsonl({
       path: "/Users/me/.openclaw/agents/main/sessions/rotated-file.jsonl",
@@ -87,6 +136,15 @@ describe("Codex JSONL parser", () => {
         JSON.stringify({
           timestamp: "2026-07-24T14:00:02Z",
           type: "response_item",
+          payload: {
+            type: "reasoning",
+            summary: [{ type: "summary_text", text: "Inspect the source tree" }],
+            encrypted_content: "not-archived",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-24T14:00:02Z",
+          type: "response_item",
           payload: { type: "function_call", name: "shell_command", arguments: { command: "ls" } },
         }),
         JSON.stringify({
@@ -98,18 +156,50 @@ describe("Codex JSONL parser", () => {
             content: [{ type: "output_text", text: "I found the entrypoint." }],
           },
         }),
+        JSON.stringify({
+          timestamp: "2026-07-24T14:00:04Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 10_000,
+                cached_input_tokens: 8_000,
+                cache_write_input_tokens: 0,
+                output_tokens: 500,
+                reasoning_output_tokens: 120,
+                total_tokens: 10_500,
+              },
+            },
+          },
+        }),
       ].join("\n"),
     });
     expect(snapshot.provider).toBe("codex");
     expect(snapshot.sessionId).toBe("thread-1");
     expect(snapshot.title).toBe("Local Codex task");
-    expect(snapshot.adapterVersion).toBe("codex-jsonl-v4");
+    expect(snapshot.adapterVersion).toBe("codex-jsonl-v5");
     expect(snapshot.messages.map((message) => message.role)).toEqual([
       "user",
+      "assistant",
       "tool",
       "assistant",
     ]);
-    expect(snapshot.messages[1]?.segments[0]?.type).toBe("tool_status");
+    expect(snapshot.messages[1]?.segments[0]).toEqual({
+      type: "reasoning",
+      content: "Inspect the source tree",
+    });
+    expect(JSON.stringify(snapshot.messages)).not.toContain("not-archived");
+    expect(snapshot.messages[2]?.segments[0]?.type).toBe("tool_status");
+    expect(snapshot.tokenUsage).toEqual({
+      scope: "cumulative",
+      inputTokens: 10_000,
+      cachedInputTokens: 8_000,
+      cacheWriteInputTokens: 0,
+      outputTokens: 500,
+      reasoningOutputTokens: 120,
+      totalTokens: 10_500,
+    });
   });
 
   it("redacts large Codex tool blobs before archiving", () => {
@@ -283,5 +373,40 @@ describe("local JSONL incremental parsing", () => {
     });
 
     expect(delta).toBeNull();
+  });
+
+  it("keeps a usage-only Codex tail as a metadata delta", () => {
+    const delta = parseLocalJsonlDelta({
+      provider: "codex",
+      path: "/Users/me/.codex/sessions/session.jsonl",
+      content: JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: 900,
+              cached_input_tokens: 700,
+              output_tokens: 100,
+              reasoning_output_tokens: 40,
+              total_tokens: 1_000,
+            },
+          },
+        },
+      }),
+      base: {
+        sessionId: "thread-1",
+        branchFingerprint: "branch-fingerprint-2",
+        messageCount: 4,
+        lastMessageTextHash: "a".repeat(64),
+      },
+    });
+
+    expect(delta?.appendedMessages).toEqual([]);
+    expect(delta?.tokenUsage).toMatchObject({
+      scope: "cumulative",
+      totalTokens: 1_000,
+      reasoningOutputTokens: 40,
+    });
   });
 });

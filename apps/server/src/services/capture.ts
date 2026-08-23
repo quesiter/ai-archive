@@ -10,6 +10,7 @@ import {
   type CapturePayloadV1,
   type CaptureSnapshotV1,
   type CaptureTriggerReason,
+  type TokenUsage,
 } from "@ai-archive/contracts";
 import { db } from "../db.js";
 import {
@@ -80,6 +81,87 @@ export function snapshotHash(snapshot: CaptureSnapshotV1): string {
   return createHash("sha256").update(canonical).digest("hex");
 }
 
+function storedTokenUsage(
+  revision: Pick<
+    typeof conversationRevisions.$inferSelect,
+    | "reportedInputTokens"
+    | "reportedCachedInputTokens"
+    | "reportedCacheWriteInputTokens"
+    | "reportedOutputTokens"
+    | "reportedReasoningOutputTokens"
+    | "reportedTotalTokens"
+  >,
+): TokenUsage | null {
+  if (
+    revision.reportedTotalTokens === null ||
+    revision.reportedTotalTokens === undefined
+  ) {
+    return null;
+  }
+  return {
+    scope: "cumulative",
+    inputTokens: revision.reportedInputTokens ?? 0,
+    cachedInputTokens: revision.reportedCachedInputTokens ?? 0,
+    cacheWriteInputTokens: revision.reportedCacheWriteInputTokens ?? 0,
+    outputTokens: revision.reportedOutputTokens ?? 0,
+    reasoningOutputTokens: revision.reportedReasoningOutputTokens ?? 0,
+    totalTokens: revision.reportedTotalTokens,
+  };
+}
+
+export function cumulativeTokenUsage(input: {
+  base: TokenUsage | null;
+  next?: TokenUsage | undefined;
+}): TokenUsage | undefined {
+  if (!input.next) return input.base ?? undefined;
+  if (input.next.scope === "cumulative") {
+    return { ...input.next, scope: "cumulative" };
+  }
+  const base = input.base;
+  return {
+    scope: "cumulative",
+    inputTokens: (base?.inputTokens ?? 0) + input.next.inputTokens,
+    cachedInputTokens:
+      (base?.cachedInputTokens ?? 0) + input.next.cachedInputTokens,
+    cacheWriteInputTokens:
+      (base?.cacheWriteInputTokens ?? 0) + input.next.cacheWriteInputTokens,
+    outputTokens: (base?.outputTokens ?? 0) + input.next.outputTokens,
+    reasoningOutputTokens:
+      (base?.reasoningOutputTokens ?? 0) + input.next.reasoningOutputTokens,
+    totalTokens: (base?.totalTokens ?? 0) + input.next.totalTokens,
+  };
+}
+
+function tokenUsageValues(usage: TokenUsage) {
+  return {
+    reportedInputTokens: usage.inputTokens,
+    reportedCachedInputTokens: usage.cachedInputTokens,
+    reportedCacheWriteInputTokens: usage.cacheWriteInputTokens,
+    reportedOutputTokens: usage.outputTokens,
+    reportedReasoningOutputTokens: usage.reasoningOutputTokens,
+    reportedTotalTokens: usage.totalTokens,
+  };
+}
+
+async function updateStoredTokenUsage(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  revisionId: string,
+  usage?: TokenUsage | undefined,
+): Promise<void> {
+  if (!usage) return;
+  await tx
+    .update(conversationRevisions)
+    .set({
+      reportedInputTokens: sql`greatest(coalesce(${conversationRevisions.reportedInputTokens}, 0), ${usage.inputTokens})`,
+      reportedCachedInputTokens: sql`greatest(coalesce(${conversationRevisions.reportedCachedInputTokens}, 0), ${usage.cachedInputTokens})`,
+      reportedCacheWriteInputTokens: sql`greatest(coalesce(${conversationRevisions.reportedCacheWriteInputTokens}, 0), ${usage.cacheWriteInputTokens})`,
+      reportedOutputTokens: sql`greatest(coalesce(${conversationRevisions.reportedOutputTokens}, 0), ${usage.outputTokens})`,
+      reportedReasoningOutputTokens: sql`greatest(coalesce(${conversationRevisions.reportedReasoningOutputTokens}, 0), ${usage.reasoningOutputTokens})`,
+      reportedTotalTokens: sql`greatest(coalesce(${conversationRevisions.reportedTotalTokens}, 0), ${usage.totalTokens})`,
+    })
+    .where(eq(conversationRevisions.id, revisionId));
+}
+
 export const REVISION_SEARCH_TEXT_LIMIT = 2_048;
 export const REVISION_SEARCH_TEXT_MESSAGE_LIMIT = 480;
 export const MESSAGE_SEGMENT_CONTENT_LIMIT = 200_000;
@@ -87,6 +169,23 @@ export const TOOL_SEGMENT_CONTENT_LIMIT = 8_000;
 export const REASONING_SEGMENT_CONTENT_LIMIT = 20_000;
 const MESSAGE_INSERT_BATCH_SIZE = 500;
 const SEGMENT_INSERT_BATCH_SIZE = 500;
+
+export function storedMessageTextStats(messages: readonly CaptureMessage[]) {
+  let textUnits = 0;
+  let reasoningTextUnits = 0;
+  let toolTextUnits = 0;
+  for (const message of messages) {
+    for (const segment of message.segments) {
+      const units = Array.from(segment.content).length;
+      textUnits += units;
+      if (segment.type === "reasoning") reasoningTextUnits += units;
+      if (segment.type === "tool_status" || message.role === "tool") {
+        toolTextUnits += units;
+      }
+    }
+  }
+  return { textUnits, reasoningTextUnits, toolTextUnits };
+}
 
 function* chunks<T>(items: readonly T[], size: number): Iterable<T[]> {
   for (let index = 0; index < items.length; index += size) {
@@ -356,6 +455,7 @@ async function insertRevision(
   // already spans all revisions, so copying the inherited prefix here wastes
   // space and can crowd the newest text out of the bounded search document.
   const searchText = buildRevisionSearchText(input.storedMessages);
+  const textStats = storedMessageTextStats(input.storedMessages);
   const [revision] = await tx
     .insert(conversationRevisions)
     .values({
@@ -377,6 +477,12 @@ async function insertRevision(
       capturedAt: new Date(input.snapshot.capturedAt),
       messageCount: input.snapshot.messages.length,
       searchText,
+      archivedTextUnits: textStats.textUnits,
+      reasoningTextUnits: textStats.reasoningTextUnits,
+      toolTextUnits: textStats.toolTextUnits,
+      ...(input.snapshot.tokenUsage
+        ? tokenUsageValues(input.snapshot.tokenUsage)
+        : {}),
     })
     .onConflictDoNothing({
       target: [
@@ -516,6 +622,10 @@ export function mergedSnapshotFromDelta(input: {
   baseRevision: typeof conversationRevisions.$inferSelect;
   baseMessages: CaptureMessage[];
 }): CaptureSnapshotV1 {
+  const tokenUsage = cumulativeTokenUsage({
+    base: storedTokenUsage(input.baseRevision),
+    next: input.delta.tokenUsage,
+  });
   return CaptureSnapshotV1Schema.parse({
     schemaVersion: 1,
     provider: input.delta.provider,
@@ -527,6 +637,7 @@ export function mergedSnapshotFromDelta(input: {
     capturedAt: input.delta.capturedAt,
     captureMode: "append",
     triggerReason: input.delta.triggerReason,
+    ...(tokenUsage ? { tokenUsage } : {}),
     baseRevisionId: input.baseRevision.id,
     baseMessageCount: input.delta.baseMessageCount,
     baseLastMessageId: input.delta.baseLastMessageId,
@@ -674,6 +785,11 @@ export async function ingestCapture(
             deletedAt: null,
           })
           .where(eq(conversations.id, previousConversation.id));
+        await updateStoredTokenUsage(
+          tx,
+          previousRevision.id,
+          snapshot.tokenUsage,
+        );
         return {
           conversationId: previousConversation.id,
           revisionId: previousRevision.id,
@@ -699,6 +815,7 @@ export async function ingestCapture(
       .limit(1);
 
     if (existing) {
+      await updateStoredTokenUsage(tx, existing.id, snapshot.tokenUsage);
       await insertCaptureRun(tx, {
         deviceId,
         provider: snapshot.provider,
@@ -731,6 +848,7 @@ export async function ingestCapture(
       hash,
       deviceId,
     });
+    await updateStoredTokenUsage(tx, revision.id, snapshot.tokenUsage);
     await insertCaptureRun(tx, {
       deviceId,
       provider: snapshot.provider,

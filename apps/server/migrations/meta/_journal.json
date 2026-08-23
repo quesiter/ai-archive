@@ -92,6 +92,20 @@
       "when": 1787401800000,
       "tag": "0012_v2_1_tags_and_remove_knowledge",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1787446800000,
+      "tag": "0013_reported_token_usage",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1787447700000,
+      "tag": "0014_revision_text_stats",
+      "breakpoints": true
     }
   ]
 }
