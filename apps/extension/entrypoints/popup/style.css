@@ -24,7 +24,7 @@ header { position: relative; z-index: 1; display: flex; align-items: center; gap
 header > div { display: flex; flex-direction: column; min-width: 0; }
 header strong { color: #16383f; font-size: 13.5px; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 header small { color: #739096; margin-top: 2px; font-size: 10px; }
-.logo { display: grid; place-items: center; width: 39px; height: 39px; border-radius: 13px; background: linear-gradient(135deg, #38d5b0, #61d8ea); color: #08242a; font-weight: 950; box-shadow: 0 8px 20px rgba(44, 211, 180, .25); }
+.logo { display: block; width: 39px; height: 39px; object-fit: contain; filter: drop-shadow(0 7px 12px rgba(24, 143, 131, .2)); }
 h2 { color: #24525a; font-size: 12.5px; margin: 0 0 10px; }
 form, .current, .status {
   position: relative;

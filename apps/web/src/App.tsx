@@ -130,6 +130,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
 
   if (status.loading) return <Loading />;
   if (status.error) return <ErrorBanner message={status.error} />;
+  const initialized = Boolean(status.data?.initialized);
 
   async function bootstrap(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -172,39 +173,60 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
 
   return (
     <main className="auth-shell">
-      <section className="auth-card">
-        <div className="brand-mark">知</div>
-        <h1>知言归藏</h1>
-        <p className="muted">藏过往之言，续项目之路。</p>
-        <ErrorBanner message={error} />
-        {!status.data?.initialized ? (
-          <>
-            <h2>创建管理员</h2>
-            <form onSubmit={bootstrap} className="stack">
-              <label>用户名<input name="username" minLength={3} required /></label>
-              <label>密码<input name="password" type="password" minLength={12} required /></label>
-              <button type="submit">初始化</button>
-            </form>
-          </>
-        ) : (
-          <>
-            {bootstrapResult && (
-              <div className="alert success">
-                <strong>请立即加入验证器：</strong>
-                <code className="breakable">{bootstrapResult.secret}</code>
-                <details><summary>OTP URI</summary><code className="breakable">{bootstrapResult.otpauthUrl}</code></details>
-              </div>
+      <div className="auth-layout">
+        <section className="auth-brand-panel">
+          <div className="auth-brand-heading">
+            <img className="auth-brand-logo" src="/brand/logo.png" alt="" />
+            <span className="auth-brand-kicker">个人 AI 知识归档</span>
+          </div>
+          <div className="auth-brand-copy">
+            <h1>知言归藏</h1>
+            <p className="auth-tagline">汇智能之言，成项目之知。</p>
+            <p>把分散在不同 AI 平台与本地工具里的对话，沉淀为可检索、可演进、可复用的项目历史。</p>
+          </div>
+          <div className="auth-feature-grid" aria-label="产品能力">
+            <div><span>01</span><strong>完整归档</strong><small>保存跨平台会话与修订</small></div>
+            <div><span>02</span><strong>项目演进</strong><small>用项目、标签与报告组织</small></div>
+            <div><span>03</span><strong>私有部署</strong><small>数据留在自己的服务器</small></div>
+          </div>
+          <small className="auth-version">AI Conversation Archive · {WEB_VERSION}</small>
+        </section>
+
+        <section className="auth-form-panel">
+          <div className="auth-form-content">
+            <header className="auth-form-header">
+              <span>{initialized ? "安全登录" : "首次使用"}</span>
+              <h2>{initialized ? "欢迎回来" : "创建管理员"}</h2>
+              <p>{initialized ? "使用管理员账号与六位动态验证码进入归档。" : "创建首个管理员账号，开始建立你的私人 AI 归档。"}</p>
+            </header>
+            <ErrorBanner message={error} />
+            {initialized ? (
+              <>
+                {bootstrapResult && (
+                  <div className="alert success">
+                    <strong>请立即加入验证器：</strong>
+                    <code className="breakable">{bootstrapResult.secret}</code>
+                    <details><summary>OTP URI</summary><code className="breakable">{bootstrapResult.otpauthUrl}</code></details>
+                  </div>
+                )}
+                <form onSubmit={login} className="auth-form stack">
+                  <label><span>用户名</span><input name="username" autoComplete="username" placeholder="请输入管理员用户名" autoFocus required /></label>
+                  <label><span>密码</span><input name="password" type="password" autoComplete="current-password" placeholder="请输入密码" required /></label>
+                  <label><span>六位验证码</span><input name="totpCode" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" minLength={6} maxLength={6} placeholder="000000" required /></label>
+                  <button type="submit">登录归档 <span aria-hidden="true">→</span></button>
+                </form>
+              </>
+            ) : (
+              <form onSubmit={bootstrap} className="auth-form stack">
+                <label><span>用户名</span><input name="username" autoComplete="username" minLength={3} placeholder="至少 3 个字符" autoFocus required /></label>
+                <label><span>密码</span><input name="password" type="password" autoComplete="new-password" minLength={12} placeholder="至少 12 个字符" required /></label>
+                <button type="submit">创建并初始化 <span aria-hidden="true">→</span></button>
+              </form>
             )}
-            <h2>登录</h2>
-            <form onSubmit={login} className="stack">
-              <label>用户名<input name="username" required /></label>
-              <label>密码<input name="password" type="password" required /></label>
-              <label>六位验证码<input name="totpCode" inputMode="numeric" pattern="[0-9]{6}" required /></label>
-              <button type="submit">登录</button>
-            </form>
-          </>
-        )}
-      </section>
+            <div className="auth-security-note"><span aria-hidden="true">◎</span><p><strong>本地身份保护</strong><small>密码与 TOTP 双重验证，动态响应不缓存。</small></p></div>
+          </div>
+        </section>
+      </div>
     </main>
   );
 }
@@ -226,10 +248,10 @@ function Shell({ children, onLogout }: { children: ReactNode; onLogout: () => vo
     <div className="app-shell">
       <aside className="sidebar">
         <div className="sidebar-brand">
-          <span>知</span>
+          <img className="sidebar-brand-mark" src="/brand/logo.png" alt="" />
           <div className="sidebar-brand-copy">
             <strong>知言归藏</strong>
-            <small>归档、检索与追溯 AI 历史。</small>
+            <small>汇智能之言，成项目之知。</small>
           </div>
         </div>
         <nav>

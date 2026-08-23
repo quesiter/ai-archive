@@ -43,15 +43,29 @@ export default defineConfig({
     key: "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqVzNtkfScpEbGTjXMN5K/kttoKDDckV2iTBHhrCw3MvL7bmghrmlsblIJGZTV/mV6+K9DBXE6KL0zXrwjTXcmaYKQ7oD/yzfSxpjD7ZApQpMU8KdvdNfE0DFrUjXC5KvfYQFfKdz0RcEbotzKtY4yYvcs9umkDddpOlm3xpTvr638oSFWQ/SNTWSyesEtSYeOF74CUD3+LLWk+42C8Um31GF+e8tImlW5c5efdAKEkwaE6PcXvLmy7DBtUSswtkvjWXVRdiQekWst6ORbxll06lDBb4n3eRsNx/dbZdrGoESwHxEl6VtUSJo8QXYmkhijq4wxdlbFtMRe8UclbXghwIDAQAB",
     name: "知言归藏",
     description: "归档、检索并按项目与标签整理当前打开的 AI 会话。",
-    version: "2.1.1",
-    version_name: "V2.1.1",
+    version: "2.1.2",
+    version_name: "V2.1.2",
     incognito: "split",
     permissions: ["storage", "alarms", "tabs"],
     optional_host_permissions: [
       hostPermissionPattern(archiveServerOrigin),
       ...aiOrigins,
     ],
-    action: { default_title: "知言归藏" },
+    icons: {
+      16: "icon/16.png",
+      32: "icon/32.png",
+      48: "icon/48.png",
+      128: "icon/128.png",
+    },
+    action: {
+      default_title: "知言归藏",
+      default_icon: {
+        16: "icon/16.png",
+        32: "icon/32.png",
+        48: "icon/48.png",
+        128: "icon/128.png",
+      },
+    },
   },
   vite: () => ({
     define: {

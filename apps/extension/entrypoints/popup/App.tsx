@@ -147,7 +147,7 @@ export default function App() {
 
   return (
     <main>
-      <header><span className="logo">知</span><div><strong>知言归藏</strong><small>汇智能之言，成项目之知。</small></div></header>
+      <header><img className="logo" src="/icon/128.png" alt="" /><div><strong>知言归藏</strong><small>汇智能之言，成项目之知。</small></div></header>
       {!settings.deviceToken ? (
         <form onSubmit={(event) => void pair(event)}>
           <h2>连接归档服务</h2>
