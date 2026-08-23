@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildConversationListSearch,
   countActiveConversationListFilters,
+  filterConversationTags,
   type ConversationListQuery,
 } from "./conversation-list.js";
 
@@ -54,5 +55,16 @@ describe("buildConversationListSearch", () => {
       from: "2026-08-01",
       to: "2026-08-23",
     })).toBe(5);
+  });
+
+  it("finds tags with case-insensitive multi-term search", () => {
+    const tags = [
+      { name: "Product Security Review" },
+      { name: "产品开发" },
+      { name: "网络安全与系统运维" },
+    ];
+    expect(filterConversationTags(tags, "security product")).toEqual([tags[0]]);
+    expect(filterConversationTags(tags, "网络 系统")).toEqual([tags[2]]);
+    expect(filterConversationTags(tags, "  ")).toBe(tags);
   });
 });

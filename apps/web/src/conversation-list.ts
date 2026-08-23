@@ -28,6 +28,23 @@ export function countActiveConversationListFilters(query: ConversationListQuery)
   return conversationListFilterKeys.filter((key) => Boolean(query[key])).length;
 }
 
+export function filterConversationTags<T extends { name?: unknown }>(
+  tags: T[],
+  query: string,
+): T[] {
+  const terms = query
+    .normalize("NFKC")
+    .trim()
+    .toLocaleLowerCase("zh-CN")
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!terms.length) return tags;
+  return tags.filter((tag) => {
+    const name = String(tag.name ?? "").normalize("NFKC").toLocaleLowerCase("zh-CN");
+    return terms.every((term) => name.includes(term));
+  });
+}
+
 function dateParamToIso(value: string): string {
   if (!value) return "";
   const date = new Date(`${value}T00:00:00`);

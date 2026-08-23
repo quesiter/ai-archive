@@ -26,6 +26,7 @@ import { api, ApiError, jsonBody } from "./api.js";
 import {
   buildConversationListSearch,
   countActiveConversationListFilters,
+  filterConversationTags,
 } from "./conversation-list.js";
 import { releaseNotes } from "./release-notes.js";
 
@@ -987,6 +988,8 @@ function Logs() {
 
 function Conversations() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const [tagQuery, setTagQuery] = useState("");
+  const tagSearchRef = useRef<HTMLInputElement>(null);
   const q = searchParams.get("q") ?? "";
   const provider = searchParams.get("provider") ?? "";
   const source = searchParams.get("source") ?? "";
@@ -1074,6 +1077,13 @@ function Conversations() {
   const providerTotal = Object.values(providerCounts).reduce(
     (sum, value) => sum + value,
     0,
+  );
+  const tags = tagsState.data ?? [];
+  const matchingTags = filterConversationTags(tags, tagQuery);
+  const displayedTags = [...matchingTags].sort(
+    (left, right) =>
+      Number(selectedTagIds.includes(String(right.id))) -
+      Number(selectedTagIds.includes(String(left.id))),
   );
   const activeFilterCount = countActiveConversationListFilters(conversationQuery);
 
@@ -1165,42 +1175,76 @@ function Conversations() {
           </label>
           <div className="conversation-filter-field conversation-filter-tags">
             <span>标签</span>
-            <details className="tag-filter-popover">
+            <details
+              className="tag-filter-popover"
+              onToggle={(event) => {
+                if (event.currentTarget.open) {
+                  requestAnimationFrame(() => tagSearchRef.current?.focus());
+                } else {
+                  setTagQuery("");
+                }
+              }}
+            >
               <summary>
                 {selectedTagIds.length ? `已选 ${selectedTagIds.length} 个标签` : "全部标签"}
               </summary>
               <div className="tag-filter-menu">
-                <header>
-                  <strong>选择标签</strong>
-                  <span>可多选</span>
-                </header>
-                <div className="tag-filter-options">
-                  {(tagsState.data ?? []).map((tag) => (
-                    <label key={tag.id}>
-                      <input
-                        type="checkbox"
-                        checked={selectedTagIds.includes(String(tag.id))}
-                        onChange={() => {
-                          const next = selectedTagIds.includes(String(tag.id))
-                            ? selectedTagIds.filter((id) => id !== String(tag.id))
-                            : [...selectedTagIds, String(tag.id)];
-                          updateQuery({ tagIds: next.join(","), offset: 0 });
-                        }}
-                      />
-                      <span>{tag.name}</span>
-                      <small>{tag.conversationCount ?? 0}</small>
-                    </label>
-                  ))}
+                <div className="tag-filter-search">
+                  <input
+                    ref={tagSearchRef}
+                    aria-label="搜索标签"
+                    type="search"
+                    value={tagQuery}
+                    placeholder="搜索标签名称…"
+                    onChange={(event) => setTagQuery(event.target.value)}
+                  />
                 </div>
-                {selectedTagIds.length > 0 && (
-                  <button
-                    type="button"
-                    className="secondary small tag-filter-clear"
-                    onClick={() => updateQuery({ tagIds: "", offset: 0 })}
-                  >
-                    清除已选标签
-                  </button>
-                )}
+                <div className="tag-filter-menu-meta">
+                  <span>
+                    {tagQuery.trim()
+                      ? `找到 ${matchingTags.length} 个标签`
+                      : `共 ${tags.length} 个标签`}
+                  </span>
+                  {selectedTagIds.length > 0 && (
+                    <button
+                      type="button"
+                      className="tag-filter-clear"
+                      onClick={() => updateQuery({ tagIds: "", offset: 0 })}
+                    >
+                      清除已选（{selectedTagIds.length}）
+                    </button>
+                  )}
+                </div>
+                <div className="tag-filter-options">
+                  {displayedTags.length ? displayedTags.map((tag) => {
+                    const selected = selectedTagIds.includes(String(tag.id));
+                    return (
+                      <label className={selected ? "selected" : ""} key={tag.id}>
+                        <input
+                          className="tag-filter-native-check"
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() => {
+                            const next = selected
+                              ? selectedTagIds.filter((id) => id !== String(tag.id))
+                              : [...selectedTagIds, String(tag.id)];
+                            updateQuery({ tagIds: next.join(","), offset: 0 });
+                          }}
+                        />
+                        <span className="tag-filter-check" aria-hidden="true">
+                          {selected ? "✓" : ""}
+                        </span>
+                        <span className="tag-filter-name">{tag.name}</span>
+                        <small>{formatCount(tag.conversationCount ?? 0)} 会话</small>
+                      </label>
+                    );
+                  }) : (
+                    <div className="tag-filter-empty">
+                      <strong>没有匹配的标签</strong>
+                      <span>换个关键词试试</span>
+                    </div>
+                  )}
+                </div>
               </div>
             </details>
           </div>
