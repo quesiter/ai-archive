@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseReleaseNotes } from "./release-notes.js";
+import { parseReleaseNotes, releaseNotes } from "./release-notes.js";
 
 describe("parseReleaseNotes", () => {
   it("keeps releases in source order and separates version metadata", () => {
@@ -35,5 +35,15 @@ describe("parseReleaseNotes", () => {
       version: "v14 及更早",
       title: "",
     });
+  });
+
+  it("shows the latest maintained changelog entry first", () => {
+    expect(releaseNotes[0]).toMatchObject({
+      date: "2026-08-23",
+      version: "V2.1.1",
+      title: "管理体验、任务恢复与检索统计完善",
+    });
+    expect(releaseNotes[0]?.body).toContain("Token 统计");
+    expect(releaseNotes[0]?.body).toContain("脱敏已有归档");
   });
 });
