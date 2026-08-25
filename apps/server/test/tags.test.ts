@@ -20,10 +20,12 @@ describe("tag normalization", () => {
 
   it("rejects sentences and keeps only the strongest reusable suggestion", () => {
     expect(isReusableTagName("这是一个不应成为标签的完整句子。 ")).toBe(false);
+    expect(isReusableTagName("b7aff412-0230-43e2-b893-2ad7d567fe36")).toBe(false);
     expect(
       normalizeTagSuggestions([
         { name: "React", confidence: 0.6 },
         { name: "ｒｅａｃｔ", confidence: 0.88 },
+        { name: "18d0da13-1278-47fc-842d-2587d7ed88cf", confidence: 0.99 },
         { name: "弱标签", confidence: 0.1 },
       ]),
     ).toEqual([{ name: "react", confidence: 0.88 }]);

@@ -79,6 +79,25 @@ describe("parseTagSuggestions", () => {
     });
     expect(result).toEqual([{ name: "TypeScript", confidence: 0.9 }]);
   });
+
+  it("resolves existing tag ids to names and drops unknown UUID labels", () => {
+    const existingTag = {
+      id: "b7aff412-0230-43e2-b893-2ad7d567fe36",
+      name: "Chrome扩展",
+    };
+    const result = parseTagSuggestions(
+      {
+        tags: [
+          { name: existingTag.id, confidence: 0.9 },
+          { tagId: existingTag.id, confidence: 0.8 },
+          { name: "18d0da13-1278-47fc-842d-2587d7ed88cf", confidence: 0.99 },
+        ],
+      },
+      [existingTag],
+    );
+
+    expect(result).toEqual([{ name: "Chrome扩展", confidence: 0.9 }]);
+  });
 });
 
 describe("localProjectGuess", () => {

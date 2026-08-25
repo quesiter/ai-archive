@@ -7,6 +7,8 @@ export interface TagSuggestion {
   confidence: number;
 }
 
+const UUID_TAG_NAME_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
+
 export function isProtectedConversationTag(link: {
   source: "auto" | "manual";
   lockedByUser: boolean;
@@ -41,6 +43,7 @@ export function normalizeTagName(value: string): {
 export function isReusableTagName(value: string): boolean {
   const { name } = normalizeTagName(value);
   if (!name || [...name].length > 40) return false;
+  if (UUID_TAG_NAME_PATTERN.test(name)) return false;
   if (/\r|\n|[。！？!?；;]/u.test(name)) return false;
   if (name.split(" ").length > 6) return false;
   return true;
