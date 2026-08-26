@@ -24,6 +24,7 @@ import {
 } from "../services/queue.js";
 import { getBooleanSetting, getSetting } from "../services/settings.js";
 import {
+  createConversationXlsxExport,
   loadConversationExportData,
   renderConversationExport,
   type ConversationExportFormat,
@@ -226,6 +227,19 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       if (!(await requireWebUser(request, reply))) return;
       const params = z.object({ id: z.string().uuid() }).parse(request.params);
       const { format } = ProjectExportQuerySchema.parse(request.query);
+      if (format === "xlsx") {
+        const xlsx = await createConversationXlsxExport({ projectId: params.id });
+        if (!xlsx) return reply.code(404).send({ error: "Project not found" });
+        const filename = `${safeProjectExportFilename(xlsx.scopeName)}.${format}`;
+        reply
+          .header("Content-Type", projectExportMimeType(format))
+          .header(
+            "Content-Disposition",
+            `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+          )
+          .header("Cache-Control", "no-store");
+        return reply.send(xlsx.stream);
+      }
       const data = await loadConversationExportData({ projectId: params.id });
       if (!data) return reply.code(404).send({ error: "Project not found" });
       const content = await renderConversationExport(format, data);

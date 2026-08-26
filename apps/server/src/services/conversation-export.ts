@@ -1,4 +1,5 @@
 import ExcelJS from "exceljs";
+import { PassThrough, type Readable, type Writable } from "node:stream";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { stripInternalConversationMetadata } from "@ai-archive/contracts";
 import { db } from "../db.js";
@@ -8,7 +9,7 @@ import {
   conversations,
   projects,
 } from "../schema.js";
-import { loadHydratedRevisionMessagesBatch } from "./revision-storage.js";
+import { loadHydratedRevisionMessages } from "./revision-storage.js";
 
 export type ConversationExportFormat = "csv" | "md" | "xlsx";
 
@@ -34,6 +35,24 @@ export interface ConversationExportData {
   scopeName: string;
   generatedAt: string;
   rows: ConversationExportRow[];
+}
+
+interface ConversationExportSource extends Omit<ConversationExportData, "rows"> {
+  relations: Array<{
+    conversation: {
+      id: string;
+      title: string | null;
+      provider: string;
+      externalSessionId: string;
+      canonicalUrl: string | null;
+      projectName: string | null;
+    };
+    revision: {
+      id: string;
+      conversationId: string;
+      capturedAt: Date;
+    };
+  }>;
 }
 
 export function safeExportUrl(value: string | null | undefined): string {
@@ -154,14 +173,20 @@ async function loadScopeConversations(input: {
   };
 }
 
-export async function loadConversationExportData(input: {
+async function loadConversationExportSource(input: {
   conversationId?: string;
   projectId?: string;
-}): Promise<ConversationExportData | null> {
+}): Promise<ConversationExportSource | null> {
   const scope = await loadScopeConversations(input);
   if (!scope) return null;
   if (!scope.conversations.length) {
-    return { ...scope, generatedAt: new Date().toISOString(), rows: [] };
+    return {
+      scope: scope.scope,
+      scopeId: scope.scopeId,
+      scopeName: scope.scopeName,
+      generatedAt: new Date().toISOString(),
+      relations: [],
+    };
   }
 
   const conversationIds = scope.conversations.map((conversation) => conversation.id);
@@ -192,25 +217,47 @@ export async function loadConversationExportData(input: {
     (revision) => revision.id,
   );
   if (!revisionIds.length) {
-    return { ...scope, generatedAt: new Date().toISOString(), rows: [] };
+    return {
+      scope: scope.scope,
+      scopeId: scope.scopeId,
+      scopeName: scope.scopeName,
+      generatedAt: new Date().toISOString(),
+      relations: [],
+    };
   }
 
-  const messagesByRevision = await loadHydratedRevisionMessagesBatch(revisionIds);
-
-  const conversationByRevision = new Map(
-    scope.conversations.flatMap((conversation) => {
+  const relations = scope.conversations
+    .flatMap((conversation) => {
       const revision = selectedRevisionByConversation.get(conversation.id);
-      return revision ? [[revision.id, { conversation, revision }] as const] : [];
-    }),
-  );
-  const rows: ConversationExportRow[] = [];
-  for (const [revisionId, revisionMessages] of messagesByRevision) {
-    const relation = conversationByRevision.get(revisionId);
-    if (!relation) continue;
+      return revision ? [{ conversation, revision }] : [];
+    })
+    .sort((left, right) => {
+      const leftTitle = left.conversation.title || left.conversation.externalSessionId;
+      const rightTitle = right.conversation.title || right.conversation.externalSessionId;
+      return (
+        leftTitle.localeCompare(rightTitle) ||
+        left.conversation.id.localeCompare(right.conversation.id)
+      );
+    });
+  return {
+    scope: scope.scope,
+    scopeId: scope.scopeId,
+    scopeName: scope.scopeName,
+    generatedAt: new Date().toISOString(),
+    relations,
+  };
+}
+
+async function* iterateConversationExportRows(
+  source: ConversationExportSource,
+): AsyncGenerator<ConversationExportRow> {
+  for (const relation of source.relations) {
+    // Loading one logical revision at a time bounds peak memory for large projects.
+    const revisionMessages = await loadHydratedRevisionMessages(relation.revision.id);
     for (const message of revisionMessages) {
       const content = exportableMessageContent(message);
       if (!content || (message.role !== "user" && message.role !== "assistant")) continue;
-      rows.push({
+      yield {
         projectName: relation.conversation.projectName ?? "",
         conversationId: relation.conversation.id,
         conversationTitle:
@@ -225,15 +272,21 @@ export async function loadConversationExportData(input: {
         model: message.model ?? "",
         messageAt: message.sourceCreatedAt?.toISOString() ?? "",
         content,
-      });
+      };
     }
   }
-  rows.sort(
-    (left, right) =>
-      left.conversationTitle.localeCompare(right.conversationTitle) ||
-      left.messageOrdinal - right.messageOrdinal,
-  );
-  return { ...scope, generatedAt: new Date().toISOString(), rows };
+}
+
+export async function loadConversationExportData(input: {
+  conversationId?: string;
+  projectId?: string;
+}): Promise<ConversationExportData | null> {
+  const source = await loadConversationExportSource(input);
+  if (!source) return null;
+  const rows: ConversationExportRow[] = [];
+  for await (const row of iterateConversationExportRows(source)) rows.push(row);
+  const { relations: _relations, ...data } = source;
+  return { ...data, rows };
 }
 
 function spreadsheetSafe(value: string): string {
@@ -323,12 +376,18 @@ function chunkCell(value: string, size = 32_000): string[] {
   return chunks;
 }
 
-export async function renderConversationXlsx(
-  data: ConversationExportData,
-): Promise<Buffer> {
-  const workbook = new ExcelJS.Workbook();
+async function writeConversationXlsx(
+  output: Writable,
+  generatedAt: string,
+  rows: Iterable<ConversationExportRow> | AsyncIterable<ConversationExportRow>,
+): Promise<void> {
+  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+    stream: output,
+    useSharedStrings: false,
+    useStyles: true,
+  });
   workbook.creator = "知言归藏";
-  workbook.created = new Date(data.generatedAt);
+  workbook.created = new Date(generatedAt);
   const worksheet = workbook.addWorksheet("对话记录", {
     views: [{ state: "frozen", ySplit: 1 }],
   });
@@ -346,17 +405,21 @@ export async function renderConversationXlsx(
     { header: "内容", key: "content", width: 80 },
     { header: "原会话链接", key: "url", width: 42 },
   ];
-  worksheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
-  worksheet.getRow(1).fill = {
+  const header = worksheet.getRow(1);
+  header.font = { bold: true, color: { argb: "FFFFFFFF" } };
+  header.fill = {
     type: "pattern",
     pattern: "solid",
     fgColor: { argb: "FF0F766E" },
   };
   worksheet.autoFilter = { from: "A1", to: "L1" };
-  for (const row of data.rows) {
+  worksheet.getColumn("content").alignment = { wrapText: true, vertical: "top" };
+  header.commit();
+
+  for await (const row of rows) {
     const contentParts = chunkCell(row.content);
     contentParts.forEach((content, index) => {
-      worksheet.addRow({
+      const worksheetRow = worksheet.addRow({
         project: spreadsheetSafe(row.projectName),
         title: spreadsheetSafe(row.conversationTitle),
         provider: row.provider,
@@ -370,14 +433,48 @@ export async function renderConversationXlsx(
         content: spreadsheetSafe(content),
         url: row.canonicalUrl,
       });
+      worksheetRow.alignment = { vertical: "top" };
+      worksheetRow.commit();
     });
   }
-  worksheet.getColumn("content").alignment = { wrapText: true, vertical: "top" };
-  worksheet.eachRow((row, rowNumber) => {
-    if (rowNumber > 1) row.alignment = { vertical: "top" };
+  worksheet.commit();
+  await workbook.commit();
+}
+
+export function renderConversationXlsxStream(input: {
+  generatedAt: string;
+  rows: Iterable<ConversationExportRow> | AsyncIterable<ConversationExportRow>;
+}): Readable {
+  const output = new PassThrough();
+  void writeConversationXlsx(output, input.generatedAt, input.rows).catch((error) => {
+    output.destroy(error instanceof Error ? error : new Error(String(error)));
   });
-  const buffer = await workbook.xlsx.writeBuffer();
-  return Buffer.from(buffer);
+  return output;
+}
+
+export async function renderConversationXlsx(
+  data: ConversationExportData,
+): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of renderConversationXlsxStream(data)) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+export async function createConversationXlsxExport(input: {
+  conversationId?: string;
+  projectId?: string;
+}): Promise<{ scopeName: string; stream: Readable } | null> {
+  const source = await loadConversationExportSource(input);
+  if (!source) return null;
+  return {
+    scopeName: source.scopeName,
+    stream: renderConversationXlsxStream({
+      generatedAt: source.generatedAt,
+      rows: iterateConversationExportRows(source),
+    }),
+  };
 }
 
 export async function renderConversationExport(

@@ -5,6 +5,7 @@ import {
   renderConversationCsv,
   renderConversationMarkdown,
   renderConversationXlsx,
+  renderConversationXlsxStream,
   safeExportUrl,
   type ConversationExportData,
 } from "../src/services/conversation-export.js";
@@ -106,5 +107,30 @@ describe("conversation export formats", () => {
     ) as ArrayBuffer);
     const worksheet = workbook.getWorksheet("对话记录");
     expect(worksheet?.getCell("K2").value).toBe("真正的用户需求");
+  });
+
+  it("streams XLSX rows from an async source", async () => {
+    async function* rows() {
+      yield data.rows[0]!;
+      await Promise.resolve();
+      yield { ...data.rows[0]!, messageOrdinal: 1, content: "流式导出内容" };
+    }
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of renderConversationXlsxStream({
+      generatedAt: data.generatedAt,
+      rows: rows(),
+    })) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    const buffer = Buffer.concat(chunks);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(buffer.buffer.slice(
+      buffer.byteOffset,
+      buffer.byteOffset + buffer.byteLength,
+    ) as ArrayBuffer);
+    const worksheet = workbook.getWorksheet("对话记录");
+    expect(worksheet?.getCell("K2").value).toBe("真正的用户需求");
+    expect(worksheet?.getCell("K3").value).toBe("流式导出内容");
   });
 });

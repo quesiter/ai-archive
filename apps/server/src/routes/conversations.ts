@@ -35,6 +35,7 @@ import {
   loadHydratedRevisionMessages,
 } from "../services/revision-storage.js";
 import {
+  createConversationXlsxExport,
   loadConversationExportData,
   renderConversationExport,
   type ConversationExportFormat,
@@ -386,6 +387,21 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       if (!(await requireWebUser(request, reply))) return;
       const params = z.object({ id: z.string().uuid() }).parse(request.params);
       const { format } = ExportQuerySchema.parse(request.query);
+      if (format === "xlsx") {
+        const xlsx = await createConversationXlsxExport({
+          conversationId: params.id,
+        });
+        if (!xlsx) return reply.code(404).send({ error: "Conversation not found" });
+        const filename = `${safeExportFilename(xlsx.scopeName)}.${format}`;
+        reply
+          .header("Content-Type", exportMimeType(format))
+          .header(
+            "Content-Disposition",
+            `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+          )
+          .header("Cache-Control", "no-store");
+        return reply.send(xlsx.stream);
+      }
       const data = await loadConversationExportData({
         conversationId: params.id,
       });
