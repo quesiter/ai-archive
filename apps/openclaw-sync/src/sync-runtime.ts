@@ -1,4 +1,18 @@
+import { createHash } from "node:crypto";
+
 export type LocalTranscriptProvider = "openclaw" | "codex" | "claude_code";
+
+export function captureIdempotencyKey(input: {
+  provider: string;
+  adapterVersion: string;
+  captureMode?: string;
+  payload: unknown;
+}): string {
+  const payloadHash = createHash("sha256")
+    .update(JSON.stringify(input.payload))
+    .digest("hex");
+  return `${input.provider}:${input.adapterVersion}:${input.captureMode ?? "full"}:${payloadHash}`;
+}
 
 export async function* lfSeparatedLines(
   input: AsyncIterable<string | Buffer>,
@@ -48,4 +62,18 @@ export function createCoalescedRunner(task: () => Promise<void>): () => Promise<
       running = false;
     }
   };
+}
+
+export function retryDelayMs(attempt: number, retryAfter?: string | null): number {
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(15 * 60_000, seconds * 1_000);
+    const date = Date.parse(retryAfter);
+    if (Number.isFinite(date)) return Math.min(15 * 60_000, Math.max(0, date - Date.now()));
+  }
+  return Math.min(15 * 60_000, 5_000 * 2 ** Math.max(0, attempt - 1));
+}
+
+export function retryableUploadStatus(status: number): boolean {
+  return status === 429 || status >= 500;
 }

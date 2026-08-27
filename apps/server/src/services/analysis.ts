@@ -6,10 +6,11 @@ import {
   gte,
   inArray,
   isNull,
-  lte,
+  lt,
   sql,
 } from "drizzle-orm";
 import { z } from "zod";
+import { config } from "../config.js";
 import { db } from "../db.js";
 import {
   analysisRuns,
@@ -39,6 +40,7 @@ import {
   resolveAiRetrySchedule,
 } from "./llm.js";
 import { safeStoredError, writeOperationLog } from "./operation-log.js";
+import { zonedDateTimeToUtc } from "./timezone.js";
 import { enqueueReportEmail, enqueueUnlockedReclassification } from "./queue.js";
 import { redactForCloud } from "./redaction.js";
 import { getBooleanSetting, getNumberSetting, getSetting } from "./settings.js";
@@ -47,6 +49,7 @@ import {
   persistAutoTags,
   type TagSuggestion,
 } from "./tags.js";
+import { normalizeProjectName } from "./projects.js";
 
 type ReportResponse = {
   title: string;
@@ -141,7 +144,6 @@ interface ReclassificationRunInput {
   offset?: number;
 }
 
-const SHANGHAI_OFFSET_MS = 8 * 60 * 60_000;
 const DEFAULT_CLASSIFICATION_CONVERSATION_CHAR_LIMIT = 8_000;
 const STABLE_CLASSIFICATION_CONFIDENCE = 0.78;
 const NEW_PROJECT_CONFIDENCE_WITH_EXISTING = 0.74;
@@ -829,10 +831,18 @@ async function organizeConversation(
     suggestedName &&
     confidence >= (projectRows.length ? NEW_PROJECT_CONFIDENCE_WITH_EXISTING : NEW_PROJECT_CONFIDENCE_EMPTY)
   ) {
+    const normalizedProject = normalizeProjectName(suggestedName);
     const [created] = await db
       .insert(projects)
-      .values({ name: suggestedName, description: parsed.rationale })
-      .onConflictDoUpdate({ target: projects.name, set: { updatedAt: new Date() } })
+      .values({
+        name: normalizedProject.name,
+        normalizedName: normalizedProject.normalizedName,
+        description: parsed.rationale,
+      })
+      .onConflictDoUpdate({
+        target: projects.normalizedName,
+        set: { updatedAt: new Date() },
+      })
       .returning({ id: projects.id });
     projectId = created?.id ?? null;
     reason = "new";
@@ -908,7 +918,7 @@ function retryWindowLabel(window: AiRetrySchedule["window"]): string {
 
 function deferredAiMessage(schedule: AiRetrySchedule): string {
   const retryAt = new Date(schedule.retryAt).toLocaleString("zh-CN", {
-    timeZone: "Asia/Shanghai",
+    timeZone: config.TZ,
   });
   return `${retryWindowLabel(schedule.window)}受限，将在 ${retryAt} 后自动继续`;
 }
@@ -1141,34 +1151,65 @@ export async function reclassifyUnlockedConversations(
 export function analysisWindow(
   kind: "weekly" | "monthly",
   now: Date,
+  timeZone = config.TZ,
 ): { windowStart: Date; windowEnd: Date } {
-  const shanghai = new Date(now.getTime() + SHANGHAI_OFFSET_MS);
-  const year = shanghai.getUTCFullYear();
-  const month = shanghai.getUTCMonth();
-  const date = shanghai.getUTCDate();
+  const formatted = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now).map((part) => [part.type, part.value]));
+  const year = Number(formatted.year);
+  const month = Number(formatted.month) - 1;
+  const date = Number(formatted.day);
   if (kind === "weekly") {
-    const daysSinceMonday = (shanghai.getUTCDay() + 6) % 7;
+    const localCalendar = new Date(Date.UTC(year, month, date));
+    const daysSinceMonday = (localCalendar.getUTCDay() + 6) % 7;
     const mondayLocal = Date.UTC(year, month, date - daysSinceMonday);
-    const windowEnd = new Date(mondayLocal - SHANGHAI_OFFSET_MS);
+    const monday = new Date(mondayLocal);
+    const previousMonday = new Date(mondayLocal - 7 * 86_400_000);
+    const windowEnd = zonedDateTimeToUtc({
+      year: monday.getUTCFullYear(),
+      month: monday.getUTCMonth() + 1,
+      day: monday.getUTCDate(),
+    }, timeZone);
     return {
-      windowStart: new Date(windowEnd.getTime() - 7 * 86_400_000),
+      windowStart: zonedDateTimeToUtc({
+        year: previousMonday.getUTCFullYear(),
+        month: previousMonday.getUTCMonth() + 1,
+        day: previousMonday.getUTCDate(),
+      }, timeZone),
       windowEnd,
     };
   }
-  const windowEnd = new Date(Date.UTC(year, month, 1) - SHANGHAI_OFFSET_MS);
+  const previousMonth = new Date(Date.UTC(year, month - 1, 1));
+  const windowEnd = zonedDateTimeToUtc({ year, month: month + 1, day: 1 }, timeZone);
   return {
-    windowStart: new Date(Date.UTC(year, month - 1, 1) - SHANGHAI_OFFSET_MS),
+    windowStart: zonedDateTimeToUtc({
+      year: previousMonth.getUTCFullYear(),
+      month: previousMonth.getUTCMonth() + 1,
+      day: 1,
+    }, timeZone),
     windowEnd,
   };
 }
 
-function formatShanghaiCalendarDate(value: Date): string {
-  const shanghai = new Date(value.getTime() + SHANGHAI_OFFSET_MS);
-  return `${shanghai.getUTCFullYear()}年${shanghai.getUTCMonth() + 1}月${shanghai.getUTCDate()}日`;
+function formatInstanceCalendarDate(value: Date, timeZone = config.TZ): string {
+  const formatted = Object.fromEntries(new Intl.DateTimeFormat("zh-CN", {
+    timeZone,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).formatToParts(value).map((part) => [part.type, part.value]));
+  return `${formatted.year}年${formatted.month}月${formatted.day}日`;
 }
 
-export function weeklyReportPeriodLabel(windowStart: Date, windowEnd: Date): string {
-  return `${formatShanghaiCalendarDate(windowStart)}—${formatShanghaiCalendarDate(new Date(windowEnd.getTime() - 1))}`;
+export function weeklyReportPeriodLabel(
+  windowStart: Date,
+  windowEnd: Date,
+  timeZone = config.TZ,
+): string {
+  return `${formatInstanceCalendarDate(windowStart, timeZone)}—${formatInstanceCalendarDate(new Date(windowEnd.getTime() - 1), timeZone)}`;
 }
 
 export function enforceWeeklyReportPeriod(
@@ -1202,7 +1243,7 @@ async function loadWindowMaterials(windowStart: Date, windowEnd: Date) {
       and(
         eq(conversationRevisions.completeness, "complete"),
         gte(conversationRevisions.capturedAt, windowStart),
-        lte(conversationRevisions.capturedAt, windowEnd),
+        lt(conversationRevisions.capturedAt, windowEnd),
         isNull(conversations.deletedAt),
       ),
     )
@@ -1326,7 +1367,7 @@ async function createReport(
           and(
             eq(reports.kind, "weekly"),
             gte(reports.periodStart, windowStart),
-            lte(reports.periodEnd, windowEnd),
+            lt(reports.periodEnd, windowEnd),
           ),
         )
         .orderBy(asc(reports.periodStart))
@@ -1473,7 +1514,11 @@ export async function runAnalysis(
       })
       .where(eq(analysisRuns.id, run.id));
     const report = await createReport(kind, windowStart, windowEnd, materials);
-    await enqueueReportEmail(report.id);
+    const emailJobId = await enqueueReportEmail(report.id);
+    await db.update(reports).set({
+      emailStatus: emailJobId ? "queued" : "failed",
+      emailError: emailJobId ? null : "邮件任务未成功进入队列",
+    }).where(eq(reports.id, report.id));
     const stats = {
       stage: "completed",
       totalConversations: materials.length,

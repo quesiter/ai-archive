@@ -7,7 +7,7 @@ usage() {
 
 Usage:
   sh scripts/update-server.sh
-  sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.1.2-clean-install.tar.gz
+  sh scripts/update-server.sh /volume1/docker/ai-conversation-archive/ai-conversation-archive-nas-V2.3.0-clean-install.tar.gz
 
 Environment:
   APP_ROOT=/volume1/docker/ai-conversation-archive
@@ -16,6 +16,8 @@ Environment:
   SKIP_BACKUP=1
   ALLOW_BACKUP_FAILURE=1
   HEALTH_URL=http://127.0.0.1:18080/healthz
+  HEALTH_RETRIES=3600
+  HEALTH_SLEEP=2
   NO_CACHE=1
 EOF
 }
@@ -42,7 +44,7 @@ PACKAGE=${1:-${PACKAGE:-}}
 BACKUP_ROOT=${BACKUP_ROOT:-"/volume1/backup/ai-conversation-archive"}
 SKIP_BACKUP=${SKIP_BACKUP:-0}
 ALLOW_BACKUP_FAILURE=${ALLOW_BACKUP_FAILURE:-0}
-HEALTH_RETRIES=${HEALTH_RETRIES:-60}
+HEALTH_RETRIES=${HEALTH_RETRIES:-3600}
 HEALTH_SLEEP=${HEALTH_SLEEP:-2}
 NO_CACHE=${NO_CACHE:-1}
 
@@ -155,9 +157,10 @@ ensure_data_dirs() {
       "$data_dir/postgres" \
       "$data_dir/imports/inbox" \
       "$data_dir/imports/processed" \
-      "$data_dir/imports/failed" 2>/dev/null \
-    && chown -R 1000:1000 "$data_dir/imports" 2>/dev/null \
-    && chmod -R u+rwX,go-rwx "$data_dir/imports" 2>/dev/null; then
+      "$data_dir/imports/failed" \
+      "$data_dir/restores" 2>/dev/null \
+    && chown -R 1000:1000 "$data_dir/imports" "$data_dir/restores" 2>/dev/null \
+    && chmod -R u+rwX,go-rwx "$data_dir/imports" "$data_dir/restores" 2>/dev/null; then
     log "Ensured data directories under $data_dir"
     return
   fi
@@ -167,11 +170,11 @@ ensure_data_dirs() {
   if docker_cli image inspect "$helper_image" >/dev/null 2>&1 \
     && docker_cli run --rm --user 0:0 --entrypoint sh \
       -v "$data_dir:/archive-data" "$helper_image" -c \
-      'mkdir -p /archive-data/postgres /archive-data/imports/inbox /archive-data/imports/processed /archive-data/imports/failed && chown -R 1000:1000 /archive-data/imports && chmod -R u+rwX,go-rwx /archive-data/imports'; then
+      'mkdir -p /archive-data/postgres /archive-data/imports/inbox /archive-data/imports/processed /archive-data/imports/failed /archive-data/restores && chown -R 1000:1000 /archive-data/imports /archive-data/restores && chmod -R u+rwX,go-rwx /archive-data/imports /archive-data/restores'; then
     log "Ensured data directories under $data_dir with Docker."
     return
   fi
-  die "Cannot grant the non-root app user access to $data_dir/imports. Grant filesystem ownership or set DATA_DIR_HELPER_IMAGE to a locally available image."
+  die "Cannot grant the non-root app user access to $data_dir/imports and $data_dir/restores. Grant filesystem ownership or set DATA_DIR_HELPER_IMAGE to a locally available image."
 }
 
 run_backup() {
@@ -233,6 +236,9 @@ wait_health() {
       [ -n "$seen_version" ] || seen_version=unknown
       log "Health endpoint is up but running version is $seen_version; waiting for $expected_version..."
     fi
+    if [ $((i % 30)) -eq 0 ]; then
+      log "Application is still starting or migrating (health attempt $i/$HEALTH_RETRIES)."
+    fi
     sleep "$HEALTH_SLEEP"
     i=$((i + 1))
   done
@@ -286,11 +292,16 @@ else
   EXPECTED_VERSION=$(expected_app_version "$SOURCE_DIR")
 fi
 
-log "Starting services with forced host-monitor/app/worker recreation..."
+log "Starting database and application services..."
 compose_with "$ENV_FILE" "$COMPOSE_FILE" up -d postgres
-compose_with "$ENV_FILE" "$COMPOSE_FILE" up -d --force-recreate host-monitor app worker
+compose_with "$ENV_FILE" "$COMPOSE_FILE" up -d --force-recreate host-monitor app
 
 if wait_health "$ENV_FILE" "$EXPECTED_VERSION"; then
+  log "Application is healthy; starting worker..."
+  # The HTTP version gate above is authoritative. Docker can briefly retain the
+  # previous container-health result after the endpoint has recovered, so do not
+  # re-evaluate worker dependencies during this final start.
+  compose_with "$ENV_FILE" "$COMPOSE_FILE" up -d --force-recreate --no-deps worker
   compose_with "$ENV_FILE" "$COMPOSE_FILE" ps
   exit 0
 fi

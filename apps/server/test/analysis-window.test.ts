@@ -18,6 +18,18 @@ describe("analysisWindow", () => {
     expect(result.windowEnd.toISOString()).toBe("2026-06-30T16:00:00.000Z");
   });
 
+  it("uses the configured calendar across a daylight-saving boundary", () => {
+    const result = analysisWindow(
+      "weekly",
+      new Date("2026-03-09T18:00:00.000Z"),
+      "America/Los_Angeles",
+    );
+    expect(result.windowStart.toISOString()).toBe("2026-03-02T08:00:00.000Z");
+    expect(result.windowEnd.toISOString()).toBe("2026-03-09T07:00:00.000Z");
+    expect(result.windowEnd.getTime() - result.windowStart.getTime())
+      .toBe(167 * 60 * 60_000);
+  });
+
   it("formats the weekly period as an inclusive Shanghai date range", () => {
     const { windowStart, windowEnd } = analysisWindow(
       "weekly",

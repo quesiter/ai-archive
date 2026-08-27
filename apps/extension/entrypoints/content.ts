@@ -807,14 +807,10 @@ export default defineContentScript({
             decision.triggerReason,
           );
           if (!appendOk) {
-            if (
-              light.virtualized === true &&
-              state.completeness === "complete" &&
-              decision.triggerReason !== "branch_changed"
-            ) {
-              publishSkipped(light);
-              return;
-            }
+            // A missing incremental baseline is not proof that the archive is
+            // unchanged. Virtualized providers can unmount the archived tail,
+            // so fall back to the authoritative full walk instead of silently
+            // skipping potentially new messages.
             await runFullCapture(adapter, light, "branch_changed");
           }
           const settled = await lightweightConversationFingerprint(adapter);

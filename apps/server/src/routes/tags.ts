@@ -11,10 +11,12 @@ import {
 import {
   getOrCreateTag,
   isReusableTagName,
-  mergeConversationTagState,
   normalizeTagName,
 } from "../services/tags.js";
 import { writeOperationLog } from "../services/operation-log.js";
+import { literalContainsPattern } from "../services/search-pattern.js";
+import { mergeTagIntoTag } from "../services/tag-merge.js";
+import { enqueueConversationClassification } from "../services/queue.js";
 
 const TagNameSchema = z.object({
   name: z.string().min(1).max(100).refine(isReusableTagName, {
@@ -39,7 +41,7 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
       })
       .from(tags)
       .leftJoin(conversationTags, eq(conversationTags.tagId, tags.id))
-      .where(query.q ? ilike(tags.name, `%${query.q}%`) : undefined)
+      .where(query.q ? ilike(tags.name, literalContainsPattern(query.q)) : undefined)
       .groupBy(tags.id)
       .orderBy(desc(count(conversationTags.conversationId)), tags.name);
     return rows.map((row) => ({
@@ -96,59 +98,16 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
       if (params.id === input.targetTagId) {
         return reply.code(400).send({ error: "Source and target tags must be different" });
       }
-      const [source, target, sourceLinks, targetLinks] = await Promise.all([
-        db.select().from(tags).where(eq(tags.id, params.id)).limit(1),
-        db.select().from(tags).where(eq(tags.id, input.targetTagId)).limit(1),
-        db.select().from(conversationTags).where(eq(conversationTags.tagId, params.id)),
-        db.select().from(conversationTags).where(eq(conversationTags.tagId, input.targetTagId)),
-      ]);
-      if (!source[0] || !target[0]) {
+      const result = await mergeTagIntoTag({
+        sourceTagId: params.id,
+        targetTagId: input.targetTagId,
+      });
+      if (!result) {
         return reply.code(404).send({ error: "Source or target tag not found" });
       }
-      const targetByConversation = new Map(
-        targetLinks.map((link) => [link.conversationId, link]),
-      );
-      await db.transaction(async (tx) => {
-        for (const sourceLink of sourceLinks) {
-          const existing = targetByConversation.get(sourceLink.conversationId);
-          if (existing) {
-            const merged = mergeConversationTagState(existing, sourceLink);
-            await tx
-              .update(conversationTags)
-              .set({
-                ...merged,
-                updatedAt: new Date(),
-              })
-              .where(
-                and(
-                  eq(conversationTags.conversationId, sourceLink.conversationId),
-                  eq(conversationTags.tagId, input.targetTagId),
-                ),
-              );
-          } else {
-            await tx.insert(conversationTags).values({
-              ...sourceLink,
-              tagId: input.targetTagId,
-              updatedAt: new Date(),
-            });
-          }
-        }
-        await tx.delete(tags).where(eq(tags.id, params.id));
-        await tx
-          .update(tags)
-          .set({ updatedAt: new Date() })
-          .where(eq(tags.id, input.targetTagId));
-      });
-      const result = {
-        sourceTagId: params.id,
-        sourceTagName: source[0].name,
-        targetTagId: input.targetTagId,
-        targetTagName: target[0].name,
-        movedConversationCount: sourceLinks.length,
-      };
       await writeOperationLog({
         scope: "classification",
-        message: `标签“${source[0].name}”已合并到“${target[0].name}”`,
+        message: `标签“${result.sourceTagName}”已合并到“${result.targetTagName}”`,
         status: "completed",
         entityType: "tag",
         entityId: input.targetTagId,
@@ -221,9 +180,18 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
         .object({ id: z.string().uuid(), tagId: z.string().uuid() })
         .parse(request.params);
       const input = z.object({ lockedByUser: z.boolean() }).parse(request.body);
+      const now = new Date();
       const [link] = await db
         .update(conversationTags)
-        .set({ lockedByUser: input.lockedByUser, updatedAt: new Date() })
+        .set({
+          lockedByUser: input.lockedByUser,
+          // “解锁”表示真正交还 AI 管理，而不是留下一个仍受 manual
+          // 来源保护、永远不会被自动整理替换的关系。
+          ...(input.lockedByUser
+            ? { source: "manual" as const, confidence: 1 }
+            : { source: "auto" as const, confidence: null }),
+          updatedAt: now,
+        })
         .where(
           and(
             eq(conversationTags.conversationId, params.id),
@@ -232,6 +200,11 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
         )
         .returning();
       if (!link) return reply.code(404).send({ error: "Conversation tag not found" });
+      if (!input.lockedByUser) {
+        await enqueueConversationClassification(params.id).catch((error) =>
+          request.log.warn({ error }, "Failed to queue AI organization after tag release"),
+        );
+      }
       return link;
     },
   );

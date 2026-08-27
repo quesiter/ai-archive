@@ -1,11 +1,28 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  captureIdempotencyKey,
   createCoalescedRunner,
   lfSeparatedLines,
   observedCaptureTime,
+  retryDelayMs,
+  retryableUploadStatus,
 } from "../src/sync-runtime.js";
 
 describe("local sync runtime", () => {
+  it("derives idempotency from the exact capture payload", () => {
+    const base = {
+      provider: "codex",
+      adapterVersion: "codex-jsonl-v4",
+      captureMode: "import",
+      payload: { sessionId: "session-1", capturedAt: "2026-08-28T00:00:00.000Z" },
+    };
+    expect(captureIdempotencyKey(base)).toBe(captureIdempotencyKey(base));
+    expect(captureIdempotencyKey(base)).not.toBe(captureIdempotencyKey({
+      ...base,
+      payload: { ...base.payload, capturedAt: "2026-08-28T00:01:00.000Z" },
+    }));
+  });
+
   it("splits JSONL only on LF and preserves standalone CR whitespace", async () => {
     const chunks = [
       '{"type":"response_item",\r"payload":1}\r',
@@ -68,5 +85,16 @@ describe("local sync runtime", () => {
     await initial;
 
     expect(task).toHaveBeenCalledTimes(2);
+  });
+
+  it("backs off network and server failures but does not retry invalid requests", () => {
+    expect([retryDelayMs(1), retryDelayMs(2), retryDelayMs(3)])
+      .toEqual([5_000, 10_000, 20_000]);
+    expect(retryDelayMs(20)).toBe(15 * 60_000);
+    expect(retryDelayMs(1, "120")).toBe(120_000);
+    expect(retryableUploadStatus(429)).toBe(true);
+    expect(retryableUploadStatus(503)).toBe(true);
+    expect(retryableUploadStatus(400)).toBe(false);
+    expect(retryableUploadStatus(401)).toBe(false);
   });
 });

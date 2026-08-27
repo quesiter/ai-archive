@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import {
   CaptureDeltaV1Schema,
   CapturePayloadV1Schema,
@@ -15,11 +15,13 @@ import {
 import { db } from "../db.js";
 import {
   captureRuns,
+  conversationSearchChunks,
   conversationRevisions,
   conversations,
   messageSegments,
   messages,
 } from "../schema.js";
+import { chunkSearchContent } from "./search-chunks.js";
 import { sanitizeDatabaseText, truncateDatabaseText } from "./text-safety.js";
 import { loadCaptureRevisionMessages } from "./revision-storage.js";
 import {
@@ -70,6 +72,78 @@ export function snapshotHash(snapshot: CaptureSnapshotV1): string {
       .map((message) => ({
         ordinal: message.ordinal,
         role: message.role,
+        segments: message.segments.map((segment) => ({
+          type: segment.type,
+          content: normalizedSegmentContent(segment.type, segment.content),
+          href: segment.href ?? null,
+          language: segment.language ?? null,
+        })),
+      })),
+  });
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+/** Stable revision identity: content identity plus the captured title/URL. */
+export function revisionIdentityHash(snapshot: CaptureSnapshotV1): string {
+  return createHash("sha256").update(JSON.stringify({
+    snapshotHash: snapshotHash(snapshot),
+    title: snapshot.title ?? null,
+    canonicalUrl: snapshot.canonicalUrl ?? null,
+  })).digest("hex");
+}
+
+export function captureIdempotencyReplayMode(input: {
+  previousSnapshotHash: string | null;
+  previousPayloadIdentityHash: string | null;
+  currentSnapshotHash: string;
+  currentRevisionIdentityHash: string;
+}): "replay" | "legacy_bypass" | "conflict" {
+  if (input.previousPayloadIdentityHash) {
+    return input.previousPayloadIdentityHash === input.currentRevisionIdentityHash
+      ? "replay"
+      : "conflict";
+  }
+  return input.previousSnapshotHash === input.currentSnapshotHash
+    ? "replay"
+    : "legacy_bypass";
+}
+
+/**
+ * Hashes the exact reconstructable archive facts. This is deliberately
+ * separate from snapshotHash, whose stable identity semantics ignore mutable
+ * capture metadata for deduplication.
+ */
+export function contentIntegrityHash(snapshot: CaptureSnapshotV1): string {
+  const canonical = JSON.stringify({
+    schemaVersion: snapshot.schemaVersion,
+    provider: snapshot.provider,
+    sessionId: snapshot.sessionId,
+    branchFingerprint: snapshot.branchFingerprint,
+    title: snapshot.title ?? null,
+    canonicalUrl: snapshot.canonicalUrl ?? null,
+    adapterVersion: snapshot.adapterVersion,
+    capturedAt: new Date(snapshot.capturedAt).toISOString(),
+    captureMode: snapshot.captureMode,
+    triggerReason: snapshot.triggerReason ?? null,
+    baseRevisionId: snapshot.baseRevisionId ?? null,
+    baseMessageCount: snapshot.baseMessageCount ?? null,
+    completeness: {
+      status: snapshot.completeness.status,
+      topReached: snapshot.completeness.topReached,
+      bottomReached: snapshot.completeness.bottomReached,
+      stable: snapshot.completeness.stable,
+      reason: snapshot.completeness.reason ?? null,
+    },
+    messages: [...snapshot.messages]
+      .sort((left, right) => left.ordinal - right.ordinal)
+      .map((message) => ({
+        ordinal: message.ordinal,
+        externalMessageId: message.externalMessageId ?? null,
+        role: message.role,
+        model: message.model ?? null,
+        createdAt: message.createdAt
+          ? new Date(message.createdAt).toISOString()
+          : null,
         segments: message.segments.map((segment) => ({
           type: segment.type,
           content: normalizedSegmentContent(segment.type, segment.content),
@@ -287,6 +361,23 @@ export function databaseSafeSegmentContent(segment: CaptureMessage["segments"][n
   return truncateDatabaseText(normalized, limit, `${segment.type} segment`);
 }
 
+/**
+ * Produces the exact message representation that can be reconstructed from the
+ * database. Revision hashes must use this form, otherwise an intentionally
+ * truncated oversized segment would later look like archive corruption.
+ */
+export function normalizeCaptureMessagesForStorage(
+  input: readonly CaptureMessage[],
+): CaptureMessage[] {
+  return input.map((message) => ({
+    ...message,
+    segments: message.segments.map((segment) => ({
+      ...segment,
+      content: databaseSafeSegmentContent(segment),
+    })),
+  }));
+}
+
 function sanitizeCaptureMessageForStorage(
   message: CaptureMessage,
   customRules: readonly CompiledCustomRedactionRule[],
@@ -412,6 +503,9 @@ async function insertCaptureRun(
     sessionId: string;
     idempotencyKey?: string | undefined;
     snapshotHash?: string | null;
+    payloadIdentityHash?: string | null;
+    adapterVersion?: string | null;
+    messageCount?: number | null;
     status: "complete" | "partial" | "failed";
     capturedAt: string | Date;
     captureMode: CaptureMode;
@@ -429,6 +523,9 @@ async function insertCaptureRun(
       externalSessionId: input.sessionId,
       idempotencyKey: input.idempotencyKey ?? null,
       snapshotHash: input.snapshotHash ?? null,
+      payloadIdentityHash: input.payloadIdentityHash ?? null,
+      adapterVersion: input.adapterVersion ?? null,
+      messageCount: input.messageCount ?? null,
       captureMode: input.captureMode,
       triggerReason: input.triggerReason ?? null,
       baseRevisionId: input.baseRevisionId ?? null,
@@ -448,6 +545,7 @@ async function insertRevision(
     storedMessages: CaptureMessage[];
     storageKind: "snapshot" | "delta";
     hash: string;
+    identityHash: string;
     deviceId: string | null;
   },
 ) {
@@ -462,6 +560,8 @@ async function insertRevision(
       conversationId: input.conversationId,
       branchFingerprint: input.snapshot.branchFingerprint,
       snapshotHash: input.hash,
+      revisionIdentityHash: input.identityHash,
+      contentIntegrityHash: contentIntegrityHash(input.snapshot),
       completeness: input.snapshot.completeness.status,
       topReached: input.snapshot.completeness.topReached,
       bottomReached: input.snapshot.completeness.bottomReached,
@@ -473,6 +573,9 @@ async function insertRevision(
       baseMessageCount: input.snapshot.baseMessageCount ?? null,
       storageKind: input.storageKind,
       adapterVersion: input.snapshot.adapterVersion,
+      capturedTitle: input.snapshot.title ?? null,
+      capturedCanonicalUrl: input.snapshot.canonicalUrl ?? null,
+      metadataCaptured: true,
       sourceDeviceId: input.deviceId,
       capturedAt: new Date(input.snapshot.capturedAt),
       messageCount: input.snapshot.messages.length,
@@ -487,7 +590,7 @@ async function insertRevision(
     .onConflictDoNothing({
       target: [
         conversationRevisions.conversationId,
-        conversationRevisions.snapshotHash,
+        conversationRevisions.revisionIdentityHash,
       ],
     })
     .returning({ id: conversationRevisions.id });
@@ -498,7 +601,7 @@ async function insertRevision(
       .where(
         and(
           eq(conversationRevisions.conversationId, input.conversationId),
-          eq(conversationRevisions.snapshotHash, input.hash),
+          eq(conversationRevisions.revisionIdentityHash, input.identityHash),
         ),
       )
       .limit(1);
@@ -546,6 +649,22 @@ async function insertRevision(
 
     for (const segmentBatch of chunks(segmentRows, SEGMENT_INSERT_BATCH_SIZE)) {
       await tx.insert(messageSegments).values(segmentBatch);
+    }
+    const searchChunkRows = messageBatch.flatMap((message) => {
+      const messageId = messageIdsByOrdinal.get(message.ordinal);
+      if (!messageId) throw new Error("Failed to map search chunk message");
+      const content = message.segments
+        .map((segment) => databaseSafeSegmentContent(segment))
+        .join("\n");
+      return chunkSearchContent(content).map((chunk, chunkIndex) => ({
+        revisionId: revision.id,
+        messageId,
+        chunkIndex,
+        content: chunk,
+      }));
+    });
+    for (const searchChunkBatch of chunks(searchChunkRows, SEGMENT_INSERT_BATCH_SIZE)) {
+      await tx.insert(conversationSearchChunks).values(searchChunkBatch);
     }
   }
   return { id: revision.id, unchanged: false };
@@ -631,8 +750,15 @@ export function mergedSnapshotFromDelta(input: {
     provider: input.delta.provider,
     sessionId: input.delta.sessionId,
     branchFingerprint: input.delta.branchFingerprint,
-    ...(input.delta.title ? { title: input.delta.title } : {}),
-    ...(input.delta.canonicalUrl ? { canonicalUrl: input.delta.canonicalUrl } : {}),
+    ...(input.delta.title || input.baseRevision.capturedTitle
+      ? { title: input.delta.title ?? input.baseRevision.capturedTitle ?? undefined }
+      : {}),
+    ...(input.delta.canonicalUrl || input.baseRevision.capturedCanonicalUrl
+      ? {
+          canonicalUrl:
+            input.delta.canonicalUrl ?? input.baseRevision.capturedCanonicalUrl ?? undefined,
+        }
+      : {}),
     adapterVersion: input.delta.adapterVersion,
     capturedAt: input.delta.capturedAt,
     captureMode: "append",
@@ -726,8 +852,15 @@ export async function ingestCapture(
       sql`select pg_advisory_xact_lock(hashtextextended(${`conversation:${provider}:${sessionId}`}, 0))`,
     );
 
-    const { snapshot, storedMessages, storageKind } = await snapshotFromPayload(tx, payload);
+    const resolved = await snapshotFromPayload(tx, payload);
+    const snapshot = {
+      ...resolved.snapshot,
+      messages: normalizeCaptureMessagesForStorage(resolved.snapshot.messages),
+    };
+    const storedMessages = normalizeCaptureMessagesForStorage(resolved.storedMessages);
+    const { storageKind } = resolved;
     const hash = snapshotHash(snapshot);
+    const identityHash = revisionIdentityHash(snapshot);
 
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`${snapshot.provider}:${snapshot.sessionId}:${snapshot.branchFingerprint}`}, 0))`,
@@ -738,7 +871,10 @@ export async function ingestCapture(
         sql`select pg_advisory_xact_lock(hashtextextended(${`${deviceId}:${idempotencyKey}`}, 0))`,
       );
       const [previousRun] = await tx
-        .select({ snapshotHash: captureRuns.snapshotHash })
+        .select({
+          snapshotHash: captureRuns.snapshotHash,
+          payloadIdentityHash: captureRuns.payloadIdentityHash,
+        })
         .from(captureRuns)
         .where(
           and(
@@ -748,9 +884,23 @@ export async function ingestCapture(
         )
         .limit(1);
       if (previousRun) {
-        if (previousRun.snapshotHash !== hash) {
+        const replayMode = captureIdempotencyReplayMode({
+          previousSnapshotHash: previousRun.snapshotHash,
+          previousPayloadIdentityHash: previousRun.payloadIdentityHash,
+          currentSnapshotHash: hash,
+          currentRevisionIdentityHash: identityHash,
+        });
+        if (replayMode === "conflict") {
           throw new Error("Idempotency-Key was already used for another capture payload");
         }
+        if (replayMode === "legacy_bypass") {
+          // Pre-V2.3 agents derived the key from source-file bytes, while the
+          // server-side normalized snapshot hash can change after redaction or
+          // storage-normalization upgrades. Treat that unverifiable legacy key
+          // as absent for this request; revision identity still deduplicates the
+          // archive and current capture records retain strict payload identity.
+          idempotencyKey = undefined;
+        } else {
         const [previousConversation] = await tx
           .select({ id: conversations.id })
           .from(conversations)
@@ -761,18 +911,33 @@ export async function ingestCapture(
             ),
           )
           .limit(1);
-        const [previousRevision] = previousConversation
+        let [previousRevision] = previousConversation
           ? await tx
               .select({ id: conversationRevisions.id })
               .from(conversationRevisions)
               .where(
                 and(
                   eq(conversationRevisions.conversationId, previousConversation.id),
-                  eq(conversationRevisions.snapshotHash, hash),
+                  previousRun.payloadIdentityHash
+                    ? eq(conversationRevisions.revisionIdentityHash, identityHash)
+                    : and(
+                        eq(conversationRevisions.snapshotHash, hash),
+                        isNull(conversationRevisions.revisionIdentityHash),
+                      ),
                 ),
               )
               .limit(1)
           : [];
+        if (!previousRevision && previousConversation && !previousRun.payloadIdentityHash) {
+          [previousRevision] = await tx
+            .select({ id: conversationRevisions.id })
+            .from(conversationRevisions)
+            .where(and(
+              eq(conversationRevisions.conversationId, previousConversation.id),
+              eq(conversationRevisions.snapshotHash, hash),
+            ))
+            .limit(1);
+        }
         if (!previousConversation || !previousRevision) {
           throw new Error("Idempotency record is inconsistent with the archived capture");
         }
@@ -799,6 +964,7 @@ export async function ingestCapture(
           captureMode: snapshot.captureMode,
           triggerReason: snapshot.triggerReason ?? null,
         };
+        }
       }
     }
 
@@ -809,7 +975,7 @@ export async function ingestCapture(
       .where(
         and(
           eq(conversationRevisions.conversationId, conversation.id),
-          eq(conversationRevisions.snapshotHash, hash),
+          eq(conversationRevisions.revisionIdentityHash, identityHash),
         ),
       )
       .limit(1);
@@ -822,6 +988,9 @@ export async function ingestCapture(
         sessionId: snapshot.sessionId,
         idempotencyKey,
         snapshotHash: hash,
+        payloadIdentityHash: identityHash,
+        adapterVersion: snapshot.adapterVersion,
+        messageCount: snapshot.messages.length,
         status: snapshot.completeness.status,
         capturedAt: snapshot.capturedAt,
         captureMode: snapshot.captureMode,
@@ -846,6 +1015,7 @@ export async function ingestCapture(
       storedMessages,
       storageKind,
       hash,
+      identityHash,
       deviceId,
     });
     await updateStoredTokenUsage(tx, revision.id, snapshot.tokenUsage);
@@ -855,6 +1025,9 @@ export async function ingestCapture(
       sessionId: snapshot.sessionId,
       idempotencyKey,
       snapshotHash: hash,
+      payloadIdentityHash: identityHash,
+      adapterVersion: snapshot.adapterVersion,
+      messageCount: snapshot.messages.length,
       status: snapshot.completeness.status,
       capturedAt: snapshot.capturedAt,
       captureMode: snapshot.captureMode,
@@ -883,6 +1056,8 @@ export async function recordCaptureFailure(input: {
   error: string;
   captureMode?: CaptureMode;
   triggerReason?: CaptureTriggerReason;
+  adapterVersion?: string;
+  messageCount?: number;
 }): Promise<void> {
   await db.insert(captureRuns).values({
     deviceId: input.deviceId,
@@ -891,6 +1066,8 @@ export async function recordCaptureFailure(input: {
     idempotencyKey: null,
     captureMode: input.captureMode ?? "full",
     triggerReason: input.triggerReason ?? null,
+    adapterVersion: input.adapterVersion ?? null,
+    messageCount: input.messageCount ?? null,
     status: "failed",
     error: truncateDatabaseText(
       redactSensitiveTextForStorage(input.error).text,
@@ -949,4 +1126,35 @@ export async function hardDeleteConversation(id: string): Promise<boolean> {
       .returning({ id: conversations.id });
     return rows.length > 0;
   });
+}
+
+export async function softDeleteConversation(id: string): Promise<boolean> {
+  const rows = await db
+    .update(conversations)
+    .set({ deletedAt: new Date() })
+    .where(and(eq(conversations.id, id), isNull(conversations.deletedAt)))
+    .returning({ id: conversations.id });
+  return rows.length > 0;
+}
+
+export async function restoreConversation(id: string): Promise<boolean> {
+  const rows = await db
+    .update(conversations)
+    .set({ deletedAt: null })
+    .where(and(eq(conversations.id, id), isNotNull(conversations.deletedAt)))
+    .returning({ id: conversations.id });
+  return rows.length > 0;
+}
+
+export async function purgeDeletedConversations(retentionDays = 30): Promise<number> {
+  const cutoff = new Date(Date.now() - retentionDays * 86_400_000);
+  const rows = await db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(and(isNotNull(conversations.deletedAt), lt(conversations.deletedAt, cutoff)));
+  let purged = 0;
+  for (const row of rows) {
+    if (await hardDeleteConversation(row.id)) purged += 1;
+  }
+  return purged;
 }

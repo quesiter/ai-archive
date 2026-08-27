@@ -49,6 +49,31 @@ const ALLOWED_SETTINGS = new Set([
   "classification.maxConversationChars",
 ]);
 
+const BooleanSettingSchema = z.enum(["true", "false"]);
+const settingSchemas: Record<string, z.ZodType<string>> = {
+  "ai.pacingEnabled": BooleanSettingSchema,
+  "ai.requestIntervalSeconds": z.string().regex(/^\d+$/).refine(
+    (value) => Number(value) >= 0 && Number(value) <= 3600,
+    "Must be an integer from 0 to 3600",
+  ),
+  "ai.nightlyMaintenanceEnabled": BooleanSettingSchema,
+  "smtp.port": z.string().refine(
+    (value) => value === "" || (/^\d+$/.test(value) && Number(value) >= 1 && Number(value) <= 65_535),
+    "Must be empty or an integer from 1 to 65535",
+  ),
+  "smtp.secure": BooleanSettingSchema,
+  "reports.weeklyEnabled": BooleanSettingSchema,
+  "reports.monthlyEnabled": BooleanSettingSchema,
+  "classification.autoOnCapture": BooleanSettingSchema,
+  "classification.autoReclassify": BooleanSettingSchema,
+  "classification.runMode": z.enum(["economy", "full"]),
+  "classification.reuseStable": BooleanSettingSchema,
+  "classification.maxConversationChars": z.string().regex(/^\d+$/).refine(
+    (value) => Number(value) >= 2_000 && Number(value) <= 40_000,
+    "Must be an integer from 2000 to 40000",
+  ),
+};
+
 export function securityPackStatus(
   rules: Array<{ pattern: string; enabled: boolean }>,
 ): { total: number; installed: number; enabled: number; fullyEnabled: boolean } {
@@ -88,6 +113,16 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     for (const key of Object.keys(input)) {
       if (!ALLOWED_SETTINGS.has(key)) {
         return reply.code(400).send({ error: `Unsupported setting: ${key}` });
+      }
+      const schema = settingSchemas[key];
+      if (schema) {
+        const validated = schema.safeParse(input[key]);
+        if (!validated.success) {
+          return reply.code(400).send({
+            error: `Invalid setting: ${key}`,
+            issues: validated.error.issues,
+          });
+        }
       }
     }
     await setSettings(

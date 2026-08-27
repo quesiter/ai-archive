@@ -192,7 +192,11 @@ export async function loadCaptureRevisionMessages(
   executor: QueryExecutor = db,
 ): Promise<CaptureMessage[]> {
   const hydrated = await loadHydratedRevisionMessages(revisionId, executor);
-  return hydrated.map((message) => ({
+  return hydrated.map(toCaptureMessage);
+}
+
+function toCaptureMessage(message: HydratedRevisionMessage): CaptureMessage {
+  return {
     ordinal: message.ordinal,
     role: message.role,
     ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
@@ -206,5 +210,18 @@ export async function loadCaptureRevisionMessages(
       ...(segment.href ? { href: segment.href } : {}),
       ...(segment.language ? { language: segment.language } : {}),
     })),
-  }));
+  };
+}
+
+export async function loadCaptureRevisionMessagesBatch(
+  revisionIds: readonly string[],
+  executor: QueryExecutor = db,
+): Promise<Map<string, CaptureMessage[]>> {
+  const hydrated = await loadHydratedRevisionMessagesBatch(revisionIds, executor);
+  return new Map(
+    [...hydrated].map(([revisionId, revisionMessages]) => [
+      revisionId,
+      revisionMessages.map(toCaptureMessage),
+    ]),
+  );
 }

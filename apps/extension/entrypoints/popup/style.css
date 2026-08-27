@@ -71,3 +71,15 @@ footer { position: relative; z-index: 1; display: flex; justify-content: space-b
 .link:hover { background: transparent; box-shadow: none; }
 .message { position: relative; z-index: 1; margin-top: 9px; border: 1px solid rgba(24,184,145,.15); border-radius: 10px; background: rgba(225,248,241,.88); padding: 8px 10px; color: #155f53; font-size: 10.5px; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+
+/* V2.3 durable outbox diagnostics */
+.auth-revoked { color: #9b3d32; background: #fff0ed; border-radius: 8px; padding: 8px; }
+.outbox-section { border-top: 1px solid #dbe4e1; padding-top: 10px; }
+.outbox-heading, .outbox-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.outbox-heading h2 { margin: 0; }
+.outbox-heading h2 span { color: #687773; font-weight: 500; }
+.outbox-item { padding: 9px 0; border-top: 1px solid #edf1ef; display: grid; gap: 7px; }
+.outbox-item > div:first-child { display: grid; gap: 3px; min-width: 0; }
+.outbox-item strong, .outbox-item small { overflow-wrap: anywhere; }
+.outbox-actions { justify-content: flex-end; }
+.danger-link { color: #a43e3e !important; }

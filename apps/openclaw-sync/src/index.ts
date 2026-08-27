@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, platform, release } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { createGunzip, gzip } from "node:zlib";
@@ -24,9 +24,12 @@ import {
   parseOpenClawJsonl,
 } from "./parser.js";
 import {
+  captureIdempotencyKey,
   createCoalescedRunner,
   lfSeparatedLines,
   observedCaptureTime,
+  retryDelayMs,
+  retryableUploadStatus,
 } from "./sync-runtime.js";
 
 const execFileAsync = promisify(execFile);
@@ -46,7 +49,8 @@ const SAFE_MAX_MESSAGES = 12_000;
 const SAFE_DELAY_MS = 750;
 const BYTES_PER_MIB = 1024 * 1024;
 const MAX_DECOMPRESSED_TRANSCRIPT_BYTES = 200 * BYTES_PER_MIB;
-const SYNC_AGENT_VERSION = "V2.1.0";
+const SYNC_AGENT_VERSION = "V2.3.0";
+const MAX_UPLOAD_ATTEMPTS = 6;
 const TRANSCRIPT_IGNORE_PATTERNS = [
   "**/*.bak",
   "**/*.deleted",
@@ -405,6 +409,24 @@ class IncrementalBaseMismatch extends Error {
   }
 }
 
+class AuthenticationRevoked extends Error {
+  constructor() {
+    super("AUTH_REVOKED: device authorization is invalid; pair this agent again");
+    this.name = "AuthenticationRevoked";
+  }
+}
+
+class CaptureUploadError extends Error {
+  constructor(
+    message: string,
+    readonly status: number | null,
+    readonly retryAfter: string | null = null,
+  ) {
+    super(message);
+    this.name = "CaptureUploadError";
+  }
+}
+
 function formatError(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
   return error.stack ?? error.message;
@@ -456,7 +478,7 @@ function formatUploadError(input: {
   return details.join("\n");
 }
 
-async function sendCapture(
+async function sendCaptureOnce(
   payload: CapturePayloadV1,
   config: SyncConfig,
   idempotencyKey: string,
@@ -484,18 +506,86 @@ async function sendCapture(
     requiresFullCapture?: boolean;
   } & CaptureUploadResult;
   if (!response.ok) {
+    if (response.status === 401) throw new AuthenticationRevoked();
     if (response.status === 409 && body.requiresFullCapture) {
       throw new IncrementalBaseMismatch(body.error);
     }
-    throw new Error(
+    throw new CaptureUploadError(
       formatUploadError({
         status: response.status,
         body: body as Record<string, unknown>,
         fallback: rawBody,
       }),
+      response.status,
+      response.headers.get("Retry-After"),
     );
   }
   return body;
+}
+
+async function sendCapture(
+  payload: CapturePayloadV1,
+  config: SyncConfig,
+  idempotencyKey: string,
+): Promise<CaptureUploadResult> {
+  for (let attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt += 1) {
+    try {
+      return await sendCaptureOnce(payload, config, idempotencyKey);
+    } catch (error) {
+      if (error instanceof AuthenticationRevoked || error instanceof IncrementalBaseMismatch) {
+        throw error;
+      }
+      const status = error instanceof CaptureUploadError ? error.status : null;
+      const retryable = status === null || retryableUploadStatus(status);
+      if (!retryable || attempt >= MAX_UPLOAD_ATTEMPTS) throw error;
+      const wait = retryDelayMs(
+        attempt,
+        error instanceof CaptureUploadError ? error.retryAfter : null,
+      );
+      console.warn(
+        `upload retry ${attempt}/${MAX_UPLOAD_ATTEMPTS - 1} in ${Math.ceil(wait / 1_000)}s (${status ?? "network"})`,
+      );
+      await delay(wait);
+    }
+  }
+  throw new Error("Upload retry loop ended unexpectedly");
+}
+
+function latestSuccessfulSyncAt(state: SyncState): string | undefined {
+  return Object.values(state.files)
+    .flatMap((value) => typeof value === "object" && value.lastSuccessfulSyncAt
+      ? [value.lastSuccessfulSyncAt]
+      : [])
+    .sort()
+    .at(-1);
+}
+
+async function sendHeartbeat(input: {
+  config: SyncConfig;
+  state: SyncState;
+  trackedFiles: number;
+  skippedFiles: number;
+  lastError?: { at: string; code: string };
+}): Promise<void> {
+  const response = await fetch(`${input.config.serverUrl.replace(/\/$/, "")}/api/v1/devices/heartbeat`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${input.config.deviceToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      clientVersion: SYNC_AGENT_VERSION,
+      os: `${platform()} ${release()}`,
+      lastScanAt: new Date().toISOString(),
+      lastSuccessfulSyncAt: latestSuccessfulSyncAt(input.state),
+      lastErrorAt: input.lastError?.at ?? null,
+      lastErrorCode: input.lastError?.code ?? null,
+      trackedFiles: input.trackedFiles,
+      skippedFiles: input.skippedFiles,
+    }),
+  });
+  if (response.status === 401) throw new AuthenticationRevoked();
+  if (!response.ok) throw new Error(`Device heartbeat failed with status ${response.status}`);
 }
 
 function stateFromSnapshot(input: {
@@ -629,11 +719,12 @@ async function upload(
         return;
       }
       try {
-        const result = await sendCapture(
-          delta,
-          config,
-          `${delta.provider}:${delta.adapterVersion}:append:${previous.readOffset}:${metadata.size}:${tailHash}`,
-        );
+        const result = await sendCapture(delta, config, captureIdempotencyKey({
+          provider: delta.provider,
+          adapterVersion: delta.adapterVersion,
+          captureMode: "append",
+          payload: delta,
+        }));
         state.files[source.path] = stateFromDelta({
           source,
           metadata,
@@ -754,11 +845,12 @@ async function upload(
     );
     return;
   }
-  const result = await sendCapture(
-    snapshot,
-    config,
-    `${snapshot.provider}:${snapshot.adapterVersion}:${hash}`,
-  );
+  const result = await sendCapture(snapshot, config, captureIdempotencyKey({
+    provider: snapshot.provider,
+    adapterVersion: snapshot.adapterVersion,
+    captureMode: snapshot.captureMode,
+    payload: snapshot,
+  }));
   state.files[source.path] = stateFromSnapshot({
     source,
     metadata,
@@ -982,13 +1074,40 @@ async function run(args: string[]): Promise<void> {
   await logVersionHandshake(config.serverUrl);
   console.log(formatLimitSummary(options));
   const scan = createCoalescedRunner(async () => {
-    for (const source of await transcriptFiles(config, options)) {
-      await upload(source, config, state, options).catch((error) =>
-        console.error(`sync failed for ${source.provider}:${source.path}:\n${formatError(error)}`),
-      );
+    const sources = await transcriptFiles(config, options);
+    let lastError: { at: string; code: string } | undefined;
+    let authRevoked = false;
+    for (const source of sources) {
+      try {
+        await upload(source, config, state, options);
+      } catch (error) {
+        const code = error instanceof AuthenticationRevoked
+          ? "AUTH_REVOKED"
+          : error instanceof CaptureUploadError && error.status
+            ? `HTTP_${error.status}`
+            : "SYNC_FAILED";
+        lastError = { at: new Date().toISOString(), code };
+        console.error(`sync failed for ${source.provider}:${source.path}:\n${formatError(error)}`);
+        if (error instanceof AuthenticationRevoked) {
+          authRevoked = true;
+          break;
+        }
+      }
       if (options.delayMs > 0) await delay(options.delayMs);
     }
     await reconcileOpenClawCli(state);
+    if (!authRevoked) {
+      const skippedFiles = Object.values(state.files).filter(
+        (value) => typeof value === "object" && Boolean(value.lastSkippedReason),
+      ).length;
+      await sendHeartbeat({
+        config,
+        state,
+        trackedFiles: sources.length,
+        skippedFiles,
+        ...(lastError ? { lastError } : {}),
+      }).catch((error) => console.warn(formatError(error)));
+    }
   });
   if (options.skipInitialScan) {
     console.log("Initial and periodic scans skipped; only future filesystem changes will be watched.");
@@ -1050,6 +1169,16 @@ async function rebuild(args: string[]): Promise<void> {
     if (options.delayMs > 0) await delay(options.delayMs);
   }
   await reconcileOpenClawCli(state);
+  const skippedFiles = Object.values(state.files).filter(
+    (value) => typeof value === "object" && Boolean(value.lastSkippedReason),
+  ).length;
+  await sendHeartbeat({
+    config,
+    state,
+    trackedFiles: files.length,
+    skippedFiles,
+    ...(failed ? { lastError: { at: new Date().toISOString(), code: "SYNC_FAILED" } } : {}),
+  }).catch((error) => console.warn(formatError(error)));
   console.log(
     `Rebuild completed from ${files.length} eligible transcript files${failed ? ` (${failed} failed)` : ""}`,
   );

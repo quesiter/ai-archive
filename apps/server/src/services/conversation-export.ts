@@ -30,7 +30,7 @@ export interface ConversationExportRow {
 }
 
 export interface ConversationExportData {
-  scope: "conversation" | "project";
+  scope: "conversation" | "project" | "selection";
   scopeId: string;
   scopeName: string;
   generatedAt: string;
@@ -94,6 +94,7 @@ export function exportableMessageContent(input: {
 async function loadScopeConversations(input: {
   conversationId?: string;
   projectId?: string;
+  conversationIds?: string[];
 }): Promise<{
   scope: ConversationExportData["scope"];
   scopeId: string;
@@ -139,6 +140,29 @@ async function loadScopeConversations(input: {
     };
   }
 
+  if (input.conversationIds?.length) {
+    const rows = await db
+      .select({
+        id: conversations.id,
+        title: conversations.title,
+        provider: conversations.provider,
+        externalSessionId: conversations.externalSessionId,
+        canonicalUrl: conversations.canonicalUrl,
+        projectName: projects.name,
+      })
+      .from(conversations)
+      .leftJoin(conversationProjects, eq(conversationProjects.conversationId, conversations.id))
+      .leftJoin(projects, eq(projects.id, conversationProjects.projectId))
+      .where(and(inArray(conversations.id, input.conversationIds), isNull(conversations.deletedAt)))
+      .orderBy(asc(conversations.updatedAt));
+    return {
+      scope: "selection",
+      scopeId: "selection",
+      scopeName: `已选会话-${rows.length}`,
+      conversations: rows,
+    };
+  }
+
   if (!input.projectId) return null;
   const [project] = await db
     .select({ id: projects.id, name: projects.name })
@@ -176,6 +200,7 @@ async function loadScopeConversations(input: {
 async function loadConversationExportSource(input: {
   conversationId?: string;
   projectId?: string;
+  conversationIds?: string[];
 }): Promise<ConversationExportSource | null> {
   const scope = await loadScopeConversations(input);
   if (!scope) return null;
@@ -280,6 +305,7 @@ async function* iterateConversationExportRows(
 export async function loadConversationExportData(input: {
   conversationId?: string;
   projectId?: string;
+  conversationIds?: string[];
 }): Promise<ConversationExportData | null> {
   const source = await loadConversationExportSource(input);
   if (!source) return null;
@@ -465,6 +491,7 @@ export async function renderConversationXlsx(
 export async function createConversationXlsxExport(input: {
   conversationId?: string;
   projectId?: string;
+  conversationIds?: string[];
 }): Promise<{ scopeName: string; stream: Readable } | null> {
   const source = await loadConversationExportSource(input);
   if (!source) return null;

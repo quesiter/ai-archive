@@ -46,6 +46,10 @@ const EnvSchema = z
     IMPORT_INBOX: z.string().default("./data/imports/inbox"),
     IMPORT_PROCESSED: z.string().default("./data/imports/processed"),
     IMPORT_FAILED: z.string().default("./data/imports/failed"),
+    RESTORE_STAGING: z.string().default("./data/restores"),
+    RESTORE_FAILED_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
+    IMPORT_PROCESSED_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
+    IMPORT_FAILED_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
     COMPONENT_RELEASE_DIR: z.string().default(defaultComponentReleaseDirectory()),
     HOST_MONITOR_URL: z.string().url().or(z.literal("")).default(""),
     ARCHIVE_STORAGE_BUDGET_GB: z.preprocess(
@@ -80,6 +84,15 @@ const EnvSchema = z
         code: z.ZodIssueCode.custom,
         path: ["APP_ORIGIN"],
         message: "APP_ORIGIN must use HTTPS in production",
+      });
+    }
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: value.TZ }).format(new Date(0));
+    } catch {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["TZ"],
+        message: "TZ must be a valid IANA timezone",
       });
     }
   });

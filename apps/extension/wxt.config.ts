@@ -39,12 +39,21 @@ const aiOrigins = [
 
 export default defineConfig({
   modules: ["@wxt-dev/module-react"],
+  hooks: {
+    "entrypoints:resolved"(_wxt, entrypoints) {
+      for (let index = entrypoints.length - 1; index >= 0; index -= 1) {
+        if (entrypoints[index]?.inputPath.includes("_Conflict.")) {
+          entrypoints.splice(index, 1);
+        }
+      }
+    },
+  },
   manifest: {
     key: "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqVzNtkfScpEbGTjXMN5K/kttoKDDckV2iTBHhrCw3MvL7bmghrmlsblIJGZTV/mV6+K9DBXE6KL0zXrwjTXcmaYKQ7oD/yzfSxpjD7ZApQpMU8KdvdNfE0DFrUjXC5KvfYQFfKdz0RcEbotzKtY4yYvcs9umkDddpOlm3xpTvr638oSFWQ/SNTWSyesEtSYeOF74CUD3+LLWk+42C8Um31GF+e8tImlW5c5efdAKEkwaE6PcXvLmy7DBtUSswtkvjWXVRdiQekWst6ORbxll06lDBb4n3eRsNx/dbZdrGoESwHxEl6VtUSJo8QXYmkhijq4wxdlbFtMRe8UclbXghwIDAQAB",
     name: "知言归藏",
     description: "归档、检索并按项目与标签整理当前打开的 AI 会话。",
-    version: "2.1.2",
-    version_name: "V2.1.2",
+    version: "2.3.0",
+    version_name: "V2.3.0",
     incognito: "split",
     permissions: ["storage", "alarms", "tabs"],
     optional_host_permissions: [

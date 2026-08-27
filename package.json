@@ -1,16 +1,23 @@
 {
   "name": "ai-conversation-archive",
-  "version": "2.1.2",
+  "version": "2.3.0",
   "private": true,
   "packageManager": "pnpm@11.8.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=22 <25"
   },
   "scripts": {
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
-    "test": "pnpm -r --if-present test",
+    "test": "pnpm --filter @ai-archive/contracts build && pnpm -r --if-present test",
     "test:e2e-api": "node scripts/e2e-api.mjs",
+    "release:qualify": "node scripts/release-qualification.mjs",
+    "docs:check": "node scripts/check-docs.mjs",
+    "benchmark:search": "pnpm --filter @ai-archive/server benchmark:search",
+    "package:chrome": "pnpm --filter @ai-archive/extension zip && node scripts/package-chrome.mjs",
+    "package:nas": "python scripts/package-nas-release.py",
+    "package:windows-sync": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows-sync.ps1",
+    "package:release": "pnpm release:qualify && pnpm package:chrome && pnpm package:windows-sync && python scripts/package-macos-sync.py && pnpm package:nas",
     "lint": "pnpm -r --if-present lint",
     "dev:server": "pnpm --filter @ai-archive/server dev",
     "dev:web": "pnpm --filter @ai-archive/web dev",

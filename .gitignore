@@ -5,6 +5,7 @@ dist/
 .wxt/
 .env
 *.log
+*_Conflict.*
 *.tsbuildinfo
 coverage/
 data/
@@ -20,3 +21,5 @@ release/*
 !release/ai-conversation-archive-nas-*-clean-install.tar.gz
 !release/ai-conversation-archive-windows-sync-*.zip
 !release/ai-conversation-archive-macos-sync-*.tar.gz
+!release/SHA256SUMS-*.txt
+!release/release-qualification-*.json

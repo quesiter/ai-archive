@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, mkdir, readdir, rename, unlink } from "node:fs/promises";
+import { access, mkdir, readdir, rename, stat, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { and, eq, lt, lte, ne, or } from "drizzle-orm";
+import { and, eq, lt, lte, ne, or, sql } from "drizzle-orm";
 import { config } from "../config.js";
 import { db, sqlClient } from "../db.js";
 import { parseArchive } from "../importers/archive.js";
@@ -215,7 +215,8 @@ export async function processArchive(
     .set({
       status: "processing",
       error: null,
-      stats: { stage: "parsing" },
+      attempt: sql`${importJobs.attempt} + 1`,
+      stats: { ...(job.stats ?? {}), stage: "parsing" },
       updatedAt: new Date(),
     })
     .where(
@@ -238,13 +239,16 @@ export async function processArchive(
     entityId: job.id,
     metadata: { filename, stage: "parsing" },
   });
+  let imported = 0;
+  let unchanged = 0;
+  let snapshotCount = 0;
+  let providers: string[] = [];
   try {
     const parsed = await parseArchive(path);
-    const providers = parsed.providers;
+    providers = parsed.providers;
     const singleProvider = parsed.provider;
     const providerLabel = providers.join(", ");
-    let imported = 0;
-    let unchanged = 0;
+    snapshotCount = parsed.snapshots.length;
     let lastProgressAt = Date.now();
     await db
       .update(importJobs)
@@ -254,6 +258,7 @@ export async function processArchive(
           stage: "importing",
           imported,
           unchanged,
+          failed: 0,
           snapshots: parsed.snapshots.length,
           providers,
         },
@@ -283,6 +288,7 @@ export async function processArchive(
               stage: "importing",
               imported,
               unchanged,
+              failed: 0,
               snapshots: parsed.snapshots.length,
               providers,
             },
@@ -315,6 +321,7 @@ export async function processArchive(
           stage: "completed",
           imported,
           unchanged,
+          failed: 0,
           snapshots: parsed.snapshots.length,
           providers,
         },
@@ -333,11 +340,24 @@ export async function processArchive(
   } catch (error) {
     const completedAt = options.finalAttempt ? new Date() : null;
     const message = safeStoredError(error);
+    const processed = imported + unchanged;
+    const terminalStatus = processed > 0 ? "partial" as const : "failed" as const;
+    const status = options.finalAttempt ? terminalStatus : "queued" as const;
     await db
       .update(importJobs)
       .set({
-        status: options.finalAttempt ? "failed" : "queued",
+        status,
         error: message,
+        stats: {
+          stage: status,
+          imported,
+          unchanged,
+          failed: 1,
+          snapshots: snapshotCount || processed + 1,
+          providers,
+          processed,
+          partialSuccess: processed > 0,
+        },
         completedAt,
         updatedAt: completedAt ?? new Date(),
       })
@@ -346,12 +366,21 @@ export async function processArchive(
       scope: "import",
       level: options.finalAttempt ? "error" : "warning",
       message: options.finalAttempt
-        ? `历史导入失败：${filename}`
+        ? processed > 0
+          ? `历史导入部分完成：${filename}，已处理 ${processed}，失败 1`
+          : `历史导入失败：${filename}`
         : `历史导入将重试：${filename}`,
-      status: options.finalAttempt ? "failed" : "queued",
+      status,
       entityType: "import_job",
       entityId: job.id,
-      metadata: { filename, error: message },
+      metadata: {
+        filename,
+        error: message,
+        imported,
+        unchanged,
+        failed: 1,
+        snapshots: snapshotCount || processed + 1,
+      },
     });
     if (options.finalAttempt) {
       await moveArchive(path, config.IMPORT_FAILED, filename).catch(() => undefined);
@@ -361,6 +390,47 @@ export async function processArchive(
   await moveArchive(path, config.IMPORT_PROCESSED, filename, { missingOk: true }).catch(
     () => undefined,
   );
+}
+
+export async function cleanupImportArchives(options: {
+  scope?: "processed" | "failed" | "all";
+  includeUnexpired?: boolean;
+} = {}): Promise<{
+  processed: { files: number; bytes: number };
+  failed: { files: number; bytes: number };
+}> {
+  const scope = options.scope ?? "all";
+  const now = Date.now();
+  async function cleanupDirectory(directory: string, retentionDays: number) {
+    const result = { files: 0, bytes: 0 };
+    await mkdir(directory, { recursive: true });
+    const cutoff = now - retentionDays * 86_400_000;
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const path = join(directory, entry.name);
+      const fileStat = await stat(path).catch(() => null);
+      if (!fileStat) continue;
+      if (!options.includeUnexpired && fileStat.mtimeMs > cutoff) continue;
+      await unlink(path);
+      result.files += 1;
+      result.bytes += fileStat.size;
+    }
+    return result;
+  }
+  return {
+    processed: scope === "failed"
+      ? { files: 0, bytes: 0 }
+      : await cleanupDirectory(
+          config.IMPORT_PROCESSED,
+          config.IMPORT_PROCESSED_RETENTION_DAYS,
+        ),
+    failed: scope === "processed"
+      ? { files: 0, bytes: 0 }
+      : await cleanupDirectory(
+          config.IMPORT_FAILED,
+          config.IMPORT_FAILED_RETENTION_DAYS,
+        ),
+  };
 }
 
 export async function scanImportInbox(): Promise<number> {

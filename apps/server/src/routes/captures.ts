@@ -110,6 +110,20 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
           error: errorMessage(error),
           captureMode: candidate.captureMode === "append" ? "append" : "full",
           ...(triggerReason.success ? { triggerReason: triggerReason.data } : {}),
+          ...(typeof candidate.adapterVersion === "string"
+            ? { adapterVersion: candidate.adapterVersion }
+            : {}),
+          ...((Array.isArray(candidate.messages) || Array.isArray(candidate.appendedMessages))
+            ? {
+                messageCount:
+                  (typeof candidate.baseMessageCount === "number" ? candidate.baseMessageCount : 0) +
+                  (Array.isArray(candidate.messages)
+                    ? candidate.messages.length
+                    : Array.isArray(candidate.appendedMessages)
+                      ? candidate.appendedMessages.length
+                      : 0),
+              }
+            : {}),
         });
         await writeOperationLog({
           scope: "capture",

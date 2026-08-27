@@ -17,7 +17,7 @@ services:
       HOST_PROJECT_CGROUP: ${ARCHIVE_CGROUP_PARENT:-ai-conversation-archive}
       HOST_SAMPLE_INTERVAL_MS: ${HOST_SAMPLE_INTERVAL_MS:-10000}
       HOST_HISTORY_LIMIT: ${HOST_HISTORY_LIMIT:-27}
-      TZ: Asia/Shanghai
+      TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - /proc:/host/proc:ro
       - /sys/fs/cgroup:/host/cgroup:ro
@@ -45,7 +45,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-archive}
       POSTGRES_USER: ${POSTGRES_USER:-archive}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
-      TZ: Asia/Shanghai
+      TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ${ARCHIVE_DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
     ports:
@@ -90,14 +90,17 @@ services:
       IMPORT_INBOX: /data/imports/inbox
       IMPORT_PROCESSED: /data/imports/processed
       IMPORT_FAILED: /data/imports/failed
+      RESTORE_STAGING: /data/restores
+      RESTORE_FAILED_RETENTION_DAYS: ${RESTORE_FAILED_RETENTION_DAYS:-30}
       COMPONENT_RELEASE_DIR: /app/release
       HOST_MONITOR_URL: http://host-monitor:9091
       ARCHIVE_STORAGE_BUDGET_GB: ${ARCHIVE_STORAGE_BUDGET_GB:-}
-      TZ: Asia/Shanghai
+      TZ: ${TZ:-Asia/Shanghai}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       WEB_DIST: /app/apps/web/dist
     volumes:
       - ${ARCHIVE_DATA_DIR:-./data}/imports:/data/imports
+      - ${ARCHIVE_DATA_DIR:-./data}/restores:/data/restores
     ports:
       - "127.0.0.1:${ARCHIVE_PORT:-18080}:8080"
     depends_on:
@@ -130,10 +133,13 @@ services:
       IMPORT_INBOX: /data/imports/inbox
       IMPORT_PROCESSED: /data/imports/processed
       IMPORT_FAILED: /data/imports/failed
-      TZ: Asia/Shanghai
+      RESTORE_STAGING: /data/restores
+      RESTORE_FAILED_RETENTION_DAYS: ${RESTORE_FAILED_RETENTION_DAYS:-30}
+      TZ: ${TZ:-Asia/Shanghai}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - ${ARCHIVE_DATA_DIR:-./data}/imports:/data/imports
+      - ${ARCHIVE_DATA_DIR:-./data}/restores:/data/restores
     depends_on:
       app:
         condition: service_healthy

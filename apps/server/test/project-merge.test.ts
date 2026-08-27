@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   selectRows: [] as unknown[][],
   updateValues: [] as Array<Record<string, unknown>>,
   operations: [] as string[],
+  renameError: null as unknown,
 }));
 
 vi.mock("../src/db.js", () => ({
@@ -27,6 +28,9 @@ vi.mock("../src/db.js", () => ({
             where: async () => {
               mocks.updateValues.push(values);
               mocks.operations.push(typeof values.name === "string" ? "rename" : "update");
+              if (typeof values.name === "string" && mocks.renameError) {
+                throw mocks.renameError;
+              }
             },
           }),
         }),
@@ -61,6 +65,7 @@ beforeEach(() => {
   ];
   mocks.updateValues = [];
   mocks.operations = [];
+  mocks.renameError = null;
 });
 
 describe("project merge", () => {
@@ -91,5 +96,15 @@ describe("project merge", () => {
 
     expect(result?.targetProjectName).toBe("目标项目");
     expect(mocks.updateValues.at(-1)).toMatchObject({ name: "目标项目" });
+  });
+
+  it("maps a normalized target-name collision to HTTP 409", async () => {
+    mocks.renameError = Object.assign(new Error("duplicate key"), { code: "23505" });
+
+    await expect(mergeProjectIntoProject({
+      sourceProjectId: sourceProject.id,
+      targetProjectId: targetProject.id,
+      targetProjectName: " 第三项目 ",
+    })).rejects.toMatchObject({ statusCode: 409 });
   });
 });

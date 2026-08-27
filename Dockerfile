@@ -44,7 +44,7 @@ RUN chmod -R a+rX \
       /usr/local/bin/corepack \
       /usr/local/bin/pnpm \
       /usr/local/bin/pnpx \
-  && mkdir -p /data/imports/inbox /data/imports/processed /data/imports/failed \
+  && mkdir -p /data/imports/inbox /data/imports/processed /data/imports/failed /data/restores \
   && chown -R node:node /data
 WORKDIR /app/apps/server
 ENV WEB_DIST=/app/apps/web/dist

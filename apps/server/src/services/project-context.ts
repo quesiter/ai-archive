@@ -36,7 +36,7 @@ function conversationHref(conversationId: string, revisionId: string): string {
 
 function dateKey(value: Date): string {
   return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Shanghai",
+    timeZone: config.TZ,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

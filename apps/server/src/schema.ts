@@ -31,6 +31,8 @@ export const users = pgTable("users", {
   username: text("username").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   totpSecretEncrypted: text("totp_secret_encrypted").notNull(),
+  pendingTotpSecretEncrypted: text("pending_totp_secret_encrypted"),
+  pendingTotpExpiresAt: timestamp("pending_totp_expires_at", { withTimezone: true }),
   createdAt,
 });
 
@@ -54,6 +56,14 @@ export const devices = pgTable("devices", {
   kind: text("kind").$type<DeviceKind>().notNull(),
   tokenHash: text("token_hash").notNull().unique(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  clientVersion: text("client_version"),
+  os: text("os"),
+  lastScanAt: timestamp("last_scan_at", { withTimezone: true }),
+  lastSuccessfulSyncAt: timestamp("last_successful_sync_at", { withTimezone: true }),
+  lastErrorAt: timestamp("last_error_at", { withTimezone: true }),
+  lastErrorCode: text("last_error_code"),
+  trackedFiles: integer("tracked_files"),
+  skippedFiles: integer("skipped_files"),
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
   createdAt,
 });
@@ -100,6 +110,8 @@ export const conversationRevisions = pgTable(
       .references(() => conversations.id, { onDelete: "cascade" }),
     branchFingerprint: text("branch_fingerprint").notNull(),
     snapshotHash: text("snapshot_hash").notNull(),
+    revisionIdentityHash: text("revision_identity_hash"),
+    contentIntegrityHash: text("content_integrity_hash"),
     completeness: text("completeness").$type<"complete" | "partial">().notNull(),
     topReached: boolean("top_reached").notNull(),
     bottomReached: boolean("bottom_reached").notNull(),
@@ -114,6 +126,9 @@ export const conversationRevisions = pgTable(
       .notNull()
       .default("snapshot"),
     adapterVersion: text("adapter_version").notNull(),
+    capturedTitle: text("captured_title"),
+    capturedCanonicalUrl: text("captured_canonical_url"),
+    metadataCaptured: boolean("metadata_captured").notNull().default(true),
     sourceDeviceId: uuid("source_device_id").references(() => devices.id, {
       onDelete: "set null",
     }),
@@ -146,10 +161,11 @@ export const conversationRevisions = pgTable(
     createdAt,
   },
   (table) => [
-    uniqueIndex("conversation_revision_snapshot_uidx").on(
+    uniqueIndex("conversation_revision_identity_uidx").on(
       table.conversationId,
-      table.snapshotHash,
+      table.revisionIdentityHash,
     ),
+    index("conversation_revision_snapshot_idx").on(table.conversationId, table.snapshotHash),
     index("conversation_revision_conversation_idx").on(table.conversationId),
     index("conversation_revision_base_idx").on(table.baseRevisionId),
     index("conversation_revision_captured_idx").on(table.capturedAt),
@@ -200,6 +216,30 @@ export const messageSegments = pgTable(
   ],
 );
 
+export const conversationSearchChunks = pgTable(
+  "conversation_search_chunks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    revisionId: uuid("revision_id")
+      .notNull()
+      .references(() => conversationRevisions.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    chunkIndex: integer("chunk_index").notNull(),
+    content: text("content").notNull(),
+    createdAt,
+  },
+  (table) => [
+    uniqueIndex("conversation_search_chunks_message_chunk_uidx").on(
+      table.messageId,
+      table.chunkIndex,
+    ),
+    index("conversation_search_chunks_revision_idx").on(table.revisionId),
+    index("conversation_search_chunks_message_idx").on(table.messageId),
+  ],
+);
+
 export const captureRuns = pgTable(
   "capture_runs",
   {
@@ -211,6 +251,9 @@ export const captureRuns = pgTable(
     externalSessionId: text("external_session_id").notNull(),
     idempotencyKey: text("idempotency_key"),
     snapshotHash: text("snapshot_hash"),
+    payloadIdentityHash: text("payload_identity_hash"),
+    adapterVersion: text("adapter_version"),
+    messageCount: integer("message_count"),
     captureMode: text("capture_mode").$type<CaptureMode>().notNull().default("full"),
     triggerReason: text("trigger_reason").$type<CaptureTriggerReason>(),
     baseRevisionId: uuid("base_revision_id"),
@@ -229,16 +272,24 @@ export const captureRuns = pgTable(
   ],
 );
 
-export const projects = pgTable("projects", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  name: text("name").notNull().unique(),
-  description: text("description").notNull().default(""),
-  archived: boolean("archived").notNull().default(false),
-  updatedAt: timestamp("updated_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-  createdAt,
-});
+export const projects = pgTable(
+  "projects",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    normalizedName: text("normalized_name").notNull(),
+    description: text("description").notNull().default(""),
+    archived: boolean("archived").notNull().default(false),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt,
+  },
+  (table) => [
+    uniqueIndex("projects_normalized_name_uidx").on(table.normalizedName),
+    index("projects_name_idx").on(table.name),
+  ],
+);
 
 export const conversationProjects = pgTable("conversation_projects", {
   conversationId: uuid("conversation_id")
@@ -332,7 +383,7 @@ export const backgroundTasks = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     kind: text("kind")
-      .$type<"classification_rebuild" | "storage_redaction">()
+      .$type<"classification_rebuild" | "storage_redaction" | "archive_integrity">()
       .notNull(),
     status: text("status")
       .$type<"queued" | "running" | "completed" | "failed">()
@@ -369,6 +420,13 @@ export const reports = pgTable(
     title: text("title").notNull(),
     summary: text("summary").notNull(),
     bodyMarkdown: text("body_markdown").notNull(),
+    emailStatus: text("email_status")
+      .$type<"not_configured" | "queued" | "sent" | "failed">()
+      .notNull()
+      .default("not_configured"),
+    emailAttempts: integer("email_attempts").notNull().default(0),
+    emailSentAt: timestamp("email_sent_at", { withTimezone: true }),
+    emailError: text("email_error"),
     createdAt,
   },
   (table) => [
@@ -390,6 +448,23 @@ export const settings = pgTable("settings", {
     .defaultNow(),
 });
 
+export const savedSearches = pgTable(
+  "saved_searches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    normalizedName: text("normalized_name").notNull(),
+    query: jsonb("query").$type<Record<string, string>>().notNull().default({}),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt,
+  },
+  (table) => [
+    uniqueIndex("saved_searches_normalized_name_uidx").on(table.normalizedName),
+  ],
+);
+
 export const redactionRules = pgTable("redaction_rules", {
   id: uuid("id").primaryKey().defaultRandom(),
   pattern: text("pattern").notNull(),
@@ -406,8 +481,10 @@ export const importJobs = pgTable(
     fileHash: text("file_hash").notNull().unique(),
     provider: text("provider").$type<Provider>(),
     status: text("status")
-      .$type<"queued" | "processing" | "completed" | "failed">()
+      .$type<"queued" | "processing" | "completed" | "partial" | "failed">()
       .notNull(),
+    attempt: integer("attempt").notNull().default(0),
+    lastRetryAt: timestamp("last_retry_at", { withTimezone: true }),
     stats: jsonb("stats").$type<Record<string, unknown>>().notNull().default({}),
     error: text("error"),
     completedAt: timestamp("completed_at", { withTimezone: true }),
@@ -419,6 +496,46 @@ export const importJobs = pgTable(
   (table) => [
     index("import_jobs_created_idx").on(table.createdAt),
     index("import_jobs_status_updated_idx").on(table.status, table.updatedAt),
+  ],
+);
+
+export const restoreJobs = pgTable(
+  "restore_jobs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    filename: text("filename").notNull(),
+    stagedPath: text("staged_path").notNull(),
+    status: text("status")
+      .$type<
+        | "queued"
+        | "validating"
+        | "validated"
+        | "restoring"
+        | "rebuilding_search"
+        | "verifying"
+        | "recovery_required"
+        | "completed"
+        | "failed"
+        | "cancelled"
+      >()
+      .notNull(),
+    progress: integer("progress").notNull().default(0),
+    phaseMessage: text("phase_message"),
+    counts: jsonb("counts").$type<Record<string, number>>().notNull().default({}),
+    warnings: jsonb("warnings").$type<string[]>().notNull().default([]),
+    error: text("error"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    factsCommittedAt: timestamp("facts_committed_at", { withTimezone: true }),
+    stagedDeletedAt: timestamp("staged_deleted_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt,
+  },
+  (table) => [
+    index("restore_jobs_status_updated_idx").on(table.status, table.updatedAt),
+    index("restore_jobs_created_idx").on(table.createdAt),
   ],
 );
 

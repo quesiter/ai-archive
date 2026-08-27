@@ -6,8 +6,12 @@ import {
   conversations,
   importJobs,
   messageSegments,
+  messages,
   operationLogs,
+  projects,
   reports,
+  savedSearches,
+  tags,
 } from "../schema.js";
 import {
   completeBackgroundTask,
@@ -22,6 +26,8 @@ import {
   redactSensitiveTextForStorage,
   redactSensitiveUrlForStorage,
 } from "./redaction.js";
+import { normalizeProjectName } from "./projects.js";
+import { normalizeTagName } from "./tags.js";
 
 const BATCH_SIZE = 200;
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -103,6 +109,9 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
     db.select({ value: count() }).from(captureRuns),
     db.select({ value: count() }).from(importJobs),
     db.select({ value: count() }).from(operationLogs),
+    db.select({ value: count() }).from(projects),
+    db.select({ value: count() }).from(tags),
+    db.select({ value: count() }).from(savedSearches),
   ]);
   // startBackgroundTask writes one operation log that is also scanned below.
   const total = totals.reduce((sum, rows) => sum + Number(rows[0]?.value ?? 0), 0) + 1;
@@ -115,10 +124,12 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
       const rows = await db
         .select({
           id: messageSegments.id,
+          revisionId: messages.revisionId,
           content: messageSegments.content,
           href: messageSegments.href,
         })
         .from(messageSegments)
+        .innerJoin(messages, eq(messages.id, messageSegments.messageId))
         .where(gt(messageSegments.id, cursor))
         .orderBy(asc(messageSegments.id))
         .limit(BATCH_SIZE);
@@ -134,6 +145,10 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
             .update(messageSegments)
             .set({ content: content.text, href: href.text })
             .where(eq(messageSegments.id, row.id));
+          await db
+            .update(conversationRevisions)
+            .set({ contentIntegrityHash: null })
+            .where(eq(conversationRevisions.id, row.revisionId));
         }
         progress.processed += 1;
         progress.redactedRows += replacements > 0 ? 1 : 0;
@@ -174,10 +189,30 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
       where target.message_id = blocks.message_id
         and target.ordinal between blocks.start_ordinal and blocks.end_ordinal
         and (target.content <> '[PRIVATE_KEY]' or target.href is not null)
-      returning target.id
+      returning target.id, target.message_id
     `);
     const fragmentedCount = fragmentedPrivateKeyRows.length;
     if (fragmentedCount > 0) {
+      const affectedMessageIds = [
+        ...new Set(
+          fragmentedPrivateKeyRows.flatMap((row) =>
+            typeof row.message_id === "string" ? [row.message_id] : [],
+          ),
+        ),
+      ];
+      for (const messageId of affectedMessageIds) {
+        const [message] = await db
+          .select({ revisionId: messages.revisionId })
+          .from(messages)
+          .where(eq(messages.id, messageId))
+          .limit(1);
+        if (message) {
+          await db
+            .update(conversationRevisions)
+            .set({ contentIntegrityHash: null })
+            .where(eq(conversationRevisions.id, message.revisionId));
+        }
+      }
       progress.redactedRows += fragmentedCount;
       progress.replacements += fragmentedCount;
       await updateProgress(taskId, "跨片段私钥", progress, total);
@@ -190,6 +225,8 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
           id: conversationRevisions.id,
           searchText: conversationRevisions.searchText,
           completenessReason: conversationRevisions.completenessReason,
+          capturedTitle: conversationRevisions.capturedTitle,
+          capturedCanonicalUrl: conversationRevisions.capturedCanonicalUrl,
         })
         .from(conversationRevisions)
         .where(gt(conversationRevisions.id, cursor))
@@ -199,11 +236,25 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
       for (const row of rows) {
         const searchText = redactSensitiveTextForStorage(row.searchText, rules);
         const reason = redactOptionalText(row.completenessReason, rules);
-        const replacements = searchText.replacements + reason.replacements;
+        const capturedTitle = redactOptionalText(row.capturedTitle, rules);
+        const capturedUrl = row.capturedCanonicalUrl
+          ? redactSensitiveUrlForStorage(row.capturedCanonicalUrl, rules)
+          : { text: null, replacements: 0 };
+        const replacements = searchText.replacements + reason.replacements + capturedTitle.replacements + capturedUrl.replacements;
         if (replacements > 0) {
           await db
             .update(conversationRevisions)
-            .set({ searchText: searchText.text, completenessReason: reason.value })
+            .set({
+              searchText: searchText.text,
+              completenessReason: reason.value,
+              capturedTitle: capturedTitle.value,
+              capturedCanonicalUrl: capturedUrl.text,
+              ...(
+                reason.replacements + capturedTitle.replacements + capturedUrl.replacements > 0
+                  ? { contentIntegrityHash: null }
+                  : {}
+              ),
+            })
             .where(eq(conversationRevisions.id, row.id));
         }
         progress.processed += 1;
@@ -246,6 +297,86 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
       cursor = rows.at(-1)!.id;
       await updateProgress(taskId, "会话信息", progress, total);
     }
+
+    const [projectRows, tagRows, savedRows] = await Promise.all([
+      db.select().from(projects).orderBy(asc(projects.createdAt)),
+      db.select().from(tags).orderBy(asc(tags.createdAt)),
+      db.select().from(savedSearches).orderBy(asc(savedSearches.createdAt)),
+    ]);
+    await db.transaction(async (tx) => {
+      for (const row of projectRows) {
+        await tx.update(projects).set({ normalizedName: `__redaction__${row.id}` }).where(eq(projects.id, row.id));
+      }
+      for (const row of tagRows) {
+        await tx.update(tags).set({ normalizedName: `__redaction__${row.id}` }).where(eq(tags.id, row.id));
+      }
+      for (const row of savedRows) {
+        await tx.update(savedSearches).set({ normalizedName: `__redaction__${row.id}` }).where(eq(savedSearches.id, row.id));
+      }
+
+      const usedProjects = new Set<string>();
+      for (const row of projectRows) {
+        const nameResult = redactSensitiveTextForStorage(row.name, rules);
+        const description = redactSensitiveTextForStorage(row.description, rules);
+        let candidate = nameResult.text.trim() || `已脱敏项目-${row.id.slice(0, 8)}`;
+        let normalized = normalizeProjectName(candidate);
+        let suffix = 2;
+        while (usedProjects.has(normalized.normalizedName)) {
+          normalized = normalizeProjectName(`${candidate} (${suffix++})`);
+        }
+        usedProjects.add(normalized.normalizedName);
+        await tx.update(projects).set({
+          name: normalized.name,
+          normalizedName: normalized.normalizedName,
+          description: description.text,
+          updatedAt: new Date(),
+        }).where(eq(projects.id, row.id));
+        const replacements = nameResult.replacements + description.replacements;
+        progress.processed += 1;
+        progress.redactedRows += replacements > 0 ? 1 : 0;
+        progress.replacements += replacements;
+      }
+
+      const usedTags = new Set<string>();
+      for (const row of tagRows) {
+        const redacted = redactSensitiveTextForStorage(row.name, rules);
+        const candidate = redacted.text.trim() || `已脱敏标签-${row.id.slice(0, 8)}`;
+        let normalized = normalizeTagName(candidate);
+        let suffix = 2;
+        while (usedTags.has(normalized.normalizedName)) normalized = normalizeTagName(`${candidate} (${suffix++})`);
+        usedTags.add(normalized.normalizedName);
+        await tx.update(tags).set({ ...normalized, updatedAt: new Date() }).where(eq(tags.id, row.id));
+        progress.processed += 1;
+        progress.redactedRows += redacted.replacements > 0 ? 1 : 0;
+        progress.replacements += redacted.replacements;
+      }
+
+      const usedSaved = new Set<string>();
+      for (const row of savedRows) {
+        const redactedName = redactSensitiveTextForStorage(row.name, rules);
+        const redactedQuery = redactJsonValue(row.query, rules);
+        const candidate = redactedName.text.trim() || `已脱敏搜索-${row.id.slice(0, 8)}`;
+        let name = candidate;
+        let normalizedName = candidate.normalize("NFKC").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
+        let suffix = 2;
+        while (usedSaved.has(normalizedName)) {
+          name = `${candidate} (${suffix++})`;
+          normalizedName = name.toLocaleLowerCase("en-US");
+        }
+        usedSaved.add(normalizedName);
+        await tx.update(savedSearches).set({
+          name,
+          normalizedName,
+          query: redactedQuery.value as Record<string, string>,
+          updatedAt: new Date(),
+        }).where(eq(savedSearches.id, row.id));
+        const replacements = redactedName.replacements + redactedQuery.replacements;
+        progress.processed += 1;
+        progress.redactedRows += replacements > 0 ? 1 : 0;
+        progress.replacements += replacements;
+      }
+    });
+    await updateProgress(taskId, "项目、标签与常用视图", progress, total);
 
     cursor = NIL_UUID;
     while (true) {

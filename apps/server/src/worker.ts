@@ -1,7 +1,11 @@
 import { Cron } from "croner";
 import { config } from "./config.js";
 import { closeDatabase } from "./db.js";
-import { processArchive, scanImportInbox } from "./jobs/import-job.js";
+import {
+  cleanupImportArchives,
+  processArchive,
+  scanImportInbox,
+} from "./jobs/import-job.js";
 import {
   classifyConversation,
   reclassifyUnlockedConversations,
@@ -17,6 +21,7 @@ import {
 } from "./services/nightly-ai.js";
 import {
   enqueueAnalysis,
+  enqueueArchiveIntegrity,
   enqueueConversationClassification,
   enqueueNightlyAiMaintenance,
   enqueueUnlockedReclassification,
@@ -31,10 +36,23 @@ import {
   isRetryableRateLimitError,
   resolveAiRetrySchedule,
 } from "./services/llm.js";
-import { failStaleBackgroundTasks } from "./services/background-tasks.js";
+import {
+  createBackgroundTask,
+  failBackgroundTask,
+  failStaleBackgroundTasks,
+  getLatestBackgroundTask,
+} from "./services/background-tasks.js";
 import { getBooleanSetting, getSetting } from "./services/settings.js";
 import { redactStoredArchive } from "./services/storage-redaction.js";
 import { safeStoredError } from "./services/operation-log.js";
+import { cleanupExpiredAuthState } from "./services/auth.js";
+import { purgeDeletedConversations } from "./services/capture.js";
+import { runArchiveIntegrityTask } from "./services/archive-integrity.js";
+import {
+  cleanupExpiredRestoreFiles,
+  failStaleRestoreJobs,
+  processRestoreJob,
+} from "./services/restore.js";
 
 const boss = await getBoss();
 
@@ -55,6 +73,12 @@ await failStaleBackgroundTasks("classification_rebuild").catch((error) => {
 });
 await failStaleBackgroundTasks("storage_redaction", 24 * 60 * 60_000).catch((error) => {
   console.warn("Failed to mark stale storage redaction tasks", safeStoredError(error));
+});
+await failStaleBackgroundTasks("archive_integrity", 24 * 60 * 60_000).catch((error) => {
+  console.warn("Failed to mark stale archive integrity tasks", safeStoredError(error));
+});
+await failStaleRestoreJobs().catch((error) => {
+  console.warn("Failed to mark stale restore jobs", safeStoredError(error));
 });
 
 await boss.work(queueNames.weekly, async () => runAnalysisJob("weekly"));
@@ -151,6 +175,16 @@ await boss.work(queueNames.redactStorage, async (jobs) => {
   if (typeof taskId !== "string") throw new Error("Storage redaction task ID is missing");
   return redactStoredArchive(taskId);
 });
+await boss.work(queueNames.archiveIntegrity, async (jobs) => {
+  const taskId = (jobs[0]?.data as { taskId?: unknown } | undefined)?.taskId;
+  if (typeof taskId !== "string") throw new Error("Archive integrity task ID is missing");
+  return runArchiveIntegrityTask(taskId);
+});
+await boss.work(queueNames.restoreBackup, async (jobs) => {
+  const restoreJobId = (jobs[0]?.data as { restoreJobId?: unknown } | undefined)?.restoreJobId;
+  if (typeof restoreJobId !== "string") throw new Error("Restore job ID is missing");
+  return processRestoreJob(restoreJobId);
+});
 
 const weeklyCron = new Cron(
   "30 7 * * 1",
@@ -206,6 +240,33 @@ const inboxCron = new Cron("*/5 * * * *", { protect: true }, async () => {
 });
 await scanImportInbox();
 
+const housekeepingCron = new Cron(
+  "20 3 * * *",
+  { timezone: config.TZ, protect: true },
+  async () => {
+    await cleanupExpiredAuthState();
+    await cleanupImportArchives();
+    await cleanupExpiredRestoreFiles();
+    await purgeDeletedConversations(30);
+  },
+);
+const archiveIntegrityCron = new Cron(
+  "40 3 * * *",
+  { timezone: config.TZ, protect: true },
+  async () => {
+    const active = await getLatestBackgroundTask("archive_integrity", ["queued", "running"]);
+    if (active) return;
+    const task = await createBackgroundTask("archive_integrity", "每日归档完整性检查等待执行");
+    const jobId = await enqueueArchiveIntegrity(task.id);
+    if (!jobId) {
+      await failBackgroundTask(task.id, "归档完整性检查未成功进入队列");
+    }
+  },
+);
+await cleanupExpiredAuthState().catch((error) => {
+  console.warn("Failed to clean expired authentication state", safeStoredError(error));
+});
+
 async function shutdown(): Promise<void> {
   weeklyCron.stop();
   monthlyCron.stop();
@@ -213,6 +274,8 @@ async function shutdown(): Promise<void> {
   analysisRetryCron.stop();
   nightlyAiMaintenanceCron.stop();
   inboxCron.stop();
+  housekeepingCron.stop();
+  archiveIntegrityCron.stop();
   await stopBoss();
   await closeDatabase();
 }

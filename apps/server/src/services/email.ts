@@ -1,11 +1,12 @@
 import nodemailer from "nodemailer";
 import { isIP } from "node:net";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { config } from "../config.js";
 import { db } from "../db.js";
 import { reports } from "../schema.js";
 import { getSetting } from "./settings.js";
 import { resolveSafeNetworkHost } from "./network-target.js";
+import { safeStoredError } from "./operation-log.js";
 
 type ReportRow = typeof reports.$inferSelect;
 
@@ -93,9 +94,9 @@ async function createSmtpTransport(smtp: SmtpConfig) {
   });
 }
 
-export async function sendReportEmail(report: ReportRow): Promise<void> {
+export async function sendReportEmail(report: ReportRow): Promise<boolean> {
   const smtp = await loadSmtpConfig();
-  if (!smtp.host || !smtp.port || !smtp.from || !smtp.to) return;
+  if (!smtp.host || !smtp.port || !smtp.from || !smtp.to) return false;
   const transporter = await createSmtpTransport(smtp);
   const reportUrl = `${config.APP_ORIGIN}/reports/${report.id}`;
   try {
@@ -108,6 +109,7 @@ export async function sendReportEmail(report: ReportRow): Promise<void> {
       disableFileAccess: true,
       disableUrlAccess: true,
     });
+    return true;
   } finally {
     transporter.close();
   }
@@ -151,5 +153,23 @@ export async function sendReportEmailById(reportId: string): Promise<void> {
     .where(eq(reports.id, reportId))
     .limit(1);
   if (!report) throw new Error(`Report not found: ${reportId}`);
-  await sendReportEmail(report);
+  await db.update(reports).set({
+    emailStatus: "queued",
+    emailAttempts: sql`${reports.emailAttempts} + 1`,
+    emailError: null,
+  }).where(eq(reports.id, reportId));
+  try {
+    const sent = await sendReportEmail(report);
+    await db.update(reports).set({
+      emailStatus: sent ? "sent" : "not_configured",
+      emailSentAt: sent ? new Date() : null,
+      emailError: null,
+    }).where(eq(reports.id, reportId));
+  } catch (error) {
+    await db.update(reports).set({
+      emailStatus: "failed",
+      emailError: safeStoredError(error),
+    }).where(eq(reports.id, reportId));
+    throw error;
+  }
 }

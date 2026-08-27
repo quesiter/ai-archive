@@ -7,6 +7,7 @@ import {
   gte,
   ilike,
   inArray,
+  isNotNull,
   isNull,
   lt,
   or,
@@ -20,16 +21,19 @@ import { requireWebUser } from "../http.js";
 import {
   conversationProjects,
   conversationRevisions,
+  conversationSearchChunks,
   conversationTags,
   conversations,
   devices,
-  messageSegments,
   messages,
   projects,
+  tags,
 } from "../schema.js";
 import {
-  latestRevisionId,
   hardDeleteConversation,
+  latestRevisionId,
+  restoreConversation,
+  softDeleteConversation,
 } from "../services/capture.js";
 import {
   loadHydratedRevisionMessages,
@@ -45,6 +49,10 @@ import {
   buildConversationSearchHit,
   conversationIdsMatchingAllTags,
 } from "../services/conversation-search.js";
+import { literalContainsPattern } from "../services/search-pattern.js";
+import { loadRevisionDiff } from "../services/revision-diff.js";
+import { rebuildConversationSearchChunks } from "../services/search-chunks.js";
+import { parseInstanceDateBoundary } from "../services/timezone.js";
 
 const ListQuerySchema = z.object({
   q: z.string().max(500).optional(),
@@ -64,8 +72,12 @@ const ListQuerySchema = z.object({
       z.array(z.string().uuid()).max(20),
     )
     .default([]),
-  from: z.string().datetime({ offset: true }).optional(),
-  to: z.string().datetime({ offset: true }).optional(),
+  from: z.string().refine(
+    (value) => /^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isNaN(Date.parse(value)),
+  ).optional(),
+  to: z.string().refine(
+    (value) => /^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isNaN(Date.parse(value)),
+  ).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
@@ -85,6 +97,8 @@ const webProviders = [
 const ExportQuerySchema = z.object({
   format: z.enum(["csv", "md", "xlsx"]),
 });
+
+const BatchConversationIdsSchema = z.array(z.string().uuid()).min(1).max(500);
 
 function safeExportFilename(value: string): string {
   const normalized = value
@@ -132,11 +146,21 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       });
     }
     let matchingIds: string[] | undefined;
+    const searchPattern = query.q ? literalContainsPattern(query.q) : null;
     if (query.q) {
       const revisionMatches = await db
         .selectDistinct({ id: conversationRevisions.conversationId })
-        .from(conversationRevisions)
-        .where(ilike(conversationRevisions.searchText, `%${query.q}%`));
+        .from(conversationSearchChunks)
+        .innerJoin(
+          conversationRevisions,
+          eq(conversationRevisions.id, conversationSearchChunks.revisionId),
+        )
+        .where(
+          or(
+            ilike(conversationSearchChunks.content, searchPattern!),
+            sql`conversation_search_chunks.search_vector @@ websearch_to_tsquery('simple', ${query.q})`,
+          ),
+        );
       matchingIds = revisionMatches.map((row) => row.id);
     }
     let revisionScopedIds: string[] | undefined;
@@ -170,7 +194,10 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         where ${sql.join(currentRevisionFilters, sql` and `)}
       `);
       revisionScopedIds = rows.map((row) => row.id);
-      if (!revisionScopedIds.length) return [];
+      if (!revisionScopedIds.length) return {
+        items: [],
+        pagination: { total: 0, limit: query.limit, offset: query.offset, hasMore: false },
+      };
     }
     let tagScopedIds: string[] | undefined;
     if (query.tagIds.length) {
@@ -182,7 +209,10 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         .from(conversationTags)
         .where(inArray(conversationTags.tagId, query.tagIds));
       tagScopedIds = conversationIdsMatchingAllTags(tagLinks, query.tagIds);
-      if (!tagScopedIds.length) return [];
+      if (!tagScopedIds.length) return {
+        items: [],
+        pagination: { total: 0, limit: query.limit, offset: query.offset, hasMore: false },
+      };
     }
     const filters = [isNull(conversations.deletedAt)];
     if (query.provider) filters.push(eq(conversations.provider, query.provider));
@@ -191,20 +221,29 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     if (query.source === "codex") filters.push(eq(conversations.provider, "codex"));
     if (query.source === "claude_code") filters.push(eq(conversations.provider, "claude_code"));
     if (query.projectId) filters.push(eq(conversationProjects.projectId, query.projectId));
-    if (query.from) filters.push(gte(conversations.updatedAt, new Date(query.from)));
-    if (query.to) filters.push(lt(conversations.updatedAt, new Date(query.to)));
+    if (query.from) filters.push(gte(conversations.updatedAt, parseInstanceDateBoundary(query.from)));
+    if (query.to) filters.push(lt(conversations.updatedAt, parseInstanceDateBoundary(query.to, true)));
     if (revisionScopedIds) filters.push(inArray(conversations.id, revisionScopedIds));
     if (tagScopedIds) filters.push(inArray(conversations.id, tagScopedIds));
     if (query.q) {
       filters.push(
         matchingIds?.length
           ? or(
-              ilike(conversations.title, `%${query.q}%`),
+              ilike(conversations.title, searchPattern!),
               inArray(conversations.id, matchingIds),
             )!
-          : ilike(conversations.title, `%${query.q}%`),
+          : ilike(conversations.title, searchPattern!),
       );
     }
+    const [totalRow] = await db
+      .select({ total: count() })
+      .from(conversations)
+      .leftJoin(
+        conversationProjects,
+        eq(conversationProjects.conversationId, conversations.id),
+      )
+      .leftJoin(projects, eq(projects.id, conversationProjects.projectId))
+      .where(and(...filters));
     const rows = await db
       .select({
         id: conversations.id,
@@ -230,7 +269,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       .limit(query.limit)
       .offset(query.offset);
 
-    return Promise.all(
+    const items = await Promise.all(
       rows.map(async (row) => {
         const revisionId = await latestRevisionId(row.id);
         const [revision] = revisionId
@@ -260,15 +299,15 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
               .select({
                 revisionId: conversationRevisions.id,
                 ordinal: messages.ordinal,
-                content: messageSegments.content,
+                content: conversationSearchChunks.content,
               })
-              .from(conversationRevisions)
-              .innerJoin(messages, eq(messages.revisionId, conversationRevisions.id))
-              .innerJoin(messageSegments, eq(messageSegments.messageId, messages.id))
+              .from(conversationSearchChunks)
+              .innerJoin(messages, eq(messages.id, conversationSearchChunks.messageId))
+              .innerJoin(conversationRevisions, eq(conversationRevisions.id, conversationSearchChunks.revisionId))
               .where(
                 and(
                   eq(conversationRevisions.conversationId, row.id),
-                  ilike(messageSegments.content, `%${query.q}%`),
+                  ilike(conversationSearchChunks.content, searchPattern!),
                 ),
               )
               .orderBy(
@@ -295,6 +334,155 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         };
       }),
     );
+    const total = Number(totalRow?.total ?? 0);
+    return {
+      items,
+      pagination: {
+        total,
+        limit: query.limit,
+        offset: query.offset,
+        hasMore: query.offset + items.length < total,
+      },
+    };
+  });
+
+  app.get("/api/v1/conversations/trash", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    const query = z.object({
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+      offset: z.coerce.number().int().min(0).default(0),
+    }).parse(request.query);
+    const where = isNotNull(conversations.deletedAt);
+    const [[totalRow], items] = await Promise.all([
+      db.select({ total: count() }).from(conversations).where(where),
+      db.select().from(conversations).where(where).orderBy(desc(conversations.deletedAt)).limit(query.limit).offset(query.offset),
+    ]);
+    const total = Number(totalRow?.total ?? 0);
+    return {
+      items,
+      retentionDays: 30,
+      pagination: { total, limit: query.limit, offset: query.offset, hasMore: query.offset + items.length < total },
+    };
+  });
+
+  app.post("/api/v1/search/rebuild", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    const chunkCount = await rebuildConversationSearchChunks();
+    return { ok: true, chunkCount };
+  });
+
+  app.post("/api/v1/conversations/batch/project", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    const input = z.object({
+      conversationIds: BatchConversationIdsSchema,
+      projectId: z.string().uuid().nullable(),
+    }).parse(request.body);
+    if (input.projectId) {
+      const [project] = await db.select({ id: projects.id }).from(projects).where(
+        and(eq(projects.id, input.projectId), eq(projects.archived, false)),
+      ).limit(1);
+      if (!project) return reply.code(400).send({ error: "Project not found or archived" });
+    }
+    const activeRows = await db.select({ id: conversations.id }).from(conversations).where(
+      and(inArray(conversations.id, input.conversationIds), isNull(conversations.deletedAt)),
+    );
+    await db.transaction(async (tx) => {
+      for (const conversation of activeRows) {
+        await tx.insert(conversationProjects).values({
+          conversationId: conversation.id,
+          projectId: input.projectId,
+          confidence: 1,
+          lockedByUser: true,
+          suggestedName: null,
+          updatedAt: new Date(),
+        }).onConflictDoUpdate({
+          target: conversationProjects.conversationId,
+          set: {
+            projectId: input.projectId,
+            confidence: 1,
+            lockedByUser: true,
+            suggestedName: null,
+            updatedAt: new Date(),
+          },
+        });
+      }
+    });
+    return { updated: activeRows.length };
+  });
+
+  app.post("/api/v1/conversations/batch/tags", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    const input = z.object({
+      conversationIds: BatchConversationIdsSchema,
+      tagIds: z.array(z.string().uuid()).min(1).max(50),
+      operation: z.enum(["add", "remove"]),
+    }).parse(request.body);
+    const [activeRows, tagRows] = await Promise.all([
+      db.select({ id: conversations.id }).from(conversations).where(
+        and(inArray(conversations.id, input.conversationIds), isNull(conversations.deletedAt)),
+      ),
+      db.select({ id: tags.id }).from(tags).where(inArray(tags.id, input.tagIds)),
+    ]);
+    if (tagRows.length !== new Set(input.tagIds).size) {
+      return reply.code(400).send({ error: "One or more tags do not exist" });
+    }
+    await db.transaction(async (tx) => {
+      if (input.operation === "remove") {
+        if (activeRows.length) {
+          await tx.delete(conversationTags).where(
+            and(
+              inArray(conversationTags.conversationId, activeRows.map((row) => row.id)),
+              inArray(conversationTags.tagId, input.tagIds),
+            ),
+          );
+        }
+        return;
+      }
+      for (const conversation of activeRows) {
+        for (const tag of tagRows) {
+          await tx.insert(conversationTags).values({
+            conversationId: conversation.id,
+            tagId: tag.id,
+            confidence: 1,
+            source: "manual",
+            lockedByUser: true,
+            updatedAt: new Date(),
+          }).onConflictDoUpdate({
+            target: [conversationTags.conversationId, conversationTags.tagId],
+            set: {
+              confidence: 1,
+              source: "manual",
+              lockedByUser: true,
+              updatedAt: new Date(),
+            },
+          });
+        }
+      }
+    });
+    return { updatedConversations: activeRows.length, tagCount: tagRows.length };
+  });
+
+  app.post("/api/v1/conversations/batch/export", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    const { format } = ExportQuerySchema.parse(request.query);
+    const input = z.object({ conversationIds: BatchConversationIdsSchema }).parse(request.body);
+    if (format === "xlsx") {
+      const xlsx = await createConversationXlsxExport({ conversationIds: input.conversationIds });
+      if (!xlsx) return reply.code(404).send({ error: "No conversations found" });
+      reply.header("Content-Type", exportMimeType(format)).header(
+        "Content-Disposition",
+        `attachment; filename*=UTF-8''${encodeURIComponent(`${safeExportFilename(xlsx.scopeName)}.${format}`)}`,
+      );
+      return reply.send(xlsx.stream);
+    }
+    const data = await loadConversationExportData({ conversationIds: input.conversationIds });
+    if (!data) return reply.code(404).send({ error: "No conversations found" });
+    const content = await renderConversationExport(format, data);
+    reply.header("Content-Type", exportMimeType(format)).header(
+      "Content-Disposition",
+      `attachment; filename*=UTF-8''${encodeURIComponent(`${safeExportFilename(data.scopeName)}.${format}`)}`,
+    );
+    return reply.send(content);
   });
 
   app.get<{ Params: { id: string }; Querystring: { revisionId?: string } }>(
@@ -381,6 +569,25 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  app.get<{ Params: { id: string; revisionId: string } }>(
+    "/api/v1/conversations/:id/revisions/:revisionId/diff",
+    async (request, reply) => {
+      if (!(await requireWebUser(request, reply))) return;
+      const params = z.object({
+        id: z.string().uuid(),
+        revisionId: z.string().uuid(),
+      }).parse(request.params);
+      const query = z.object({ baseRevisionId: z.string().uuid().optional() }).parse(request.query);
+      const diff = await loadRevisionDiff({
+        conversationId: params.id,
+        revisionId: params.revisionId,
+        ...(query.baseRevisionId ? { baseRevisionId: query.baseRevisionId } : {}),
+      });
+      if (!diff) return reply.code(404).send({ error: "Revision not found" });
+      return diff;
+    },
+  );
+
   app.get<{ Params: { id: string }; Querystring: { format?: string } }>(
     "/api/v1/conversations/:id/export",
     async (request, reply) => {
@@ -424,7 +631,35 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
       const params = z.object({ id: z.string().uuid() }).parse(request.params);
-      if (!(await hardDeleteConversation(params.id))) {
+      if (!(await softDeleteConversation(params.id))) {
+        return reply.code(404).send({ error: "Conversation not found" });
+      }
+      return reply.code(204).send();
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/v1/conversations/:id/restore",
+    async (request, reply) => {
+      if (!(await requireWebUser(request, reply))) return;
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      if (!(await restoreConversation(params.id))) {
+        return reply.code(404).send({ error: "Deleted conversation not found" });
+      }
+      return { ok: true };
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>(
+    "/api/v1/conversations/:id/permanent",
+    async (request, reply) => {
+      if (!(await requireWebUser(request, reply))) return;
+      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const input = z.object({ confirmation: z.literal("DELETE") }).parse(request.body);
+      const [deleted] = await db.select({ id: conversations.id }).from(conversations).where(
+        and(eq(conversations.id, params.id), isNotNull(conversations.deletedAt)),
+      ).limit(1);
+      if (!deleted || input.confirmation !== "DELETE" || !(await hardDeleteConversation(params.id))) {
         return reply.code(404).send({ error: "Conversation not found" });
       }
       return reply.code(204).send();

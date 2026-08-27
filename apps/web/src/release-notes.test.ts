@@ -39,11 +39,11 @@ describe("parseReleaseNotes", () => {
 
   it("shows the latest maintained changelog entry first", () => {
     expect(releaseNotes[0]).toMatchObject({
-      date: "2026-08-23",
-      version: "V2.1.2",
-      title: "管理体验、任务恢复与检索统计完善",
+      date: "2026-08-28",
+      version: "V2.3.0",
+      title: "长期归档可靠性与运维可诊断性",
     });
-    expect(releaseNotes[0]?.body).toContain("Token 统计");
-    expect(releaseNotes[0]?.body).toContain("脱敏已有归档");
+    expect(releaseNotes[0]?.body).toContain("Restore Job");
+    expect(releaseNotes[0]?.body).toContain("Archive Integrity Check");
   });
 });

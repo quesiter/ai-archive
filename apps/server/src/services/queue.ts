@@ -15,6 +15,8 @@ export const queueNames = {
   importArchive: "import-archive",
   emailReport: "email-report",
   redactStorage: "redact-storage",
+  archiveIntegrity: "archive-integrity",
+  restoreBackup: "restore-backup",
 } as const;
 
 export interface ReclassificationJobData {
@@ -202,6 +204,25 @@ export async function enqueueStorageRedaction(taskId: string): Promise<string | 
       singletonKey: taskId,
     },
   );
+}
+
+export async function enqueueArchiveIntegrity(taskId: string): Promise<string | null> {
+  const boss = await getBoss();
+  return boss.send(queueNames.archiveIntegrity, { taskId }, {
+    expireInHours: 23,
+    retryLimit: 1,
+    retryDelay: 60,
+    singletonKey: taskId,
+  });
+}
+
+export async function enqueueRestoreBackup(restoreJobId: string): Promise<string | null> {
+  const boss = await getBoss();
+  return boss.send(queueNames.restoreBackup, { restoreJobId }, {
+    expireInHours: 23,
+    retryLimit: 0,
+    singletonKey: restoreJobId,
+  });
 }
 
 export async function stopBoss(): Promise<void> {

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import { createGzip, gunzip, gzip } from "node:zlib";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
 import { getTableName } from "drizzle-orm/table";
 import { getTableColumns } from "drizzle-orm/utils";
@@ -25,6 +25,8 @@ import {
   projects,
   redactionRules,
   reports,
+  restoreJobs,
+  savedSearches,
   settings,
   tags,
 } from "../schema.js";
@@ -34,6 +36,8 @@ import {
   redactSensitiveTextForStorage,
   redactSensitiveUrlForStorage,
 } from "./redaction.js";
+import { rebuildConversationSearchChunks } from "./search-chunks.js";
+import { normalizeProjectName } from "./projects.js";
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -48,6 +52,7 @@ const MAX_BACKUP_ROWS_PER_TABLE = 2_000_000;
 
 type BackupRow = Record<string, unknown>;
 type BackupTables = Record<string, BackupRow[]>;
+type BackupSqlClient = Pick<typeof sqlClient, "unsafe">;
 
 interface TableSpec {
   key: string;
@@ -56,7 +61,7 @@ interface TableSpec {
 }
 
 const tableSpecs = [
-  { key: "devices", table: devices, dateFields: ["lastSeenAt", "revokedAt", "createdAt"] },
+  { key: "devices", table: devices, dateFields: ["lastSeenAt", "lastScanAt", "lastSuccessfulSyncAt", "lastErrorAt", "revokedAt", "createdAt"] },
   { key: "conversations", table: conversations, dateFields: ["updatedAt", "deletedAt", "createdAt"] },
   { key: "conversationRevisions", table: conversationRevisions, dateFields: ["capturedAt", "createdAt"] },
   { key: "messages", table: messages, dateFields: ["sourceCreatedAt", "createdAt"] },
@@ -68,10 +73,11 @@ const tableSpecs = [
   { key: "conversationTags", table: conversationTags, dateFields: ["updatedAt", "createdAt"] },
   { key: "analysisRuns", table: analysisRuns, dateFields: ["windowStart", "windowEnd", "completedAt", "updatedAt", "createdAt"] },
   { key: "backgroundTasks", table: backgroundTasks, dateFields: ["completedAt", "updatedAt", "createdAt"] },
-  { key: "reports", table: reports, dateFields: ["periodStart", "periodEnd", "createdAt"] },
+  { key: "reports", table: reports, dateFields: ["periodStart", "periodEnd", "emailSentAt", "createdAt"] },
+  { key: "savedSearches", table: savedSearches, dateFields: ["updatedAt", "createdAt"] },
   { key: "settings", table: settings, dateFields: ["updatedAt"] },
   { key: "redactionRules", table: redactionRules, dateFields: ["createdAt"] },
-  { key: "importJobs", table: importJobs, dateFields: ["completedAt", "updatedAt", "createdAt"] },
+  { key: "importJobs", table: importJobs, dateFields: ["lastRetryAt", "completedAt", "updatedAt", "createdAt"] },
   { key: "operationLogs", table: operationLogs, dateFields: ["createdAt"] },
 ] satisfies TableSpec[];
 
@@ -107,6 +113,25 @@ export type BackupImportResult = {
   warnings: string[];
 };
 
+export type BackupPhase =
+  | "validating"
+  | "validated"
+  | "restoring"
+  | "rebuilding_search"
+  | "verifying";
+
+export type BackupVerificationResult = {
+  ok: boolean;
+  format: string;
+  schemaVersion: number;
+  exportedAt: string;
+  sourceAppVersion: string | null;
+  masterKeyMatches: boolean | null;
+  counts: Record<string, number>;
+  errors: string[];
+  warnings: string[];
+};
+
 function appVersion(): string {
   return APP_VERSION;
 }
@@ -126,23 +151,24 @@ function* chunks<T>(items: readonly T[], size: number): Iterable<T[]> {
   }
 }
 
-async function exportTables(): Promise<BackupTables> {
-  const entries = await Promise.all(
-    tableSpecs.map(async (spec) => [spec.key, await db.select().from(spec.table)] as const),
-  );
+async function exportTables(client: BackupSqlClient): Promise<BackupTables> {
+  const entries: Array<readonly [string, BackupRow[]]> = [];
+  for (const spec of tableSpecs) {
+    const rows = await client.unsafe(selectRowsSql(spec.table));
+    entries.push([spec.key, [...rows] as BackupRow[]] as const);
+  }
   return Object.fromEntries(entries) as BackupTables;
 }
 
-async function exportCounts(): Promise<Record<string, number>> {
-  const entries = await Promise.all(
-    tableSpecs.map(async (spec) => {
-      const rows = await sqlClient.unsafe(
-        `select count(*)::int as count from ${quotedTableName(spec.table)}`,
-      );
-      const first = rows[0] as { count?: unknown } | undefined;
-      return [spec.key, Number(first?.count ?? 0)] as const;
-    }),
-  );
+async function exportCounts(client: BackupSqlClient): Promise<Record<string, number>> {
+  const entries: Array<readonly [string, number]> = [];
+  for (const spec of tableSpecs) {
+    const rows = await client.unsafe(
+      `select count(*)::int as count from ${quotedTableName(spec.table)}`,
+    );
+    const first = rows[0] as { count?: unknown } | undefined;
+    entries.push([spec.key, Number(first?.count ?? 0)] as const);
+  }
   return Object.fromEntries(entries);
 }
 
@@ -169,34 +195,44 @@ function selectRowsSql(table: PgTable): string {
   return `select ${selectList} from ${quotedTableName(table)}`;
 }
 
-async function* streamBackupJson(): AsyncGenerator<string> {
-  yield `{"format":${JSON.stringify(BACKUP_FORMAT)}`;
-  yield `,"schemaVersion":${BACKUP_SCHEMA_VERSION}`;
-  yield `,"exportedAt":${JSON.stringify(new Date().toISOString())}`;
-  yield `,"metadata":${JSON.stringify({
-    appVersion: appVersion(),
-    masterKeyFingerprint: masterKeyFingerprint(),
-  })}`;
-  yield ',"tables":{';
+async function* streamBackupJson(
+  client: Awaited<ReturnType<typeof sqlClient.reserve>>,
+): AsyncGenerator<string> {
+  let completed = false;
+  try {
+    yield `{"format":${JSON.stringify(BACKUP_FORMAT)}`;
+    yield `,"schemaVersion":${BACKUP_SCHEMA_VERSION}`;
+    yield `,"exportedAt":${JSON.stringify(new Date().toISOString())}`;
+    yield `,"metadata":${JSON.stringify({
+      appVersion: appVersion(),
+      masterKeyFingerprint: masterKeyFingerprint(),
+      snapshotIsolation: "repeatable read",
+    })}`;
+    yield ',"tables":{';
 
-  for (const [tableIndex, spec] of tableSpecs.entries()) {
-    if (tableIndex > 0) yield ",";
-    yield `${JSON.stringify(spec.key)}:[`;
-    let rowIndex = 0;
-    const cursor = sqlClient
-      .unsafe(selectRowsSql(spec.table))
-      .cursor(EXPORT_CURSOR_BATCH_SIZE) as AsyncIterable<BackupRow[]>;
-    for await (const batch of cursor) {
-      for (const row of batch) {
-        if (rowIndex > 0) yield ",";
-        yield JSON.stringify(row);
-        rowIndex += 1;
+    for (const [tableIndex, spec] of tableSpecs.entries()) {
+      if (tableIndex > 0) yield ",";
+      yield `${JSON.stringify(spec.key)}:[`;
+      let rowIndex = 0;
+      const cursor = client
+        .unsafe(selectRowsSql(spec.table))
+        .cursor(EXPORT_CURSOR_BATCH_SIZE) as AsyncIterable<BackupRow[]>;
+      for await (const batch of cursor) {
+        for (const row of batch) {
+          if (rowIndex > 0) yield ",";
+          yield JSON.stringify(row);
+          rowIndex += 1;
+        }
       }
+      yield "]";
     }
-    yield "]";
-  }
 
-  yield "}}";
+    yield "}}";
+    completed = true;
+  } finally {
+    await client.unsafe(completed ? "commit" : "rollback").catch(() => undefined);
+    client.release();
+  }
 }
 
 function reviveDates(row: BackupRow, fields: string[]): BackupRow {
@@ -241,7 +277,7 @@ export function sanitizeRestoredBackupTables(tables: BackupTables): BackupTables
   const sanitized: BackupTables = { ...tables };
   const textFields: Record<string, string[]> = {
     conversations: ["title"],
-    conversationRevisions: ["searchText", "completenessReason"],
+    conversationRevisions: ["searchText", "completenessReason", "capturedTitle"],
     messageSegments: ["content"],
     captureRuns: ["error"],
     projects: ["name", "description"],
@@ -249,7 +285,8 @@ export function sanitizeRestoredBackupTables(tables: BackupTables): BackupTables
     tags: ["name", "normalizedName"],
     analysisRuns: ["error"],
     backgroundTasks: ["message", "error"],
-    reports: ["title", "summary", "bodyMarkdown"],
+    reports: ["title", "summary", "bodyMarkdown", "emailError"],
+    savedSearches: ["name", "normalizedName"],
     importJobs: ["error"],
     operationLogs: ["message"],
   };
@@ -270,6 +307,12 @@ export function sanitizeRestoredBackupTables(tables: BackupTables): BackupTables
       ? { canonicalUrl: redactSensitiveUrlForStorage(row.canonicalUrl, customRules).text }
       : {}),
   }));
+  sanitized.conversationRevisions = (sanitized.conversationRevisions ?? []).map((row) => ({
+    ...row,
+    ...(typeof row.capturedCanonicalUrl === "string"
+      ? { capturedCanonicalUrl: redactSensitiveUrlForStorage(row.capturedCanonicalUrl, customRules).text }
+      : {}),
+  }));
   sanitized.messageSegments = (sanitized.messageSegments ?? []).map((row) => ({
     ...row,
     ...(typeof row.href === "string"
@@ -287,6 +330,53 @@ export function sanitizeRestoredBackupTables(tables: BackupTables): BackupTables
         : {}),
     }));
   }
+  sanitized.savedSearches = (sanitized.savedSearches ?? []).map((row) => ({
+    ...row,
+    ...(row.query !== undefined
+      ? { query: sanitizeBackupValue(row.query, customRules) }
+      : {}),
+  }));
+  sanitized.importJobs = (sanitized.importJobs ?? []).map((row) => ({
+    ...row,
+    ...(row.stats !== undefined
+      ? { stats: sanitizeBackupValue(row.stats, customRules) }
+      : {}),
+  }));
+
+  const originalRevisionById = new Map(
+    (tables.conversationRevisions ?? []).flatMap((row) =>
+      typeof row.id === "string" ? [[row.id, row] as const] : [],
+    ),
+  );
+  const messageRevisionById = new Map(
+    (tables.messages ?? []).flatMap((row) =>
+      typeof row.id === "string" && typeof row.revisionId === "string"
+        ? [[row.id, row.revisionId] as const]
+        : [],
+    ),
+  );
+  const invalidatedRevisionIds = new Set<string>();
+  for (const [index, row] of (sanitized.messageSegments ?? []).entries()) {
+    const before = (tables.messageSegments ?? [])[index];
+    if (before && (before.content !== row.content || before.href !== row.href)) {
+      const revisionId = typeof row.messageId === "string"
+        ? messageRevisionById.get(row.messageId)
+        : undefined;
+      if (revisionId) invalidatedRevisionIds.add(revisionId);
+    }
+  }
+  sanitized.conversationRevisions = (sanitized.conversationRevisions ?? []).map((row) => {
+    const before = typeof row.id === "string" ? originalRevisionById.get(row.id) : undefined;
+    const changed = before && (
+      before.completenessReason !== row.completenessReason ||
+      before.capturedTitle !== row.capturedTitle ||
+      before.capturedCanonicalUrl !== row.capturedCanonicalUrl
+    );
+    if ((typeof row.id === "string" && invalidatedRevisionIds.has(row.id)) || changed) {
+      return { ...row, contentIntegrityHash: null };
+    }
+    return row;
+  });
   return sanitized;
 }
 
@@ -302,7 +392,18 @@ export async function createBackupArchive(): Promise<{
   buffer: Buffer;
   counts: Record<string, number>;
 }> {
-  const tables = await exportTables();
+  const client = await sqlClient.reserve();
+  let tables: BackupTables;
+  try {
+    await client.unsafe("begin isolation level repeatable read read only");
+    tables = await exportTables(client);
+    await client.unsafe("commit");
+  } catch (error) {
+    await client.unsafe("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
   const counts = Object.fromEntries(
     tableSpecs.map((spec) => [spec.key, tables[spec.key]?.length ?? 0]),
   );
@@ -313,6 +414,7 @@ export async function createBackupArchive(): Promise<{
     metadata: {
       appVersion: appVersion(),
       masterKeyFingerprint: masterKeyFingerprint(),
+      snapshotIsolation: "repeatable read",
     },
     tables,
   };
@@ -325,8 +427,22 @@ export async function createBackupArchiveStream(): Promise<{
   stream: Readable;
   counts: Record<string, number>;
 }> {
-  const counts = await exportCounts();
-  const stream = Readable.from(streamBackupJson(), { encoding: "utf8" }).pipe(
+  const client = await sqlClient.reserve();
+  try {
+    await client.unsafe("begin isolation level repeatable read read only");
+  } catch (error) {
+    client.release();
+    throw error;
+  }
+  let counts: Record<string, number>;
+  try {
+    counts = await exportCounts(client);
+  } catch (error) {
+    await client.unsafe("rollback").catch(() => undefined);
+    client.release();
+    throw error;
+  }
+  const stream = Readable.from(streamBackupJson(client), { encoding: "utf8" }).pipe(
     createGzip(),
   );
   return { filename: backupFilename(), stream, counts };
@@ -349,6 +465,96 @@ export async function parseBackupArchive(
   return BackupEnvelopeSchema.parse(parsed);
 }
 
+function backupIdSet(tables: BackupTables, key: string): Set<string> {
+  return new Set((tables[key] ?? []).flatMap((row) => typeof row.id === "string" ? [row.id] : []));
+}
+
+export async function verifyBackupArchive(
+  filename: string,
+  buffer: Buffer,
+): Promise<BackupVerificationResult> {
+  const backup = await parseBackupArchive(filename, buffer);
+  const prepared = prepareRestoredBackupTables(backup.tables);
+  const tables = prepared.tables;
+  const errors: string[] = [];
+  const warnings = [...prepared.warnings];
+  const missingTables = tableSpecs
+    .map((spec) => spec.key)
+    .filter((key) => !Object.prototype.hasOwnProperty.call(tables, key));
+  if (missingTables.length) errors.push(`缺少业务表：${missingTables.join(", ")}`);
+
+  const conversationIds = backupIdSet(tables, "conversations");
+  const revisionIds = backupIdSet(tables, "conversationRevisions");
+  const messageIds = backupIdSet(tables, "messages");
+  const deviceIds = backupIdSet(tables, "devices");
+  const projectIds = backupIdSet(tables, "projects");
+  const tagIds = backupIdSet(tables, "tags");
+  const revisionConversation = new Map(
+    (tables.conversationRevisions ?? []).flatMap((row) =>
+      typeof row.id === "string" && typeof row.conversationId === "string"
+        ? [[row.id, row.conversationId] as const]
+        : [],
+    ),
+  );
+  const checkReference = (
+    table: string,
+    field: string,
+    targets: Set<string>,
+    nullable = false,
+  ) => {
+    for (const [index, row] of (tables[table] ?? []).entries()) {
+      const value = row[field];
+      if (nullable && (value === null || value === undefined)) continue;
+      if (typeof value !== "string" || !targets.has(value)) {
+        errors.push(`${table}[${index}].${field} 引用不存在`);
+        if (errors.length >= 100) return;
+      }
+    }
+  };
+  checkReference("conversationRevisions", "conversationId", conversationIds);
+  checkReference("messages", "revisionId", revisionIds);
+  checkReference("messageSegments", "messageId", messageIds);
+  checkReference("captureRuns", "deviceId", deviceIds, true);
+  checkReference("conversationProjects", "conversationId", conversationIds);
+  checkReference("conversationProjects", "projectId", projectIds, true);
+  checkReference("conversationTags", "conversationId", conversationIds);
+  checkReference("conversationTags", "tagId", tagIds);
+  checkReference("reports", "projectId", projectIds, true);
+
+  for (const [index, row] of (tables.conversationRevisions ?? []).entries()) {
+    if (row.storageKind !== "delta") continue;
+    const baseId = row.baseRevisionId;
+    if (typeof baseId !== "string" || !revisionIds.has(baseId)) {
+      errors.push(`conversationRevisions[${index}] 的增量基线不存在`);
+      continue;
+    }
+    if (revisionConversation.get(baseId) !== row.conversationId) {
+      errors.push(`conversationRevisions[${index}] 的增量基线跨会话`);
+    }
+  }
+  const counts = Object.fromEntries(
+    tableSpecs.map((spec) => [spec.key, tables[spec.key]?.length ?? 0]),
+  );
+  const sourceFingerprint = backup.metadata.masterKeyFingerprint;
+  const masterKeyMatches = sourceFingerprint
+    ? sourceFingerprint === masterKeyFingerprint()
+    : null;
+  if (masterKeyMatches === false) {
+    warnings.push("备份使用不同 APP_MASTER_KEY；加密设置将在恢复时跳过。");
+  }
+  return {
+    ok: errors.length === 0,
+    format: backup.format,
+    schemaVersion: backup.schemaVersion,
+    exportedAt: backup.exportedAt,
+    sourceAppVersion: backup.metadata.appVersion ?? null,
+    masterKeyMatches,
+    counts,
+    errors: errors.slice(0, 100),
+    warnings,
+  };
+}
+
 export function prepareRestoredBackupTables(input: BackupTables): {
   tables: BackupTables;
   warnings: string[];
@@ -365,6 +571,19 @@ export function prepareRestoredBackupTables(input: BackupTables): {
   }
   delete tables.knowledgeItems;
   delete tables.knowledge_items;
+  const usedProjectNames = new Set<string>();
+  tables.projects = (tables.projects ?? []).map((row, index) => {
+    const original = normalizeProjectName(typeof row.name === "string" ? row.name : "");
+    let name = original.name || `未命名项目-${String(row.id ?? index).slice(0, 8)}`;
+    let normalized = normalizeProjectName(name);
+    let suffix = 2;
+    while (usedProjectNames.has(normalized.normalizedName)) {
+      normalized = normalizeProjectName(`${name} (${suffix})`);
+      suffix += 1;
+    }
+    usedProjectNames.add(normalized.normalizedName);
+    return { ...row, name: normalized.name, normalizedName: normalized.normalizedName };
+  });
   const obsoleteBackgroundTaskCount = (tables.backgroundTasks ?? []).filter(
     (row) => row.kind === "knowledge_rebuild",
   ).length;
@@ -376,13 +595,27 @@ export function prepareRestoredBackupTables(input: BackupTables): {
       `已忽略 ${obsoleteBackgroundTaskCount} 个旧版项目知识后台任务。`,
     );
   }
+  tables.conversationRevisions = (tables.conversationRevisions ?? []).map((row) => ({
+    ...row,
+    metadataCaptured:
+      typeof row.metadataCaptured === "boolean" ? row.metadataCaptured : false,
+    revisionIdentityHash:
+      typeof row.revisionIdentityHash === "string" ? row.revisionIdentityHash : null,
+    contentIntegrityHash:
+      typeof row.contentIntegrityHash === "string" ? row.contentIntegrityHash : null,
+  }));
   return { tables, warnings };
 }
 
 export async function restoreBackupArchive(
   filename: string,
   buffer: Buffer,
+  options: {
+    onPhase?: (phase: BackupPhase, progress: number) => Promise<void>;
+    restoreJobId?: string;
+  } = {},
 ): Promise<BackupImportResult> {
+  await options.onPhase?.("validating", 10);
   const backup = await parseBackupArchive(filename, buffer);
   const prepared = prepareRestoredBackupTables(backup.tables);
   let tables = prepared.tables;
@@ -394,6 +627,7 @@ export async function restoreBackupArchive(
   if (missingRequiredTables.length) {
     throw new Error(`Backup is incomplete; missing tables: ${missingRequiredTables.join(", ")}`);
   }
+  await options.onPhase?.("validated", 25);
   const backupMasterKey = backup.metadata.masterKeyFingerprint;
   if (backupMasterKey && backupMasterKey !== masterKeyFingerprint()) {
     const originalSettings = tables.settings ?? [];
@@ -411,6 +645,7 @@ export async function restoreBackupArchive(
   tables = sanitizeRestoredBackupTables(tables);
 
   const counts: Record<string, number> = {};
+  await options.onPhase?.("restoring", 35);
   await db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(193481962)`);
     for (const spec of deleteSpecs) {
@@ -425,8 +660,24 @@ export async function restoreBackupArchive(
         if (batch.length) await tx.insert(spec.table).values(batch as never);
       }
     }
+    if (options.restoreJobId) {
+      await tx.update(restoreJobs).set({
+        status: "rebuilding_search",
+        progress: 75,
+        phaseMessage: "事实数据已提交，正在重建全文检索分块",
+        counts,
+        warnings,
+        factsCommittedAt: new Date(),
+        completedAt: null,
+        updatedAt: new Date(),
+      }).where(eq(restoreJobs.id, options.restoreJobId));
+    }
   });
+  await options.onPhase?.("rebuilding_search", 75);
+  const searchChunkCount = await rebuildConversationSearchChunks();
+  warnings.push(`已从恢复后的消息重建 ${searchChunkCount} 个全文检索分块。`);
 
+  await options.onPhase?.("verifying", 92);
   return {
     ok: true,
     importedAt: new Date().toISOString(),

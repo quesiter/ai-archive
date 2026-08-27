@@ -7,7 +7,7 @@ import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import { config } from "./config.js";
 import { sqlClient } from "./db.js";
 import { activityRoutes } from "./routes/activity.js";
@@ -21,10 +21,13 @@ import { importRoutes } from "./routes/imports.js";
 import { logRoutes } from "./routes/logs.js";
 import { projectRoutes } from "./routes/projects.js";
 import { reportRoutes } from "./routes/reports.js";
+import { reliabilityRoutes } from "./routes/reliability.js";
+import { savedSearchRoutes } from "./routes/saved-searches.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { systemStatusRoutes } from "./routes/system-status.js";
 import { tagRoutes } from "./routes/tags.js";
 import { APP_VERSION } from "./version.js";
+import { maintenanceRestoreJob } from "./services/restore.js";
 
 const JSON_BODY_LIMIT = 50 * 1024 * 1024;
 
@@ -106,6 +109,34 @@ export async function buildApp(): Promise<FastifyInstance> {
     return payload.pipe(gunzip);
   });
 
+  app.addHook("preHandler", async (request, reply) => {
+    if (!request.url.startsWith("/api/v1/")) return;
+    const params = request.params as Record<string, unknown> | null;
+    if (
+      request.routeOptions.url?.includes(":id") &&
+      typeof params?.id === "string" &&
+      !z.string().uuid().safeParse(params.id).success
+    ) {
+      return reply.code(400).send({
+        error: "Request validation failed",
+        issues: [{ path: ["id"], message: "Invalid UUID" }],
+      });
+    }
+    const allowedDuringRestore =
+      request.url.startsWith("/api/v1/auth/") ||
+      request.url.startsWith("/api/v1/backups/restores") ||
+      request.url.startsWith("/api/v1/system/status");
+    if (allowedDuringRestore) return;
+    const activeRestore = await maintenanceRestoreJob();
+    if (!activeRestore) return;
+    reply.header("Retry-After", "10");
+    return reply.code(503).send({
+      error: "System is in maintenance mode while a backup is being restored",
+      maintenance: true,
+      restore: activeRestore,
+    });
+  });
+
   app.get("/healthz", async (_request, reply) => {
     try {
       await sqlClient`select 1`;
@@ -181,6 +212,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   await importRoutes(app);
   await backupRoutes(app);
   await reportRoutes(app);
+  await reliabilityRoutes(app);
+  await savedSearchRoutes(app);
 
   const webRoot = resolve(config.WEB_DIST);
   if (existsSync(webRoot)) {

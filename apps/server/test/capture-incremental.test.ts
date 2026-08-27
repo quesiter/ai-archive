@@ -57,8 +57,30 @@ function delta(overrides: Partial<CaptureDeltaV1> = {}): CaptureDeltaV1 {
 }
 
 describe("incremental capture validation", () => {
-  it("keeps identical complete snapshots idempotent even when capture metadata changes", async () => {
-    const { snapshotHash } = await import("../src/services/capture.js");
+  it("keeps current idempotency strict but bypasses unverifiable legacy hashes", async () => {
+    const { captureIdempotencyReplayMode } = await import("../src/services/capture.js");
+    expect(captureIdempotencyReplayMode({
+      previousSnapshotHash: "snapshot-a",
+      previousPayloadIdentityHash: "identity-a",
+      currentSnapshotHash: "snapshot-a",
+      currentRevisionIdentityHash: "identity-b",
+    })).toBe("conflict");
+    expect(captureIdempotencyReplayMode({
+      previousSnapshotHash: "legacy-a",
+      previousPayloadIdentityHash: null,
+      currentSnapshotHash: "normalized-b",
+      currentRevisionIdentityHash: "identity-b",
+    })).toBe("legacy_bypass");
+    expect(captureIdempotencyReplayMode({
+      previousSnapshotHash: "snapshot-a",
+      previousPayloadIdentityHash: null,
+      currentSnapshotHash: "snapshot-a",
+      currentRevisionIdentityHash: "identity-b",
+    })).toBe("replay");
+  });
+
+  it("records title changes while keeping recapture timestamps idempotent", async () => {
+    const { revisionIdentityHash, snapshotHash } = await import("../src/services/capture.js");
     const snapshot: CaptureSnapshotV1 = {
       schemaVersion: 1,
       provider: "chatgpt",
@@ -77,13 +99,14 @@ describe("incremental capture validation", () => {
       messages: baseMessages,
     };
 
-    expect(
-      snapshotHash({
-        ...snapshot,
-        title: "New title",
-        capturedAt: "2026-07-25T05:00:00.000Z",
-      }),
-    ).toBe(snapshotHash(snapshot));
+    expect(snapshotHash({ ...snapshot, capturedAt: "2026-07-25T05:00:00.000Z" }))
+      .toBe(snapshotHash(snapshot));
+    expect(revisionIdentityHash({ ...snapshot, capturedAt: "2026-07-25T05:00:00.000Z" }))
+      .toBe(revisionIdentityHash(snapshot));
+    expect(revisionIdentityHash({ ...snapshot, title: "New title" }))
+      .not.toBe(revisionIdentityHash(snapshot));
+    expect(revisionIdentityHash({ ...snapshot, canonicalUrl: "https://example.com/new" }))
+      .not.toBe(revisionIdentityHash(snapshot));
   });
 
   it("accepts a valid append delta but stores only its new message body", async () => {
@@ -279,6 +302,61 @@ describe("incremental capture validation", () => {
         },
       ]),
     ).toEqual({ textUnits: 7, reasoningTextUnits: 2, toolTextUnits: 2 });
+  });
+
+  it("hashes the exact truncated representation that archive verification reconstructs", async () => {
+    const {
+      contentIntegrityHash,
+      MESSAGE_SEGMENT_CONTENT_LIMIT,
+      normalizeCaptureMessagesForStorage,
+      snapshotHash,
+    } = await import("../src/services/capture.js");
+    const oversized = "prefix " + "x".repeat(MESSAGE_SEGMENT_CONTENT_LIMIT + 5_000) + " suffix";
+    const snapshot: CaptureSnapshotV1 = {
+      schemaVersion: 1,
+      provider: "codex",
+      sessionId: "oversized-session",
+      branchFingerprint: "oversized-branch",
+      adapterVersion: "codex-jsonl-v2",
+      capturedAt: "2026-08-27T04:00:00.000Z",
+      captureMode: "import",
+      completeness: {
+        status: "complete",
+        topReached: true,
+        bottomReached: true,
+        stable: true,
+      },
+      messages: [
+        {
+          ordinal: 0,
+          role: "assistant",
+          segments: [{ type: "text", content: oversized }],
+        },
+      ],
+    };
+
+    const normalized = normalizeCaptureMessagesForStorage(snapshot.messages);
+    expect(normalized[0]?.segments[0]?.content.length).toBe(
+      MESSAGE_SEGMENT_CONTENT_LIMIT,
+    );
+    expect(normalized[0]?.segments[0]?.content).toContain("characters omitted");
+    expect(normalizeCaptureMessagesForStorage(normalized)).toEqual(normalized);
+    expect(snapshotHash({ ...snapshot, messages: normalized })).not.toBe(
+      snapshotHash(snapshot),
+    );
+    expect(snapshotHash({ ...snapshot, messages: normalized })).toBe(
+      snapshotHash({
+        ...snapshot,
+        messages: normalizeCaptureMessagesForStorage(normalized),
+      }),
+    );
+    expect(contentIntegrityHash({ ...snapshot, messages: normalized })).toBe(
+      contentIntegrityHash({
+        ...snapshot,
+        capturedAt: "2026-08-27T12:00:00+08:00",
+        messages: normalizeCaptureMessagesForStorage(normalized),
+      }),
+    );
   });
 
   it("keeps Codex import search text small enough for trigram indexing", async () => {

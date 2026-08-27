@@ -9,5 +9,6 @@
     "paths": {
       "@ai-archive/contracts": ["../../packages/contracts/src/index.ts"]
     }
-  }
+  },
+  "exclude": ["**/*_Conflict.*"]
 }

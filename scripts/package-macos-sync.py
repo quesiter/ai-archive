@@ -106,10 +106,15 @@ def verify_archive(path: Path, version: str | None = None) -> tuple[int, str]:
 
 def build_archive(version: str, output: Path) -> None:
     folder = f"macos-sync-{version}"
+    macos_guides = sorted((ROOT / "docs").glob("12-*.md"))
+    if len(macos_guides) != 1:
+        raise FileNotFoundError(
+            f"Expected one numbered macOS guide under {ROOT / 'docs'}, found {len(macos_guides)}"
+        )
     inputs = {
         "AI-Archive-Sync.command": ROOT / "scripts" / "AI-Archive-Sync.command",
         "openclaw-sync.cjs": ROOT / "apps" / "openclaw-sync" / "dist" / "index.cjs",
-        "README-MACOS-SYNC.md": ROOT / "docs" / "MACOS-SYNC.md",
+        "README-MACOS-SYNC.md": macos_guides[0],
     }
     for source in inputs.values():
         if not source.is_file():

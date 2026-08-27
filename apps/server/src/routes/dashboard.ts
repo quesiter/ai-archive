@@ -22,6 +22,10 @@ type DashboardTokenStatsRow = {
   reported_reasoning_tokens?: number | string | null;
   fallback_estimated_tokens?: number | string | null;
   model_tokens?: number | string | null;
+  calibration_factor?: number | string | null;
+  calibration_factor_low?: number | string | null;
+  calibration_factor_high?: number | string | null;
+  calibration_sample_count?: number | string | null;
   usage_backed_conversations?: number | string | null;
   fallback_conversations?: number | string | null;
 };
@@ -34,18 +38,53 @@ function nonnegativeNumber(value: number | string | null | undefined): number {
 export function dashboardTokenStatsFromRow(
   row: DashboardTokenStatsRow | undefined,
 ) {
+  const reportedTokens = nonnegativeNumber(row?.reported_tokens);
+  const fallbackEstimatedTokens = nonnegativeNumber(
+    row?.fallback_estimated_tokens,
+  );
+  const calibrationSampleCount = nonnegativeNumber(
+    row?.calibration_sample_count,
+  );
+  const reportedCalibrationFactor = nonnegativeNumber(
+    row?.calibration_factor,
+  );
+  const calibrationFactor =
+    calibrationSampleCount > 0 && reportedCalibrationFactor > 0
+      ? reportedCalibrationFactor
+      : 1;
+  const reportedLowFactor = nonnegativeNumber(row?.calibration_factor_low);
+  const reportedHighFactor = nonnegativeNumber(row?.calibration_factor_high);
+  const calibrationFactorLow =
+    calibrationSampleCount > 0 && reportedLowFactor > 0
+      ? reportedLowFactor
+      : calibrationFactor;
+  const calibrationFactorHigh =
+    calibrationSampleCount > 0 && reportedHighFactor > 0
+      ? reportedHighFactor
+      : calibrationFactor;
+  const calibratedFallbackTokens = Math.round(
+    fallbackEstimatedTokens * calibrationFactor,
+  );
   return {
     textUnits: nonnegativeNumber(row?.text_units),
     reasoningTextUnits: nonnegativeNumber(row?.reasoning_text_units),
     toolTextUnits: nonnegativeNumber(row?.tool_text_units),
-    reportedTokens: nonnegativeNumber(row?.reported_tokens),
+    reportedTokens,
     reportedReasoningTokens: nonnegativeNumber(
       row?.reported_reasoning_tokens,
     ),
-    fallbackEstimatedTokens: nonnegativeNumber(
-      row?.fallback_estimated_tokens,
-    ),
+    fallbackEstimatedTokens,
     estimatedTokens: nonnegativeNumber(row?.model_tokens),
+    calibrationFactor,
+    calibrationFactorLow,
+    calibrationFactorHigh,
+    calibrationSampleCount,
+    calibratedFallbackTokens,
+    calibratedEstimatedTokens: reportedTokens + calibratedFallbackTokens,
+    calibratedEstimatedTokensLow:
+      reportedTokens + Math.round(fallbackEstimatedTokens * calibrationFactorLow),
+    calibratedEstimatedTokensHigh:
+      reportedTokens + Math.round(fallbackEstimatedTokens * calibrationFactorHigh),
     usageBackedConversationCount: nonnegativeNumber(
       row?.usage_backed_conversations,
     ),
@@ -215,6 +254,7 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
               COALESCE(chain.tool_text_units, 0) AS tool_text_units,
               canonical.reported_reasoning_output_tokens,
               canonical.reported_total_tokens,
+              ceil(COALESCE(chain.text_units, 0) / 1.7) AS fallback_model_tokens,
               CASE
                 WHEN canonical.reported_total_tokens IS NOT NULL
                   THEN canonical.reported_total_tokens
@@ -235,6 +275,27 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
               CASE WHEN reported_total_tokens IS NULL THEN model_tokens ELSE 0 END
             ), 0) AS fallback_estimated_tokens,
             COALESCE(sum(model_tokens), 0) AS model_tokens,
+            percentile_cont(0.5) WITHIN GROUP (
+              ORDER BY reported_total_tokens::double precision
+                / NULLIF(fallback_model_tokens, 0)
+            ) FILTER (
+              WHERE reported_total_tokens > 0 AND fallback_model_tokens > 0
+            ) AS calibration_factor,
+            percentile_cont(0.25) WITHIN GROUP (
+              ORDER BY reported_total_tokens::double precision
+                / NULLIF(fallback_model_tokens, 0)
+            ) FILTER (
+              WHERE reported_total_tokens > 0 AND fallback_model_tokens > 0
+            ) AS calibration_factor_low,
+            percentile_cont(0.75) WITHIN GROUP (
+              ORDER BY reported_total_tokens::double precision
+                / NULLIF(fallback_model_tokens, 0)
+            ) FILTER (
+              WHERE reported_total_tokens > 0 AND fallback_model_tokens > 0
+            ) AS calibration_factor_high,
+            count(*) FILTER (
+              WHERE reported_total_tokens > 0 AND fallback_model_tokens > 0
+            ) AS calibration_sample_count,
             count(*) FILTER (WHERE reported_total_tokens IS NOT NULL)
               AS usage_backed_conversations,
             count(*) FILTER (WHERE reported_total_tokens IS NULL)
@@ -351,7 +412,8 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
         ...textStats,
         latestRevisionCount,
         latestMessageCount,
-        tokenEstimateRule: "源端 usage 优先；其余含思考与工具过程估算",
+        tokenEstimateRule:
+          "源端 usage 优先；其余按真实会话的 usage/归档估算中位倍率校准",
       },
       categoryTotals: {
         activeCategoryCount: sortedCategoryStats.filter(

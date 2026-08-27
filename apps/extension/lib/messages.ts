@@ -4,6 +4,10 @@ export type ExtensionMessage =
   | { type: "enqueueCapture"; payload: CapturePayloadV1 }
   | { type: "captureState"; state: CaptureUiState }
   | { type: "flushOutbox" }
+  | { type: "getOutbox" }
+  | { type: "retryOutboxItem"; id: string }
+  | { type: "removeOutboxItem"; id: string }
+  | { type: "retryAllOutbox" }
   | {
       type: "pairDevice";
       code: string;
@@ -43,4 +47,5 @@ export interface ExtensionSettings {
   pausedHosts?: Record<string, boolean>;
   showFloatingIndicator?: boolean;
   lastStatus?: CaptureUiState;
+  authRevoked?: boolean;
 }

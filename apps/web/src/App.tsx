@@ -1,4 +1,4 @@
-﻿import {
+import {
   FormEvent,
   type ReactNode,
   useCallback,
@@ -31,7 +31,14 @@ import {
 import { releaseNotes } from "./release-notes.js";
 
 type UnknownRecord = Record<string, any>;
-const WEB_VERSION = "V2.1.2";
+type PaginationData = {
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+};
+type PageEnvelope = { items: UnknownRecord[]; pagination: PaginationData };
+const WEB_VERSION = "V2.3.0";
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -55,6 +62,43 @@ function Loading({ label = "加载中…" }: { label?: string }) {
 
 function ErrorBanner({ message }: { message: string }) {
   return message ? <div className="alert error">{message}</div> : null;
+}
+
+function Pagination({
+  pagination,
+  loading = false,
+  onOffsetChange,
+}: {
+  pagination?: PaginationData | null | undefined;
+  loading?: boolean;
+  onOffsetChange: (offset: number) => void;
+}) {
+  if (!pagination) return null;
+  const start = pagination.total > 0 ? pagination.offset + 1 : 0;
+  const end = Math.min(pagination.total, pagination.offset + pagination.limit);
+  return (
+    <div className="conversation-pagination" aria-label="分页">
+      <span className="toolbar-count">
+        {loading ? "加载中" : `第 ${start}-${end} 条，共 ${pagination.total} 条`}
+      </span>
+      <button
+        className="secondary small"
+        disabled={loading || pagination.offset <= 0}
+        onClick={() => onOffsetChange(Math.max(0, pagination.offset - pagination.limit))}
+        type="button"
+      >
+        上一页
+      </button>
+      <button
+        className="secondary small"
+        disabled={loading || !pagination.hasMore}
+        onClick={() => onOffsetChange(pagination.offset + pagination.limit)}
+        type="button"
+      >
+        下一页
+      </button>
+    </div>
+  );
 }
 
 function Modal({
@@ -121,7 +165,7 @@ function Modal({
 }
 
 function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
-  const status = useLoad(() => api<{ initialized: boolean }>("/api/v1/auth/status"), []);
+  const status = useLoad(() => api<{ initialized: boolean; instance?: { timezone?: string } }>("/api/v1/auth/status"), []);
   const [bootstrapResult, setBootstrapResult] = useState<{
     secret: string;
     otpauthUrl: string;
@@ -130,6 +174,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
 
   if (status.loading) return <Loading />;
   if (status.error) return <ErrorBanner message={status.error} />;
+  instanceTimeZone = status.data?.instance?.timezone || instanceTimeZone;
   const initialized = Boolean(status.data?.initialized);
 
   async function bootstrap(event: FormEvent<HTMLFormElement>) {
@@ -234,12 +279,14 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
 const navigation = [
   ["/", "总览", "⌂"],
   ["/conversations", "会话", "◫"],
+  ["/activity", "活动", "↻"],
   ["/projects", "项目", "◇"],
   ["/tags", "标签", "#"],
   ["/reports", "报告", "▤"],
   ["/imports", "导入", "⇧"],
   ["/devices", "设备", "⌘"],
   ["/logs", "日志", "☰"],
+  ["/trash", "回收站", "⌫"],
   ["/settings", "设置", "⚙"],
 ] as const;
 
@@ -317,19 +364,20 @@ function isActiveStatus(status: unknown): boolean {
   return status === "queued" || status === "running" || status === "processing";
 }
 
-const reportDateFormatter = new Intl.DateTimeFormat("zh-CN", {
-  timeZone: "Asia/Shanghai",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
+let instanceTimeZone = "Asia/Shanghai";
 
 function reportPeriodLabel(periodStart: unknown, periodEnd: unknown): string {
   const start = new Date(String(periodStart));
   const exclusiveEnd = new Date(String(periodEnd));
   if (Number.isNaN(start.getTime()) || Number.isNaN(exclusiveEnd.getTime())) return "日期未知";
   const inclusiveEnd = new Date(exclusiveEnd.getTime() - 1);
-  return `${reportDateFormatter.format(start)} — ${reportDateFormatter.format(inclusiveEnd)}`;
+  const formatter = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: instanceTimeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  return `${formatter.format(start)} — ${formatter.format(inclusiveEnd)}`;
 }
 
 function statusLabel(status: unknown): string {
@@ -337,9 +385,16 @@ function statusLabel(status: unknown): string {
     queued: "已入队",
     running: "运行中",
     processing: "处理中",
+    validating: "校验中",
+    validated: "校验通过",
+    restoring: "替换数据中",
+    rebuilding_search: "重建检索中",
+    verifying: "恢复后验证中",
+    recovery_required: "需要恢复处理",
+    cancelled: "已取消",
     completed: "已完成",
     complete: "完整",
-    partial: "不完整",
+    partial: "部分完成",
     active: "有效",
     revoked: "已撤销",
     deleted: "已删除",
@@ -355,10 +410,17 @@ function statusClass(status: unknown): string {
       active: "complete",
       running: "partial",
       processing: "partial",
+      validating: "partial",
+      validated: "partial",
+      restoring: "partial",
+      rebuilding_search: "partial",
+      verifying: "partial",
+      recovery_required: "failed",
       queued: "partial",
       partial: "partial",
       revoked: "failed",
       deleted: "failed",
+      cancelled: "failed",
       failed: "failed",
     } as Record<string, string>
   )[String(status)] ?? "partial";
@@ -437,7 +499,7 @@ function taskPercent(task: UnknownRecord | null): number {
 function formatTaskTime(value: unknown): string {
   if (typeof value !== "string" && !(value instanceof Date)) return "";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { timeZone: instanceTimeZone });
 }
 
 function useTaskClock(enabled: boolean): number {
@@ -588,6 +650,10 @@ function compactErrorMessage(value: unknown): string {
 
 function Dashboard() {
   const state = useLoad(() => api<UnknownRecord>("/api/v1/dashboard"), []);
+  const reliabilityState = useLoad(
+    () => api<UnknownRecord>("/api/v1/reliability/summary"),
+    [],
+  );
   if (state.loading) return <Loading />;
   if (state.error) return <ErrorBanner message={state.error} />;
   const data = state.data!;
@@ -602,6 +668,13 @@ function Dashboard() {
     ? data.categoryStats
     : [];
   const tagCount = toFiniteNumber(counts.tags);
+  const calibrationSampleCount = toFiniteNumber(
+    textStats.calibrationSampleCount,
+  );
+  const hasTokenCalibration = calibrationSampleCount > 0;
+  const displayedModelTokens = hasTokenCalibration
+    ? textStats.calibratedEstimatedTokens
+    : textStats.estimatedTokens;
   const topCategories = categoryStats.slice(0, 12);
   const maxCategoryCount = Math.max(
     1,
@@ -634,11 +707,13 @@ function Dashboard() {
           <small>含正文、思考与工具过程</small>
         </article>
         <article className="metric">
-          <span>模型 token</span>
-          <strong>{formatCompactCount(textStats.estimatedTokens)}</strong>
+          <span>{hasTokenCalibration ? "模型 token（校准）" : "模型 token"}</span>
+          <strong>{formatCompactCount(displayedModelTokens)}</strong>
           <small>
-            {toFiniteNumber(textStats.usageBackedConversationCount) > 0
-              ? `源端 usage ${formatCount(textStats.usageBackedConversationCount)} 个会话；其余含过程估算`
+            {hasTokenCalibration
+              ? `区间 ${formatCompactCount(textStats.calibratedEstimatedTokensLow)}–${formatCompactCount(textStats.calibratedEstimatedTokensHigh)}`
+              : toFiniteNumber(textStats.usageBackedConversationCount) > 0
+                ? `源端 usage ${formatCount(textStats.usageBackedConversationCount)} 个会话；其余含过程估算`
               : (textStats.tokenEstimateRule ?? "含思考与工具过程估算")}
           </small>
         </article>
@@ -652,6 +727,28 @@ function Dashboard() {
           <strong>{formatCount(counts.devices)}</strong>
           <small>当前未撤销的采集端</small>
         </article>
+      </section>
+      <section className="panel">
+        <div className="section-title-row">
+          <div>
+            <h2>需要处理</h2>
+            <p className="panel-subtitle">归档完整性、失败恢复和设备在线状态优先于规模指标。</p>
+          </div>
+          <strong>{formatCount(reliabilityState.data?.needsAttention ?? 0)} 项</strong>
+        </div>
+        {reliabilityState.loading ? <Loading label="检查归档可靠性…" /> : reliabilityState.error ? (
+          <ErrorBanner message={reliabilityState.error} />
+        ) : (
+          <div className="metric-grid">
+            {(reliabilityState.data?.items ?? []).map((item: UnknownRecord) => (
+              <Link className="metric" key={item.key} to={item.href}>
+                <span>{item.label}</span>
+                <strong>{formatCount(item.count)}</strong>
+                <small>{Number(item.count) > 0 ? "点击定位并处理" : "当前正常"}</small>
+              </Link>
+            ))}
+          </div>
+        )}
       </section>
       <section className="dashboard-main-grid">
         <article className="panel category-overview-panel">
@@ -787,6 +884,10 @@ function Logs() {
   const deviceId = searchParams.get("deviceId") ?? "";
   const status = searchParams.get("status") ?? "";
   const q = searchParams.get("q") ?? "";
+  const from = searchParams.get("from") ?? "";
+  const to = searchParams.get("to") ?? "";
+  const range = searchParams.get("range") ?? "";
+  const offset = Math.max(0, Number(searchParams.get("offset") ?? 0) || 0);
   const [draftQ, setDraftQ] = useState(q);
   const params = new URLSearchParams({
     limit: "120",
@@ -796,10 +897,14 @@ function Logs() {
     ...(deviceId ? { deviceId } : {}),
     ...(status ? { status } : {}),
     ...(q ? { q } : {}),
+    ...(from ? { from } : {}),
+    ...(to ? { to } : {}),
+    ...(range ? { range } : {}),
+    ...(offset ? { offset: String(offset) } : {}),
   });
   const state = useLoad(
-    () => api<{ items: UnknownRecord[] }>(`/api/v1/logs?${params}`),
-    [scope, level, provider, deviceId, status, q],
+    () => api<PageEnvelope>(`/api/v1/logs?${params}`),
+    [scope, level, provider, deviceId, status, q, from, to, range, offset],
   );
   const providerCountsState = useLoad(
     () => api<UnknownRecord[]>("/api/v1/conversations/provider-counts"),
@@ -820,11 +925,11 @@ function Logs() {
     updateQuery({ q: draftQ.trim() });
   }
 
-  function updateQuery(next: Record<string, string>) {
-    const merged = { scope, level, provider, deviceId, status, q, ...next };
+  function updateQuery(next: Record<string, string | number>) {
+    const merged = { scope, level, provider, deviceId, status, q, from, to, range, offset, ...next };
     const updated = new URLSearchParams();
     for (const [key, value] of Object.entries(merged)) {
-      if (value) updated.set(key, value);
+      if (value) updated.set(key, String(value));
     }
     setSearchParams(updated, { replace: true });
   }
@@ -902,6 +1007,21 @@ function Logs() {
           onChange={(event) => setDraftQ(event.target.value)}
           placeholder="搜索日志…"
         />
+        <select
+          aria-label="日志时间范围"
+          value={range}
+          onChange={(event) => {
+            updateQuery({ range: event.target.value, from: "", to: "", offset: 0 });
+          }}
+        >
+          <option value="">不限时间</option>
+          <option value="1h">最近 1 小时</option>
+          <option value="24h">最近 24 小时</option>
+          <option value="7d">最近 7 天</option>
+          <option value="30d">最近 30 天</option>
+        </select>
+        <input aria-label="日志开始日期" type="date" value={from} onChange={(event) => updateQuery({ from: event.target.value, range: "", offset: 0 })} />
+        <input aria-label="日志结束日期" type="date" value={to} onChange={(event) => updateQuery({ to: event.target.value, range: "", offset: 0 })} />
         <button className="secondary small" type="submit">搜索</button>
         <button
           className="secondary small"
@@ -1003,6 +1123,11 @@ function Logs() {
         ) : (
           <p className="muted">暂无日志</p>
         )}
+        <Pagination
+          loading={state.loading}
+          pagination={state.data?.pagination}
+          onOffsetChange={(nextOffset) => updateQuery({ offset: nextOffset })}
+        />
       </section>
     </>
   );
@@ -1011,6 +1136,11 @@ function Logs() {
 function Conversations() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [tagQuery, setTagQuery] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [batchProjectId, setBatchProjectId] = useState("");
+  const [batchTagId, setBatchTagId] = useState("");
+  const [batchMessage, setBatchMessage] = useState("");
+  const [selectedSavedSearchId, setSelectedSavedSearchId] = useState("");
   const tagSearchRef = useRef<HTMLInputElement>(null);
   const q = searchParams.get("q") ?? "";
   const provider = searchParams.get("provider") ?? "";
@@ -1041,7 +1171,7 @@ function Conversations() {
   const conversationSearch = buildConversationListSearch(conversationQuery);
   const state = useLoad(
     () =>
-      api<UnknownRecord[]>(
+      api<PageEnvelope>(
         `/api/v1/conversations?${conversationSearch}`,
       ),
     [conversationSearch],
@@ -1050,8 +1180,9 @@ function Conversations() {
     () => api<UnknownRecord[]>("/api/v1/conversations/provider-counts"),
     [conversationSearch],
   );
-  const projectsState = useLoad(() => api<UnknownRecord[]>("/api/v1/projects"), []);
+  const projectsState = useLoad(() => api<UnknownRecord[]>("/api/v1/projects/options"), []);
   const tagsState = useLoad(() => api<UnknownRecord[]>("/api/v1/tags"), []);
+  const savedSearchesState = useLoad(() => api<UnknownRecord[]>("/api/v1/saved-searches"), []);
 
   useEffect(() => {
     const refreshWhenVisible = () => {
@@ -1091,10 +1222,7 @@ function Conversations() {
     setSearchParams(params);
   }
 
-  const conversations = state.data ?? [];
-  const hasNextPage = conversations.length === limit;
-  const pageStart = conversations.length ? offset + 1 : 0;
-  const pageEnd = offset + conversations.length;
+  const conversations = state.data?.items ?? [];
   const providerCounts = providerCountsFromRows(providerCountsState.data);
   const providerTotal = Object.values(providerCounts).reduce(
     (sum, value) => sum + value,
@@ -1111,6 +1239,82 @@ function Conversations() {
 
   function resetFilters() {
     setSearchParams(new URLSearchParams());
+  }
+
+  async function saveCurrentSearch() {
+    const name = window.prompt("为当前搜索条件命名");
+    if (!name?.trim()) return;
+    const query = Object.fromEntries(
+      [...searchParams.entries()].filter(([key]) => key !== "offset"),
+    );
+    try {
+      await api("/api/v1/saved-searches", {
+        method: "POST",
+        ...jsonBody({ name, query }),
+      });
+      savedSearchesState.reload();
+    } catch (reason) {
+      setBatchMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function deleteSavedSearch() {
+    if (!selectedSavedSearchId) return;
+    const saved = savedSearchesState.data?.find((item) => item.id === selectedSavedSearchId);
+    if (!window.confirm(`删除常用视图“${saved?.name ?? "未命名"}”？`)) return;
+    try {
+      await api(`/api/v1/saved-searches/${selectedSavedSearchId}`, { method: "DELETE" });
+      setSelectedSavedSearchId("");
+      savedSearchesState.reload();
+    } catch (reason) {
+      setBatchMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  function toggleSelected(id: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  async function batchProject() {
+    if (!selectedIds.size) return;
+    await api("/api/v1/conversations/batch/project", {
+      method: "POST",
+      ...jsonBody({ conversationIds: [...selectedIds], projectId: batchProjectId || null }),
+    });
+    setBatchMessage(`已更新 ${selectedIds.size} 个会话的项目`);
+    state.reload();
+  }
+
+  async function batchTags(operation: "add" | "remove") {
+    if (!selectedIds.size || !batchTagId) return;
+    await api("/api/v1/conversations/batch/tags", {
+      method: "POST",
+      ...jsonBody({ conversationIds: [...selectedIds], tagIds: [batchTagId], operation }),
+    });
+    setBatchMessage(`已${operation === "add" ? "添加" : "移除"}标签`);
+    state.reload();
+  }
+
+  async function batchExport(format: "csv" | "md" | "xlsx") {
+    if (!selectedIds.size) return;
+    const response = await fetch(`/api/v1/conversations/batch/export?format=${format}`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversationIds: [...selectedIds] }),
+    });
+    if (!response.ok) throw new Error("批量导出失败");
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `已选会话-${selectedIds.size}.${format}`;
+    anchor.click();
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -1294,6 +1498,20 @@ function Conversations() {
             </label>
           </div>
           <div className="conversation-filter-actions">
+            <select
+              aria-label="常用视图"
+              value={selectedSavedSearchId}
+              onChange={(event) => {
+                setSelectedSavedSearchId(event.target.value);
+                const saved = savedSearchesState.data?.find((item) => item.id === event.target.value);
+                if (saved?.query) setSearchParams(new URLSearchParams(saved.query));
+              }}
+            >
+              <option value="">常用视图</option>
+              {(savedSearchesState.data ?? []).map((saved) => <option key={saved.id} value={saved.id}>{saved.name}</option>)}
+            </select>
+            <button className="secondary small" type="button" onClick={() => void saveCurrentSearch()}>保存当前搜索</button>
+            <button className="ghost small" disabled={!selectedSavedSearchId} type="button" onClick={() => void deleteSavedSearch()}>删除视图</button>
             <span className="conversation-filter-summary">
               {activeFilterCount ? `已启用 ${activeFilterCount} 项筛选` : "当前显示全部会话"}
             </span>
@@ -1305,27 +1523,11 @@ function Conversations() {
             >
               重置筛选
             </button>
-            <div className="conversation-pagination">
-              <span className="toolbar-count">
-                {state.loading ? "加载中" : `第 ${pageStart}-${pageEnd} 条`}
-              </span>
-              <button
-                type="button"
-                className="secondary small"
-                disabled={offset <= 0}
-                onClick={() => updateQuery({ offset: Math.max(0, offset - limit) })}
-              >
-                上一页
-              </button>
-              <button
-                type="button"
-                className="secondary small"
-                disabled={!hasNextPage}
-                onClick={() => updateQuery({ offset: offset + limit })}
-              >
-                下一页
-              </button>
-            </div>
+            <Pagination
+              loading={state.loading}
+              pagination={state.data?.pagination}
+              onOffsetChange={(nextOffset) => updateQuery({ offset: nextOffset })}
+            />
           </div>
         </div>
       </section>
@@ -1335,6 +1537,24 @@ function Conversations() {
         <ErrorBanner message={state.error} />
       ) : conversations.length ? (
         <section className="panel conversation-list-panel">
+          <div className="toolbar">
+            <strong>{selectedIds.size} 个会话已选中</strong>
+            <button className="secondary small" onClick={() => setSelectedIds(new Set(conversations.map((item) => String(item.id))))}>选择本页</button>
+            <button className="ghost small" onClick={() => setSelectedIds(new Set())}>清空</button>
+            <select value={batchProjectId} onChange={(event) => setBatchProjectId(event.target.value)}>
+              <option value="">待归类</option>
+              {(projectsState.data ?? []).filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+            </select>
+            <button className="secondary small" disabled={!selectedIds.size} onClick={() => void batchProject().catch((reason) => setBatchMessage(String(reason)))}>设置项目</button>
+            <select value={batchTagId} onChange={(event) => setBatchTagId(event.target.value)}>
+              <option value="">选择标签</option>
+              {tags.map((tag) => <option key={tag.id} value={tag.id}>{tag.name}</option>)}
+            </select>
+            <button className="secondary small" disabled={!selectedIds.size || !batchTagId} onClick={() => void batchTags("add").catch((reason) => setBatchMessage(String(reason)))}>添加标签</button>
+            <button className="ghost small" disabled={!selectedIds.size || !batchTagId} onClick={() => void batchTags("remove").catch((reason) => setBatchMessage(String(reason)))}>移除标签</button>
+            {(["csv", "md", "xlsx"] as const).map((format) => <button className="ghost small" key={format} disabled={!selectedIds.size} onClick={() => void batchExport(format).catch((reason) => setBatchMessage(String(reason)))}>导出 {format.toUpperCase()}</button>)}
+          </div>
+          <ErrorBanner message={batchMessage} />
           <div className="conversation-list-header">
             <span>会话</span>
             <span>项目与标签</span>
@@ -1377,6 +1597,13 @@ function Conversations() {
                   key={conversation.id}
                 >
                   <div className="conversation-compact-main">
+                    <input
+                      aria-label={`选择 ${conversation.title || conversation.externalSessionId}`}
+                      checked={selectedIds.has(String(conversation.id))}
+                      onChange={() => toggleSelected(String(conversation.id))}
+                      onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                      type="checkbox"
+                    />
                     <span className="provider-badge">
                       {providerLabels[conversation.provider as Provider]}
                     </span>
@@ -1489,8 +1716,10 @@ function ConversationDetail() {
   const [searchParams, setSearchParams] = useSearchParams();
   const revisionId = searchParams.get("revisionId") ?? "";
   const state = useLoad(() => api<UnknownRecord>(`/api/v1/conversations/${id}${revisionId ? `?revisionId=${revisionId}` : ""}`), [id, revisionId]);
-  const projectsState = useLoad(() => api<UnknownRecord[]>("/api/v1/projects"), []);
+  const projectsState = useLoad(() => api<UnknownRecord[]>("/api/v1/projects/options"), []);
   const [actionError, setActionError] = useState("");
+  const [revisionDiff, setRevisionDiff] = useState<UnknownRecord | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
 
   useEffect(() => {
     if (!state.loading && window.location.hash) {
@@ -1573,9 +1802,23 @@ function ConversationDetail() {
   }
 
   async function removeConversation(): Promise<void> {
-    if (!window.confirm("确认永久删除这个会话及全部版本？删除后无法恢复，再次采集会创建全新的版本。")) return;
+    if (!window.confirm("确认将这个会话移入回收站？30 天内可以恢复。")) return;
     await api(`/api/v1/conversations/${id}`, { method: "DELETE" });
     navigate("/conversations");
+  }
+
+  async function compareRevision(): Promise<void> {
+    const selectedId = state.data?.selectedRevision?.id;
+    if (!selectedId) return;
+    setDiffLoading(true);
+    setActionError("");
+    try {
+      setRevisionDiff(await api(`/api/v1/conversations/${id}/revisions/${selectedId}/diff`));
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setDiffLoading(false);
+    }
   }
 
   if (state.loading) return <Loading />;
@@ -1591,9 +1834,18 @@ function ConversationDetail() {
     return [{ ...message, contentSegments, processSegments, isCodexInternal }];
   });
   const canonicalUrl = safeExternalHref(data.conversation.canonicalUrl);
-  return <><PageHeader title={data.conversation.title || "未命名会话"} subtitle={`${providerLabels[data.conversation.provider as Provider]} · ${data.conversation.externalSessionId}`} actions={<div className="button-group"><ExportLinks path={`/api/v1/conversations/${id}/export`} />{canonicalUrl && <a className="button-link" href={canonicalUrl} target="_blank" rel="noopener noreferrer">打开原会话</a>}<button className="danger" onClick={() => void removeConversation()}>永久删除归档</button></div>} />
+  return <><PageHeader title={data.conversation.title || "未命名会话"} subtitle={`${providerLabels[data.conversation.provider as Provider]} · ${data.conversation.externalSessionId}`} actions={<div className="button-group"><ExportLinks path={`/api/v1/conversations/${id}/export`} />{canonicalUrl && <a className="button-link" href={canonicalUrl} target="_blank" rel="noopener noreferrer">打开原会话</a>}<button className="danger" onClick={() => void removeConversation()}>移入回收站</button></div>} />
     <ErrorBanner message={actionError} />
-    <div className="toolbar"><label>版本 <select value={selectedRevision?.id ?? ""} onChange={(event) => setSearchParams(event.target.value ? { revisionId: event.target.value } : {})}>{data.revisions.map((revision: UnknownRecord) => <option key={revision.id} value={revision.id}>{new Date(revision.capturedAt).toLocaleString()} · {captureModeLabels[String(revision.captureMode)] ?? revision.captureMode} · {revision.completeness} · {revision.messageCount} 条</option>)}</select></label><label>项目（选择后人工锁定） <select disabled={projectsState.loading} value={data.projectAssignment?.projectId ?? ""} onChange={(event) => void assignProject(event.target.value)}><option value="">待归类</option>{projectsState.data?.filter((project) => !project.archived || project.id === data.projectAssignment?.projectId).map((project) => <option key={project.id} value={project.id}>{project.name}{project.archived ? "（已归档）" : ""}</option>)}</select></label>{data.projectAssignment?.lockedByUser ? <><span className="pill complete">人工锁定</span><button className="secondary small" onClick={() => void releaseProjectLock()}>交还 AI 调整</button></> : <span className="pill">AI 可动态调整</span>}</div>
+    <div className="toolbar"><label>版本 <select value={selectedRevision?.id ?? ""} onChange={(event) => { setRevisionDiff(null); setSearchParams(event.target.value ? { revisionId: event.target.value } : {}); }}>{data.revisions.map((revision: UnknownRecord) => <option key={revision.id} value={revision.id}>{new Date(revision.capturedAt).toLocaleString()} · {captureModeLabels[String(revision.captureMode)] ?? revision.captureMode} · {revision.completeness} · {revision.messageCount} 条</option>)}</select></label><button className="secondary small" disabled={!selectedRevision || diffLoading} onClick={() => void compareRevision()}>{diffLoading ? "比较中" : "与上一版本比较"}</button><label>项目（选择后人工锁定） <select disabled={projectsState.loading} value={data.projectAssignment?.projectId ?? ""} onChange={(event) => void assignProject(event.target.value)}><option value="">待归类</option>{projectsState.data?.filter((project) => !project.archived || project.id === data.projectAssignment?.projectId).map((project) => <option key={project.id} value={project.id}>{project.name}{project.archived ? "（已归档）" : ""}</option>)}</select></label>{data.projectAssignment?.lockedByUser ? <><span className="pill complete">人工锁定</span><button className="secondary small" onClick={() => void releaseProjectLock()}>交还 AI 调整</button></> : <span className="pill">AI 可动态调整</span>}</div>
+    {revisionDiff && <section className="panel">
+      <div className="section-title-row"><div><h2>Revision Diff</h2><p className="panel-subtitle">与上一版本相比：新增 {revisionDiff.summary?.added ?? 0}，修改 {revisionDiff.summary?.modified ?? 0}，移除 {revisionDiff.summary?.removed ?? 0}</p></div><button className="ghost small" onClick={() => setRevisionDiff(null)}>关闭</button></div>
+      {["added", "modified", "removed"].map((kind) => Array.isArray(revisionDiff[kind]) && revisionDiff[kind].length > 0 && <details key={kind} open={kind === "added"}><summary>{({added:"新增消息",modified:"修改消息",removed:"移除消息"} as UnknownRecord)[kind]} · {revisionDiff[kind].length}</summary><div className="stack">{revisionDiff[kind].map((change: UnknownRecord) => <article className="segment" key={change.key}><strong>#{change.ordinal} · {speakerLabel(change)}</strong>{change.before && <pre>{String(change.before).slice(0, 4000)}</pre>}<pre>{String(change.after ?? change.content ?? "").slice(0, 4000)}</pre></article>)}</div></details>)}
+      {(revisionDiff.titleChanged || revisionDiff.canonicalUrlChanged) && <div className="stack">
+        {revisionDiff.titleChanged && <article className="segment"><strong>标题变化</strong><pre>{String(revisionDiff.titleChanged.before ?? "（空）")} → {String(revisionDiff.titleChanged.after ?? "（空）")}</pre></article>}
+        {revisionDiff.canonicalUrlChanged && <article className="segment"><strong>原会话地址变化</strong><pre>{String(revisionDiff.canonicalUrlChanged.before ?? "（空）")} → {String(revisionDiff.canonicalUrlChanged.after ?? "（空）")}</pre></article>}
+      </div>}
+      {revisionDiff.metadataUnavailable && <p className="muted">至少一个版本来自 V2.3 之前，历史标题或原会话地址当时未按 Revision 保存；消息 Diff 仍可完整比较。</p>}
+    </section>}
     <section className="panel conversation-tags-panel">
       <div className="section-title-row">
         <div><h2>标签</h2><p className="panel-subtitle">人工标签默认锁定；自动整理不会覆盖人工或已锁定关联。</p></div>
@@ -1607,7 +1859,7 @@ function ConversationDetail() {
           <span className={`tag-editor-chip ${tag.lockedByUser ? "locked" : ""}`} key={tag.id}>
             <Link to={`/conversations?tagIds=${tag.id}`}>{tag.name}</Link>
             <small>{tag.source === "manual" ? "人工" : `AI ${typeof tag.confidence === "number" ? Math.round(tag.confidence * 100) + "%" : ""}`}</small>
-            <button className="ghost small" onClick={() => void toggleConversationTag(tag)}>{tag.lockedByUser ? "解锁" : "锁定"}</button>
+            <button className="ghost small" onClick={() => void toggleConversationTag(tag)}>{tag.lockedByUser ? "交还 AI 管理" : "人工固定"}</button>
             <button className="ghost small" onClick={() => void removeConversationTag(tag)}>移除</button>
           </span>
         ))}
@@ -1645,11 +1897,12 @@ function ConversationDetail() {
 
 function ProjectTimeline({ projectId }: { projectId: string }) {
   const [visible, setVisible] = useState(false);
+  const [offset, setOffset] = useState(0);
   const state = useLoad(
     () => visible
-      ? api<UnknownRecord>(`/api/v1/projects/${projectId}/timeline?limit=100`)
+      ? api<UnknownRecord>(`/api/v1/projects/${projectId}/timeline?limit=50&offset=${offset}`)
       : Promise.resolve(null as UnknownRecord | null),
-    [visible, projectId],
+    [visible, projectId, offset],
   );
   if (!visible) {
     return <button className="secondary small" onClick={() => setVisible(true)}>查看项目时间线</button>;
@@ -1672,12 +1925,31 @@ function ProjectTimeline({ projectId }: { projectId: string }) {
           </div>
         </Link>
       )) : <p className="muted">这个项目还没有可展示的完整 Revision。</p>}
+      <Pagination
+        loading={state.loading}
+        pagination={state.data?.pagination}
+        onOffsetChange={setOffset}
+      />
     </div>
   );
 }
 
 function Projects() {
   const overviewState = useLoad(() => api<UnknownRecord>("/api/v1/projects/overview"), []);
+  const [projectOffset, setProjectOffset] = useState(0);
+  const [unclassifiedOffset, setUnclassifiedOffset] = useState(0);
+  const projectState = useLoad(
+    () => api<PageEnvelope>(`/api/v1/projects?limit=40&offset=${projectOffset}`),
+    [projectOffset],
+  );
+  const unclassifiedState = useLoad(
+    () => api<PageEnvelope>(`/api/v1/unclassified?limit=40&offset=${unclassifiedOffset}`),
+    [unclassifiedOffset],
+  );
+  const projectOptionsState = useLoad(
+    () => api<UnknownRecord[]>("/api/v1/projects/options"),
+    [],
+  );
   const [error, setError] = useState("");
   const [classificationMessage, setClassificationMessage] = useState("");
   const [classificationTask, setClassificationTask] = useState<UnknownRecord | null>(null);
@@ -1690,7 +1962,8 @@ function Projects() {
   const classificationActive = isActiveStatus(classificationTask?.status);
   const classificationClock = useTaskClock(classificationActive);
   const overview = overviewState.data ?? {};
-  const projectGroups = Array.isArray(overview.projects) ? overview.projects : [];
+  const projectGroups = projectState.data?.items ?? [];
+  const projectOptions = projectOptionsState.data ?? [];
   const activeProjectGroups = projectGroups.filter((project) => !project.archived);
   const archivedProjectGroups = projectGroups.filter((project) => project.archived);
   const categorizedProjectGroups = activeProjectGroups.filter(
@@ -1699,7 +1972,7 @@ function Projects() {
   const emptyProjectGroups = activeProjectGroups.filter(
     (project) => Number(project.conversationCount ?? 0) <= 0,
   );
-  const unclassified = Array.isArray(overview.unclassified) ? overview.unclassified : [];
+  const unclassified = unclassifiedState.data?.items ?? [];
   const totals = overview.totals ?? {};
   const totalProjectCount = Number(totals.projectCount ?? activeProjectGroups.length);
   const archivedProjectCount = Number(
@@ -1719,6 +1992,12 @@ function Projects() {
     totals.unclassifiedConversationCount ?? unclassified.length,
   );
   const tagCount = Number(totals.tagCount ?? 0);
+  const reloadProjectsData = useCallback(() => {
+    overviewState.reload();
+    projectState.reload();
+    unclassifiedState.reload();
+    projectOptionsState.reload();
+  }, [overviewState.reload, projectState.reload, unclassifiedState.reload, projectOptionsState.reload]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1743,7 +2022,7 @@ function Projects() {
           setClassificationTask(task);
           setClassificationMessage(task.message ?? statusLabel(task.status));
           if (!isActiveStatus(task.status)) {
-            overviewState.reload();
+            reloadProjectsData();
           }
         })
         .catch((reason) =>
@@ -1756,7 +2035,7 @@ function Projects() {
   }, [
     classificationTask?.id,
     classificationActive,
-    overviewState.reload,
+    reloadProjectsData,
   ]);
 
   async function createProject(event: FormEvent<HTMLFormElement>) {
@@ -1773,7 +2052,7 @@ function Projects() {
       });
       formElement.reset();
       setProjectDialog(null);
-      overviewState.reload();
+      reloadProjectsData();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -1806,8 +2085,8 @@ function Projects() {
 
   async function mergeProjects(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const source = projectGroups.find((project) => project.id === mergeSourceId);
-    const target = projectGroups.find((project) => project.id === mergeTargetId);
+    const source = projectOptions.find((project) => project.id === mergeSourceId);
+    const target = projectOptions.find((project) => project.id === mergeTargetId);
     const targetName = mergeTargetName.trim();
     if (!source || !target || source.id === target.id || !targetName) return;
     if (!window.confirm(`确认把项目“${source.name}”合并到“${target.name}”，并将合并后的项目命名为“${targetName}”？源项目将在迁移完成后删除，此操作不可撤销。`)) return;
@@ -1823,7 +2102,7 @@ function Projects() {
       setMergeTargetId("");
       setMergeTargetName("");
       setProjectDialog(null);
-      overviewState.reload();
+      reloadProjectsData();
     } catch (reason) {
       setMergeMessage("");
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -1840,7 +2119,7 @@ function Projects() {
         method: "PATCH",
         ...jsonBody({ name: name.trim(), description: description.trim() }),
       });
-      overviewState.reload();
+      reloadProjectsData();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -1854,20 +2133,20 @@ function Projects() {
         method: "PATCH",
         ...jsonBody({ archived }),
       });
-      overviewState.reload();
+      reloadProjectsData();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
   }
 
-  async function downloadProjectContext(project: UnknownRecord) {
+  async function downloadProjectContext(project: UnknownRecord, ai = true) {
     setError("");
-    try {
+    async function download(useAi: boolean) {
       const response = await fetch(`/api/v1/projects/${project.id}/context`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ai: true }),
+        body: JSON.stringify({ ai: useAi }),
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({})) as { error?: string };
@@ -1882,7 +2161,19 @@ function Projects() {
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(url);
+    }
+    try {
+      await download(ai);
     } catch (reason) {
+      if (ai && window.confirm("智能总结生成失败，是否改为生成不使用 AI 的基础版本？")) {
+        try {
+          await download(false);
+          return;
+        } catch (fallbackReason) {
+          setError(fallbackReason instanceof Error ? fallbackReason.message : String(fallbackReason));
+          return;
+        }
+      }
       setError(reason instanceof Error ? reason.message : String(reason));
     }
   }
@@ -1928,7 +2219,7 @@ function Projects() {
           </div>
         }
       />
-      <ErrorBanner message={error || overviewState.error} />
+      <ErrorBanner message={error || overviewState.error || projectState.error || unclassifiedState.error} />
       {mergeMessage && <div className="alert success">{mergeMessage}</div>}
       <section className={`panel project-status-panel${classificationTask ? " has-task" : ""}`}>
         <div className="project-status-summary">
@@ -2032,7 +2323,7 @@ function Projects() {
             >新建项目</button>
           </div>
         </div>
-        {overviewState.loading ? (
+        {projectState.loading ? (
           <Loading label="加载项目中…" />
         ) : activeProjectGroups.length ? (
           <div className="project-group-list">
@@ -2059,7 +2350,8 @@ function Projects() {
                   </summary>
                   <div className="project-group-actions">
                     <ExportLinks path={`/api/v1/projects/${project.id}/export`} />
-                    <button className="secondary small" onClick={() => void downloadProjectContext(project)}>生成项目上下文</button>
+                    <button className="secondary small" onClick={() => void downloadProjectContext(project, true)}>智能上下文（推荐）</button>
+                    <button className="ghost small" onClick={() => void downloadProjectContext(project, false)}>仅历史索引</button>
                     <button className="secondary small" onClick={() => void editProject(project)}>编辑</button>
                     <button className="danger small" onClick={() => void setProjectArchived(project, true)}>归档</button>
                   </div>
@@ -2097,7 +2389,7 @@ function Projects() {
                       ))}
                     </div>
                   ) : (
-                    <p className="project-empty">这个项目暂时还没有归入会话。</p>
+                    <p className="project-empty">{conversationCount > 0 ? "会话已改由下方时间线分页加载。" : "这个项目暂时还没有归入会话。"}</p>
                   )}
                   <ProjectTimeline projectId={String(project.id)} />
                 </details>
@@ -2162,7 +2454,8 @@ function Projects() {
                   </summary>
                   <div className="project-group-actions">
                     <ExportLinks path={`/api/v1/projects/${project.id}/export`} />
-                    <button className="secondary small" onClick={() => void downloadProjectContext(project)}>生成项目上下文</button>
+                    <button className="secondary small" onClick={() => void downloadProjectContext(project, true)}>智能上下文（推荐）</button>
+                    <button className="ghost small" onClick={() => void downloadProjectContext(project, false)}>仅历史索引</button>
                     <button className="secondary small" onClick={() => void editProject(project)}>编辑</button>
                     <button className="secondary small" onClick={() => void setProjectArchived(project, false)}>恢复项目</button>
                   </div>
@@ -2185,6 +2478,7 @@ function Projects() {
           </div>
         </section>
       )}
+      <Pagination loading={projectState.loading} pagination={projectState.data?.pagination} onOffsetChange={setProjectOffset} />
 
       <section className="project-board">
         <div className="section-title-row">
@@ -2194,7 +2488,7 @@ function Projects() {
           </div>
           <span className="pill partial">{unclassifiedConversationCount} 条</span>
         </div>
-        {overviewState.loading ? (
+        {unclassifiedState.loading ? (
           <Loading label="加载待归类会话中…" />
         ) : unclassified.length ? (
           <div className="project-conversation-list unclassified-list">
@@ -2220,6 +2514,7 @@ function Projects() {
         ) : (
           <Loading label="当前没有待归类会话。" />
         )}
+        <Pagination loading={unclassifiedState.loading} pagination={unclassifiedState.data?.pagination} onOffsetChange={setUnclassifiedOffset} />
       </section>
 
       {projectDialog === "create" && (
@@ -2251,7 +2546,7 @@ function Projects() {
             <label>A · 源项目
               <select value={mergeSourceId} onChange={(event) => setMergeSourceId(event.target.value)} required>
                 <option value="">请选择要删除的源项目</option>
-                {activeProjectGroups.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+                {projectOptions.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select>
             </label>
             <div className="modal-merge-arrow">↓ 会话和报告迁移至</div>
@@ -2261,13 +2556,13 @@ function Projects() {
                 onChange={(event) => {
                   const targetId = event.target.value;
                   setMergeTargetId(targetId);
-                  const selectedProject = activeProjectGroups.find((project) => project.id === targetId);
+                  const selectedProject = projectOptions.find((project) => project.id === targetId);
                   setMergeTargetName(String(selectedProject?.name ?? ""));
                 }}
                 required
               >
                 <option value="">请选择保留的目标项目</option>
-                {activeProjectGroups.filter((project) => project.id !== mergeSourceId).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+                {projectOptions.filter((project) => !project.archived && project.id !== mergeSourceId).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select>
             </label>
             <label>合并后项目名称
@@ -2299,17 +2594,26 @@ function tagCloudWeight(count: unknown, maximum: number): number {
   return Math.sqrt(value) / Math.sqrt(maximum);
 }
 
+function normalizedTagLabel(value: unknown): string {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLocaleLowerCase("en-US");
+}
+
 function Tags() {
   const state = useLoad(() => api<UnknownRecord[]>("/api/v1/tags"), []);
   const [query, setQuery] = useState("");
   const [message, setMessage] = useState("");
   const [messageTone, setMessageTone] = useState<"success" | "error">("success");
   const [selectedTagId, setSelectedTagId] = useState("");
+  const [mergeTargetTagId, setMergeTargetTagId] = useState("");
   const allTags = state.data ?? [];
-  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const normalizedQuery = normalizedTagLabel(query);
   const tags = allTags
     .filter((tag) =>
-      String(tag.name ?? "").toLocaleLowerCase().includes(normalizedQuery),
+      normalizedTagLabel(tag.name).includes(normalizedQuery),
     )
     .sort(
       (left, right) =>
@@ -2317,6 +2621,7 @@ function Tags() {
         String(left.name ?? "").localeCompare(String(right.name ?? ""), "zh-CN"),
     );
   const selectedTag = tags.find((tag) => String(tag.id) === selectedTagId) ?? null;
+  const mergeTargets = allTags.filter((tag) => String(tag.id) !== selectedTagId);
   const maximumConversationCount = Math.max(
     0,
     ...tags.map((tag) => Number(tag.conversationCount ?? 0)),
@@ -2336,6 +2641,12 @@ function Tags() {
       setSelectedTagId(String(tags[0]?.id ?? ""));
     }
   }, [query, state.data, selectedTagId]);
+
+  useEffect(() => {
+    if (!mergeTargets.some((tag) => String(tag.id) === mergeTargetTagId)) {
+      setMergeTargetTagId(String(mergeTargets[0]?.id ?? ""));
+    }
+  }, [mergeTargetTagId, selectedTagId, state.data]);
 
   async function createTag(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2375,10 +2686,8 @@ function Tags() {
   }
 
   async function mergeTag(tag: UnknownRecord) {
-    const targetName = window.prompt("合并到哪个标签？请输入目标标签的完整名称");
-    if (!targetName) return;
     const target = allTags.find(
-      (item) => String(item.name).toLocaleLowerCase() === targetName.trim().toLocaleLowerCase(),
+      (item) => String(item.id) === mergeTargetTagId,
     );
     if (!target || target.id === tag.id) {
       setMessage("没有找到可用的目标标签");
@@ -2496,7 +2805,16 @@ function Tags() {
           <div className="button-group">
             <Link className="button-link" to={`/conversations?tagIds=${selectedTag.id}`}>查看相关会话</Link>
             <button className="secondary" onClick={() => void renameTag(selectedTag)}>重命名</button>
-            <button className="secondary" onClick={() => void mergeTag(selectedTag)}>合并</button>
+            <select
+              aria-label="标签合并目标"
+              value={mergeTargetTagId}
+              onChange={(event) => setMergeTargetTagId(event.target.value)}
+            >
+              {mergeTargets.map((tag) => (
+                <option key={tag.id} value={String(tag.id)}>{String(tag.name)}</option>
+              ))}
+            </select>
+            <button className="secondary" disabled={!mergeTargetTagId} onClick={() => void mergeTag(selectedTag)}>合并到所选标签</button>
             <button className="danger" onClick={() => void deleteTag(selectedTag)}>删除</button>
           </div>
         </section>
@@ -2507,14 +2825,18 @@ function Tags() {
 }
 
 function Reports() {
-  const state = useLoad(() => api<UnknownRecord[]>("/api/v1/reports"), []);
+  const [offset, setOffset] = useState(0);
+  const state = useLoad(
+    () => api<PageEnvelope>(`/api/v1/reports?limit=50&offset=${offset}`),
+    [offset],
+  );
   const runsState = useLoad(
     () =>
       Promise.all([
-        api<UnknownRecord[]>("/api/v1/analysis/runs?kind=weekly&limit=1"),
-        api<UnknownRecord[]>("/api/v1/analysis/runs?kind=monthly&limit=1"),
+        api<PageEnvelope>("/api/v1/analysis/runs?kind=weekly&limit=1"),
+        api<PageEnvelope>("/api/v1/analysis/runs?kind=monthly&limit=1"),
       ]).then(([weekly, monthly]) =>
-        [...weekly, ...monthly].sort(
+        [...weekly.items, ...monthly.items].sort(
           (left, right) =>
             new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime(),
         ),
@@ -2541,6 +2863,17 @@ function Reports() {
       const payload = await api<{ jobId: string | null; run: UnknownRecord }>("/api/v1/analysis/run", {method:"POST",...jsonBody({kind})});
       setReportMessage(`${kind === "weekly" ? "周报" : "月报"}${statusLabel(payload.run.status)}，下方会持续刷新运行状态`);
       runsState.reload();
+    } catch (reason) {
+      setReportMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function retryReportEmail(report: UnknownRecord) {
+    setReportMessage(`正在重新发送“${report.title}”…`);
+    try {
+      await api(`/api/v1/reports/${report.id}/email/retry`, { method: "POST" });
+      setReportMessage("邮件任务已进入队列，下方状态将随刷新更新。");
+      state.reload();
     } catch (reason) {
       setReportMessage(reason instanceof Error ? reason.message : String(reason));
     }
@@ -2640,26 +2973,38 @@ function Reports() {
         <ErrorBanner message={state.error} />
       ) : (
         <div className="card-list">
-          {state.data!.map((report) => (
-            <Link className="report-card" to={`/reports/${report.id}`} key={report.id}>
+          {state.data!.items.map((report) => (
+            <article className="report-card" key={report.id}>
               <span className="pill">{report.kind}</span>
-              <h3>{report.title}</h3>
+              <h3><Link to={`/reports/${report.id}`}>{report.title}</Link></h3>
               <p>{report.summary}</p>
-              <time>{new Date(report.createdAt).toLocaleString()}</time>
-            </Link>
+              <time>{formatTaskTime(report.createdAt)}</time>
+              <div className="button-group">
+                <Link className="button-link secondary small" to={`/reports/${report.id}`}>查看</Link>
+                <a className="button-link secondary small" href={`/api/v1/reports/${report.id}/download`}>下载 Markdown</a>
+                <span className={`pill ${report.emailStatus === "sent" ? "complete" : report.emailStatus === "failed" ? "failed" : "partial"}`}>邮件：{({sent:"已发送",queued:"等待发送",sending:"发送中",failed:"失败",not_configured:"未配置"} as UnknownRecord)[report.emailStatus] ?? report.emailStatus}</span>
+                {report.emailStatus === "failed" && <button className="secondary small" onClick={() => void retryReportEmail(report)}>重试邮件</button>}
+              </div>
+              {report.emailError && <small className="failed-text">{report.emailError}</small>}
+            </article>
           ))}
         </div>
       )}
+      <Pagination
+        loading={state.loading}
+        pagination={state.data?.pagination}
+        onOffsetChange={setOffset}
+      />
     </>
   );
 }
 
 function ReportDetail() {
-  const { id } = useParams(); const state = useLoad(() => api<UnknownRecord>(`/api/v1/reports/${id}`), [id]); if (state.loading) return <Loading />; if (state.error) return <ErrorBanner message={state.error} />; const report=state.data!; return <><PageHeader title={report.title} subtitle={`${report.kind} · ${reportPeriodLabel(report.periodStart, report.periodEnd)}`} /><article className="report-body"><p className="report-summary">{report.summary}</p><ReactMarkdown skipHtml components={{ a: ({ href, children }) => { const safeHref = safeExternalHref(href); return safeHref ? <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>; }, img: ({ alt }) => <span>{alt ?? "[图片已隐藏]"}</span> }}>{String(report.bodyMarkdown ?? "")}</ReactMarkdown></article></>;
+  const { id } = useParams(); const state = useLoad(() => api<UnknownRecord>(`/api/v1/reports/${id}`), [id]); if (state.loading) return <Loading />; if (state.error) return <ErrorBanner message={state.error} />; const report=state.data!; return <><PageHeader title={report.title} subtitle={`${report.kind} · ${reportPeriodLabel(report.periodStart, report.periodEnd)}`} actions={<a className="button-link secondary" href={`/api/v1/reports/${id}/download`}>下载 Markdown</a>} /><article className="report-body"><p className="report-summary">{report.summary}</p><ReactMarkdown skipHtml components={{ a: ({ href, children }) => { const safeHref = safeExternalHref(href); return safeHref ? <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>; }, img: ({ alt }) => <span>{alt ?? "[图片已隐藏]"}</span> }}>{String(report.bodyMarkdown ?? "")}</ReactMarkdown></article></>;
 }
 
 function importJobPercent(job: UnknownRecord): number {
-  if (job.status === "completed" || job.status === "failed") return 100;
+  if (["completed", "partial", "failed"].includes(String(job.status))) return 100;
   const stats = job.stats ?? {};
   const total = Number(stats.snapshots ?? 0);
   const processed = Number(stats.imported ?? 0) + Number(stats.unchanged ?? 0);
@@ -2676,20 +3021,25 @@ function importJobStats(job: UnknownRecord) {
   const unchanged = Number(stats.unchanged ?? 0);
   const total = Number(stats.snapshots ?? 0);
   const processed = imported + unchanged;
+  const failed = Number(stats.failed ?? 0);
   return {
     stats,
     imported: Number.isFinite(imported) ? imported : 0,
     unchanged: Number.isFinite(unchanged) ? unchanged : 0,
     total: Number.isFinite(total) ? total : 0,
     processed: Number.isFinite(processed) ? processed : 0,
+    failed: Number.isFinite(failed) ? failed : 0,
   };
 }
 
 function importJobText(job: UnknownRecord): string {
-  const { stats, imported, unchanged, total, processed } = importJobStats(job);
+  const { stats, imported, unchanged, failed, total, processed } = importJobStats(job);
   if (job.status === "queued") return "等待 Worker 接手";
   if (job.status === "failed") {
     return `导入失败${job.error ? `：${compactErrorMessage(job.error)}` : ""}`;
+  }
+  if (job.status === "partial") {
+    return `部分完成：成功 ${imported}，未变化 ${unchanged}，失败 ${failed}，总数 ${total || processed + failed}`;
   }
   if (job.status === "completed") {
     return `已完成 ${processed}/${total || processed}，新增 ${imported}，未变 ${unchanged}`;
@@ -2717,10 +3067,15 @@ function importJobMetaText(job: UnknownRecord): string {
 }
 
 function Imports() {
-  const state = useLoad(() => api<UnknownRecord[]>("/api/v1/imports"), []);
+  const [offset, setOffset] = useState(0);
+  const state = useLoad(
+    () => api<PageEnvelope>(`/api/v1/imports?limit=50&offset=${offset}`),
+    [offset],
+  );
   const [message, setMessage] = useState("");
-  const activeJobs = (state.data ?? []).filter((job) => isActiveStatus(job.status));
-  const activeKey = (state.data ?? [])
+  const jobs = state.data?.items ?? [];
+  const activeJobs = jobs.filter((job) => isActiveStatus(job.status));
+  const activeKey = jobs
     .filter((job) => isActiveStatus(job.status))
     .map((job) => `${job.id}:${job.status}:${JSON.stringify(job.stats ?? {})}`)
     .join(",");
@@ -2739,6 +3094,31 @@ function Imports() {
       await api("/api/v1/imports", { method: "POST", body: form });
       setMessage("已进入导入队列");
       state.reload();
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function retryImport(job: UnknownRecord) {
+    setMessage("正在重新入队…");
+    try {
+      await api(`/api/v1/imports/${job.id}/retry`, { method: "POST" });
+      setMessage("失败任务已重新入队");
+      state.reload();
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function cleanupImports(includeUnexpired = false) {
+    if (includeUnexpired && !window.confirm("确认立即删除 Processed 和 Failed 中的全部 ZIP？导入的数据不会删除。")) return;
+    setMessage("正在清理导入文件…");
+    try {
+      const result = await api<UnknownRecord>("/api/v1/imports/cleanup", {
+        method: "POST",
+        ...jsonBody({ scope: "all", includeUnexpired }),
+      });
+      setMessage(`已清理 ${Number(result.processed?.files ?? 0) + Number(result.failed?.files ?? 0)} 个 ZIP`);
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : String(reason));
     }
@@ -2766,13 +3146,15 @@ function Imports() {
               </span>
             )}
             <button className="secondary small" onClick={() => state.reload()}>刷新</button>
+            <button className="ghost small" onClick={() => void cleanupImports(false)}>清理过期文件</button>
+            <button className="danger small" onClick={() => void cleanupImports(true)}>立即清理全部 ZIP</button>
           </div>
         </div>
         {state.loading ? (
           <Loading />
-        ) : state.data?.length ? (
+        ) : jobs.length ? (
           <div className="run-list">
-            {state.data.map((job) => {
+            {jobs.map((job) => {
               const percent = importJobPercent(job);
               const stats = job.stats ?? {};
               const active = isActiveStatus(job.status);
@@ -2794,10 +3176,15 @@ function Imports() {
                     <div className="progress-bar"><span style={{ width: `${percent}%` }} /></div>
                     <small>{importJobMetaText(job)}</small>
                   </div>
-                  <span className={`pill ${statusClass(job.status)}`}>
-                    {active && <span className="live-dot inline" />}
-                    {statusLabel(job.status)}
-                  </span>
+                  <div className="button-group">
+                    <span className={`pill ${statusClass(job.status)}`}>
+                      {active && <span className="live-dot inline" />}
+                      {statusLabel(job.status)}
+                    </span>
+                    {(job.status === "failed" || job.status === "partial") && (
+                      <button className="secondary small" onClick={() => void retryImport(job)}>重试</button>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -2805,14 +3192,79 @@ function Imports() {
         ) : (
           <p className="muted">还没有导入记录</p>
         )}
+        <Pagination
+          loading={state.loading}
+          pagination={state.data?.pagination}
+          onOffsetChange={setOffset}
+        />
       </section>
     </>
   );
 }
 
+function ActivityPage() {
+  const [offset, setOffset] = useState(0);
+  const state = useLoad(
+    () => api<UnknownRecord>(`/api/v1/activity?limit=30&offset=${offset}`),
+    [offset],
+  );
+  return <>
+    <PageHeader title="活动" subtitle="后台任务、报告、导入和采集异常的统一时间线" actions={<button className="secondary small" onClick={() => state.reload()}>刷新</button>} />
+    {state.loading ? <Loading /> : state.error ? <ErrorBanner message={state.error} /> : <section className="panel">
+      <div className="metric-grid">
+        <article className="metric"><span>运行中</span><strong>{state.data?.summary?.active ?? 0}</strong></article>
+        <article className="metric"><span>失败</span><strong>{state.data?.summary?.failed ?? 0}</strong></article>
+        <article className="metric"><span>警告</span><strong>{state.data?.summary?.warnings ?? 0}</strong></article>
+      </div>
+      <div className="run-list">
+        {(state.data?.items ?? []).map((item: UnknownRecord) => <Link className="run-row" key={`${item.type}-${item.id}`} to={item.href || "/logs"}>
+          <div><strong>{item.title}</strong><span>{item.message || formatTaskTime(item.updatedAt)}</span></div>
+          <div className="run-progress"><div className="progress-bar"><span style={{width:`${Number(item.progress ?? 0)}%`}} /></div><small>{item.error || formatTaskTime(item.updatedAt)}</small></div>
+          <span className={`pill ${statusClass(item.status)}`}>{statusLabel(item.status)}</span>
+        </Link>)}
+      </div>
+      <Pagination loading={state.loading} pagination={state.data?.pagination} onOffsetChange={setOffset} />
+    </section>}
+  </>;
+}
+
+function Trash() {
+  const [offset, setOffset] = useState(0);
+  const [message, setMessage] = useState("");
+  const state = useLoad(
+    () => api<UnknownRecord>(`/api/v1/conversations/trash?limit=50&offset=${offset}`),
+    [offset],
+  );
+  async function restore(id: string) {
+    await api(`/api/v1/conversations/${id}/restore`, { method: "POST" });
+    setMessage("会话已恢复");
+    state.reload();
+  }
+  async function remove(id: string) {
+    const confirmation = window.prompt("永久删除不可恢复。请输入 DELETE 继续：");
+    if (confirmation !== "DELETE") return;
+    await api(`/api/v1/conversations/${id}/permanent`, { method: "DELETE", ...jsonBody({ confirmation }) });
+    setMessage("会话已永久删除");
+    state.reload();
+  }
+  return <>
+    <PageHeader title="会话回收站" subtitle="删除后保留 30 天，可恢复；到期由 Worker 自动永久清理" />
+    {message && <div className="alert success">{message}</div>}
+    {state.loading ? <Loading /> : state.error ? <ErrorBanner message={state.error} /> : <section className="panel">
+      <div className="run-list">{(state.data?.items ?? []).map((item: UnknownRecord) => <div className="run-row" key={item.id}>
+        <div><strong>{item.title || item.externalSessionId}</strong><span>{providerLabels[item.provider as Provider] ?? item.provider} · 删除于 {new Date(item.deletedAt).toLocaleString()}</span></div>
+        <div className="button-group"><button className="secondary small" onClick={() => void restore(item.id).catch((reason) => setMessage(String(reason)))}>恢复</button><button className="danger small" onClick={() => void remove(item.id).catch((reason) => setMessage(String(reason)))}>永久删除</button></div>
+      </div>)}</div>
+      {!state.data?.items?.length && <p className="muted">回收站为空</p>}
+      <Pagination loading={state.loading} pagination={state.data?.pagination} onOffsetChange={setOffset} />
+    </section>}
+  </>;
+}
+
 function Devices() {
   const state = useLoad(() => api<UnknownRecord[]>("/api/v1/devices"), []);
   const componentsState = useLoad(() => api<UnknownRecord[]>("/api/v1/device-components"), []);
+  const adaptersState = useLoad(() => api<UnknownRecord[]>("/api/v1/reliability/adapters"), []);
   const [code, setCode] = useState<UnknownRecord | null>(null);
   const [error, setError] = useState("");
   const [editingId, setEditingId] = useState("");
@@ -2886,12 +3338,17 @@ function Devices() {
     </section>
     <section className="two-column">
       <article className="panel"><h2>生成配对码</h2><form className="stack compact" onSubmit={createCode}><label>设备名称<input name="name" required placeholder="公司 Chrome"/></label><label>类型<select name="kind"><option value="chrome_extension">Chrome 扩展</option><option value="openclaw_sync">OpenClaw/Codex 同步代理</option></select></label><button>生成</button></form>{code&&<div className="pair-code"><strong>{code.code}</strong><span>有效至 {new Date(code.expiresAt).toLocaleTimeString()}</span></div>}</article>
-      <article className="panel"><h2>已配对设备</h2>{state.loading?<Loading/>:state.data?.map((device)=><div className="device-row" key={device.id}><div>{editingId===device.id?<div className="device-name-edit"><input value={editingName} onChange={(event)=>setEditingName(event.target.value)} onKeyDown={(event)=>{if(event.key==="Enter")void saveDeviceName(device.id); if(event.key==="Escape")setEditingId("");}} autoFocus/><button className="small" onClick={()=>void saveDeviceName(device.id)}>保存</button><button className="secondary small" onClick={()=>setEditingId("")}>取消</button></div>:<strong>{device.name}</strong>}<span>{device.kind}</span></div><div><span>{device.lastSeenAt?`最后在线 ${new Date(device.lastSeenAt).toLocaleString()}`:"尚未上传"}</span>{device.revokedAt?<span className="pill failed">已撤销</span>:null}<div className="button-group"><button className="secondary small" onClick={()=>{setEditingId(device.id);setEditingName(String(device.name??""));}}>重命名</button><button className="danger small" onClick={()=>void removeDevice(device)}>{device.revokedAt?"删除":"撤销"}</button></div></div></div>)}</article>
+      <article className="panel"><h2>已配对设备</h2>{state.loading?<Loading/>:state.data?.map((device)=><div className="device-row" key={device.id}><div>{editingId===device.id?<div className="device-name-edit"><input value={editingName} onChange={(event)=>setEditingName(event.target.value)} onKeyDown={(event)=>{if(event.key==="Enter")void saveDeviceName(device.id); if(event.key==="Escape")setEditingId("");}} autoFocus/><button className="small" onClick={()=>void saveDeviceName(device.id)}>保存</button><button className="secondary small" onClick={()=>setEditingId("")}>取消</button></div>:<strong>{device.name}</strong>}<span>{device.kind} · {device.os || "系统未知"} · {device.clientVersion || "版本未知"}</span><small>跟踪 {device.trackedFiles ?? 0} · 跳过 {device.skippedFiles ?? 0}</small></div><div><span>{device.lastSeenAt?`心跳 ${formatTaskTime(device.lastSeenAt)}`:"尚未上线"}</span>{device.lastSuccessfulSyncAt&&<span>最近同步 {formatTaskTime(device.lastSuccessfulSyncAt)}</span>}{device.lastErrorCode&&<span className="pill failed">{device.lastErrorCode}</span>}{device.revokedAt?<span className="pill failed">已撤销</span>:null}<div className="button-group"><button className="secondary small" onClick={()=>{setEditingId(device.id);setEditingName(String(device.name??""));}}>重命名</button><button className="danger small" onClick={()=>void removeDevice(device)}>{device.revokedAt?"删除":"撤销"}</button></div></div></div>)}</article>
+    </section>
+    <section className="panel">
+      <div className="section-title-row"><div><h2>采集适配器健康度</h2><p className="panel-subtitle">按平台和适配器版本观察最近 24 小时成功、部分和失败比例；连续失败或部分率过高会标记为退化。</p></div><button className="secondary small" onClick={() => adaptersState.reload()}>刷新</button></div>
+      {adaptersState.loading ? <Loading label="正在汇总采集健康度…" /> : adaptersState.error ? <ErrorBanner message={adaptersState.error} /> : adaptersState.data?.length ? <div className="run-list">{adaptersState.data.map((adapter) => <div className="run-row" key={`${adapter.provider}-${adapter.adapterVersion}`}><div><strong>{providerLabels[adapter.provider as Provider] ?? adapter.provider} · {adapter.adapterVersion}</strong><span>最后采集 {formatTaskTime(adapter.lastCaptureAt)} · 平均 {Number(adapter.averageMessageCount24h ?? 0).toFixed(1)} 条消息</span></div><div className="run-progress"><div className="progress-bar"><span style={{width:`${Math.round(Number(adapter.rates24h?.success ?? 0)*100)}%`}} /></div><small>24h：成功 {Math.round(Number(adapter.rates24h?.success ?? 0)*100)}% · 部分 {Math.round(Number(adapter.rates24h?.partial ?? 0)*100)}% · 失败 {Math.round(Number(adapter.rates24h?.failed ?? 0)*100)}% · 连续失败 {adapter.consecutiveFailures ?? 0}</small></div><span className={`pill ${adapter.status === "healthy" ? "complete" : adapter.status === "degraded" ? "failed" : "partial"}`}>{adapter.status === "healthy" ? "健康" : adapter.status === "degraded" ? "退化" : "长时间无采集"}</span></div>)}</div> : <p className="muted">最近 30 天还没有采集运行记录。</p>}
     </section>
   </>;
 }
 
 const settingsSections = [
+  { id: "account", label: "账号与安全", hint: "密码、TOTP 与登录会话", icon: "◎" },
   { id: "ai", label: "模型与额度", hint: "MiniMax、模型连接与 Token Plan", icon: "✦" },
   { id: "classification", label: "项目与标签", hint: "自动整理与稳定结果复用", icon: "◇" },
   { id: "email", label: "邮件与报告", hint: "SMTP、周报与月报", icon: "✉" },
@@ -2901,6 +3358,92 @@ const settingsSections = [
 ] as const;
 
 type SettingsSection = (typeof settingsSections)[number]["id"];
+
+function AccountSecurity() {
+  const sessionsState = useLoad(
+    () => api<{items: UnknownRecord[]}>("/api/v1/auth/sessions"),
+    [],
+  );
+  const [message, setMessage] = useState("");
+  const [totpResult, setTotpResult] = useState<UnknownRecord | null>(null);
+
+  async function changePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    if (form.get("newPassword") !== form.get("confirmPassword")) {
+      setMessage("两次输入的新密码不一致");
+      return;
+    }
+    try {
+      await api("/api/v1/auth/password", {
+        method: "POST",
+        ...jsonBody({
+          currentPassword: form.get("currentPassword"),
+          totpCode: form.get("totpCode"),
+          newPassword: form.get("newPassword"),
+        }),
+      });
+      formElement.reset();
+      setMessage("密码已修改");
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function resetTotp(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!window.confirm("将生成一份待确认的新密钥；确认新验证码前，旧验证器仍然有效。继续？")) return;
+    const form = new FormData(event.currentTarget);
+    try {
+      const result = await api<UnknownRecord>("/api/v1/auth/totp/reset", {
+        method: "POST",
+        ...jsonBody({ currentPassword: form.get("currentPassword"), totpCode: form.get("totpCode") }),
+      });
+      setTotpResult(result);
+      setMessage("新密钥已生成。请先加入验证器，再输入新验证码完成切换；在此之前旧验证器继续有效。");
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function confirmTotp(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    try {
+      await api("/api/v1/auth/totp/confirm", {
+        method: "POST",
+        ...jsonBody({ totpCode: form.get("totpCode") }),
+      });
+      setTotpResult(null);
+      setMessage("新 TOTP 已确认并启用，旧验证器代码现已失效。");
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function cancelTotp() {
+    try {
+      await api("/api/v1/auth/totp/pending", { method: "DELETE" });
+      setTotpResult(null);
+      setMessage("待确认的新 TOTP 已取消，旧验证器保持有效。");
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function revokeSession(id: string) {
+    await api(`/api/v1/auth/sessions/${id}`, { method: "DELETE" });
+    sessionsState.reload();
+  }
+
+  return <div className="stack">
+    {message && <div className="alert success">{message}</div>}
+    <section className="panel"><h2>修改密码</h2><form className="form-grid" onSubmit={changePassword}><label>当前密码<input name="currentPassword" type="password" required /></label><label>当前六位验证码<input name="totpCode" inputMode="numeric" pattern="[0-9]{6}" required /></label><label>新密码<input name="newPassword" type="password" minLength={12} required /></label><label>确认新密码<input name="confirmPassword" type="password" minLength={12} required /></label><button>修改密码</button></form></section>
+    <section className="panel"><h2>重新绑定 TOTP</h2><p className="panel-subtitle">采用二阶段切换：只有新验证器验证码确认成功后，旧密钥才会失效。</p><form className="form-grid" onSubmit={resetTotp}><label>当前密码<input name="currentPassword" type="password" required /></label><label>当前六位验证码<input name="totpCode" inputMode="numeric" pattern="[0-9]{6}" required /></label><button className="secondary">生成待确认密钥</button></form>{totpResult && <div className="stack"><div className="pair-code"><strong>{totpResult.secret}</strong><span>有效至 {formatTaskTime(totpResult.expiresAt)}</span><details><summary>OTP URI</summary><code className="breakable">{totpResult.otpauthUrl}</code></details></div><form className="inline-form" onSubmit={confirmTotp}><input name="totpCode" inputMode="numeric" pattern="[0-9]{6}" minLength={6} maxLength={6} placeholder="输入新验证器验证码" required /><button>确认并切换</button><button type="button" className="secondary" onClick={() => void cancelTotp()}>取消切换</button></form></div>}</section>
+    <section className="panel"><div className="section-title-row"><div><h2>登录会话</h2><p className="panel-subtitle">可远程注销其他浏览器。</p></div><button className="danger small" onClick={() => void api<UnknownRecord>("/api/v1/auth/sessions/revoke-others", {method:"POST"}).then(() => sessionsState.reload())}>注销其他会话</button></div>{sessionsState.loading ? <Loading /> : (sessionsState.data?.items ?? []).map((session) => <div className="device-row" key={session.id}><div><strong>{session.current ? "当前会话" : "其他浏览器会话"}</strong><span>登录于 {new Date(session.createdAt).toLocaleString()} · 到期 {new Date(session.expiresAt).toLocaleString()}</span></div>{!session.current && <button className="danger small" onClick={() => void revokeSession(session.id)}>注销</button>}</div>)}</section>
+  </div>;
+}
 
 function formatBytes(value: unknown): string {
   const bytes = Math.max(0, Number(value ?? 0));
@@ -2949,10 +3492,47 @@ function ResourceGauge({
 
 function SystemStatus() {
   const state = useLoad(() => api<UnknownRecord>("/api/v1/system/status"), []);
+  const integrityState = useLoad(() => api<UnknownRecord>("/api/v1/reliability/integrity"), []);
+  const [maintenanceMessage, setMaintenanceMessage] = useState("");
+  const [maintenanceBusy, setMaintenanceBusy] = useState(false);
+  const integrityActive = isActiveStatus(integrityState.data?.task?.status);
   useEffect(() => {
     const timer = window.setInterval(() => state.reload(), 10_000);
     return () => window.clearInterval(timer);
   }, [state.reload]);
+  useEffect(() => {
+    if (!integrityActive) return;
+    const timer = window.setInterval(() => integrityState.reload(), 2500);
+    return () => window.clearInterval(timer);
+  }, [integrityActive, integrityState.reload]);
+
+  async function runIntegrity() {
+    setMaintenanceBusy(true);
+    setMaintenanceMessage("归档完整性检查正在加入队列…");
+    try {
+      await api("/api/v1/reliability/integrity/run", { method: "POST" });
+      integrityState.reload();
+      setMaintenanceMessage("已开始检查 Revision 链、哈希、消息与检索分块。");
+    } catch (reason) {
+      setMaintenanceMessage(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setMaintenanceBusy(false);
+    }
+  }
+
+  async function rebuildSearch() {
+    if (!window.confirm("将根据当前归档重新生成全文检索分块。归档事实数据不会改变，确认继续？")) return;
+    setMaintenanceBusy(true);
+    setMaintenanceMessage("正在重建全文检索分块…");
+    try {
+      const result = await api<UnknownRecord>("/api/v1/search/rebuild", { method: "POST" });
+      setMaintenanceMessage(`全文检索重建完成，共生成 ${result.chunkCount ?? 0} 个分块。`);
+    } catch (reason) {
+      setMaintenanceMessage(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setMaintenanceBusy(false);
+    }
+  }
 
   if (state.loading && !state.data) return <Loading label="正在读取主机运行状态…" />;
   const data = state.data;
@@ -2969,6 +3549,12 @@ function SystemStatus() {
   return (
     <>
       <ErrorBanner message={state.error} />
+      <section className="panel">
+        <div className="section-title-row"><div><h2>归档维护</h2><p className="panel-subtitle">完整性检查验证 Revision 链、快照哈希、消息/分段引用与搜索分块；搜索索引可从事实归档随时重建。</p></div><div className="button-group"><button disabled={maintenanceBusy || integrityActive} onClick={() => void runIntegrity()}>{integrityActive ? "检查中" : "运行完整性检查"}</button><button className="secondary" disabled={maintenanceBusy || integrityActive} onClick={() => void rebuildSearch()}>重建全文检索</button></div></div>
+        {maintenanceMessage && <div className="alert warning">{maintenanceMessage}</div>}
+        {integrityState.error && <ErrorBanner message={integrityState.error} />}
+        {integrityState.data?.task && <div className="run-row"><div><strong>最近完整性检查 · {statusLabel(integrityState.data.task.status)}</strong><span>{integrityState.data.task.message} · {formatTaskTime(integrityState.data.task.updatedAt)}</span></div><div className="run-progress"><div className="progress-bar"><span style={{width:`${taskPercent(integrityState.data.task)}%`}} /></div><small>{integrityState.data.task.error || `${integrityState.data.task.processedCount ?? 0} / ${integrityState.data.task.totalCount ?? 0}`}</small></div><span className={`pill ${statusClass(integrityState.data.task.status)}`}>{statusLabel(integrityState.data.task.status)}</span></div>}
+      </section>
       <section className="panel system-service-panel">
         <div className="section-title-row">
           <div>
@@ -3046,7 +3632,7 @@ function SystemStatus() {
           <div className="section-title-row">
             <div>
               <h2>项目存储</h2>
-              <p className="panel-subtitle">只统计归档数据库和导入文件的实际占用，不使用 NAS 整盘容量。</p>
+              <p className="panel-subtitle">统计归档数据库、导入文件和 Restore 暂存文件的实际占用，不使用 NAS 整盘容量。</p>
             </div>
             <span className="pill complete">实际项目数据</span>
           </div>
@@ -3069,6 +3655,10 @@ function SystemStatus() {
             <div><span>PostgreSQL 数据库</span><strong>{formatBytes(projectStorage.databaseBytes)}</strong></div>
             <div><span>待处理与留存导入文件</span><strong>{formatBytes(projectStorage.importBytes)}</strong></div>
             <div><span>导入文件数</span><strong>{Number(projectStorage.importFiles).toLocaleString()}</strong></div>
+            <div><span>Restore Staging</span><strong>{formatBytes(projectStorage.restoreBytes)}</strong><small>{projectStorage.restoreFiles ?? 0} 个文件 · 提交前失败保留 {projectStorage.restoreFailedRetentionDays ?? 30} 天</small></div>
+            <div><span>Inbox</span><strong>{formatBytes(projectStorage.importBreakdown?.inbox?.bytes)}</strong><small>{projectStorage.importBreakdown?.inbox?.files ?? 0} 个文件</small></div>
+            <div><span>Processed</span><strong>{formatBytes(projectStorage.importBreakdown?.processed?.bytes)}</strong><small>保留 {projectStorage.importRetentionDays?.processed ?? 30} 天</small></div>
+            <div><span>Failed</span><strong>{formatBytes(projectStorage.importBreakdown?.failed?.bytes)}</strong><small>保留 {projectStorage.importRetentionDays?.failed ?? 30} 天</small></div>
           </div>
           {projectStorage.incomplete && <div className="alert warning">部分导入目录暂时无法读取，本次项目存储统计可能偏小。</div>}
         </section>
@@ -3098,10 +3688,14 @@ function Settings() {
   const requestedSection = searchParams.get("section") as SettingsSection | null;
   const activeSection: SettingsSection = settingsSections.some((item) => item.id === requestedSection)
     ? requestedSection!
-    : "ai";
+    : "account";
   const state = useLoad(() => api<UnknownRecord>("/api/v1/settings"), []);
   const cleanupState = useLoad(
     () => api<UnknownRecord>("/api/v1/redaction/storage-cleanup"),
+    [],
+  );
+  const restoresState = useLoad(
+    () => api<{ items: UnknownRecord[]; failedRetentionDays?: number }>("/api/v1/backups/restores"),
     [],
   );
   const formRef = useRef<HTMLFormElement>(null);
@@ -3112,18 +3706,26 @@ function Settings() {
   const [testingEmail, setTestingEmail] = useState(false);
   const [backupMessage, setBackupMessage] = useState("");
   const [backupBusy, setBackupBusy] = useState(false);
+  const [backupVerification, setBackupVerification] = useState<UnknownRecord | null>(null);
   const [redactionMessage, setRedactionMessage] = useState("");
   const [redactionBusy, setRedactionBusy] = useState(false);
   const [redactionPreview, setRedactionPreview] = useState<UnknownRecord | null>(null);
   const cleanupTask = cleanupState.data?.task;
   const cleanupActive = cleanupTask && isActiveStatus(cleanupTask.status);
   const securityPackEnabled = state.data?.securityPack?.fullyEnabled === true;
+  const activeRestores = (restoresState.data?.items ?? []).filter((job) => ["queued", "validating", "validated", "restoring", "rebuilding_search", "verifying", "recovery_required"].includes(String(job.status)));
 
   useEffect(() => {
     if (!cleanupActive) return;
     const timer = window.setInterval(() => cleanupState.reload(), 2500);
     return () => window.clearInterval(timer);
   }, [cleanupActive, cleanupState.reload]);
+
+  useEffect(() => {
+    if (!activeRestores.length) return;
+    const timer = window.setInterval(() => restoresState.reload(), 2500);
+    return () => window.clearInterval(timer);
+  }, [activeRestores.map((job) => `${job.id}:${job.status}:${job.progress}`).join("|"), restoresState.reload]);
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -3300,29 +3902,16 @@ function Settings() {
     window.setTimeout(() => setBackupBusy(false), 1500);
   }
 
-  async function importBackup(event: FormEvent<HTMLFormElement>) {
+  async function verifyBackup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!window.confirm("导入系统备份会替换当前会话、项目、标签、报告、设备、设置和日志等业务数据；当前管理员账号会保留。确认继续？")) return;
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
+    const form = new FormData(event.currentTarget);
     setBackupBusy(true);
-    setBackupMessage("正在导入备份文件...");
+    setBackupVerification(null);
+    setBackupMessage("正在校验备份格式、表清单与引用关系…");
     try {
-      const result = await api<UnknownRecord>("/api/v1/backups/import", {
-        method: "POST",
-        body: form,
-      });
-      const counts = result.counts && typeof result.counts === "object" ? result.counts : {};
-      const total = Object.values(counts).reduce<number>(
-        (sum, value) => sum + Number(value ?? 0),
-        0,
-      );
-      const warnings = Array.isArray(result.warnings) && result.warnings.length
-        ? `；${result.warnings.join("；")}`
-        : "";
-      setBackupMessage(`导入完成，共恢复 ${total} 条记录${warnings}`);
-      formElement.reset();
-      state.reload();
+      const result = await api<UnknownRecord>("/api/v1/backups/verify", { method: "POST", body: form });
+      setBackupVerification(result);
+      setBackupMessage(result.ok ? "备份校验通过，可以提交恢复。" : "备份校验未通过，请查看错误清单。");
     } catch (reason) {
       setBackupMessage(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -3330,8 +3919,63 @@ function Settings() {
     }
   }
 
-  if (state.loading && activeSection !== "system") return <Loading />;
-  if (state.error) return <ErrorBanner message={state.error} />;
+  async function importBackup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!window.confirm("导入系统备份会替换当前会话、项目、标签、报告、设备、设置和日志等业务数据；当前管理员账号会保留。确认继续？")) return;
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    setBackupBusy(true);
+    setBackupMessage("正在上传备份文件；上传后将由 Restore Worker 异步校验与恢复…");
+    try {
+      const result = await api<UnknownRecord>("/api/v1/backups/import", {
+        method: "POST",
+        body: form,
+      });
+      setBackupMessage(`恢复任务已创建（${result.restoreJobId}），页面会持续刷新阶段和进度。`);
+      formElement.reset();
+      restoresState.reload();
+    } catch (reason) {
+      setBackupMessage(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function retryRestore(id: string) {
+    setBackupMessage("正在重新加入恢复队列…");
+    try {
+      await api(`/api/v1/backups/restores/${id}/retry`, { method: "POST" });
+      restoresState.reload();
+      setBackupMessage("恢复任务已重新入队。");
+    } catch (reason) {
+      setBackupMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function cancelRestore(id: string) {
+    if (!window.confirm("只允许在数据替换开始前取消。确认取消这次恢复？")) return;
+    try {
+      await api(`/api/v1/backups/restores/${id}`, { method: "DELETE" });
+      restoresState.reload();
+      setBackupMessage("恢复任务已取消，当前业务数据未被替换。");
+    } catch (reason) {
+      setBackupMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function deleteRestoreFile(id: string) {
+    if (!window.confirm("确认删除这次失败恢复保留的上传文件？任务记录会保留，但之后不能重试，只能重新上传备份。")) return;
+    try {
+      await api(`/api/v1/backups/restores/${id}/staged-file`, { method: "DELETE" });
+      restoresState.reload();
+      setBackupMessage("失败恢复文件已删除，任务记录仍保留。");
+    } catch (reason) {
+      setBackupMessage(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  if (state.loading && activeSection !== "system" && activeSection !== "account") return <Loading />;
+  if (state.error && activeSection !== "backup" && activeSection !== "system") return <ErrorBanner message={state.error} />;
   const settings = state.data?.settings ?? {};
   const activeMeta = settingsSections.find((item) => item.id === activeSection)!;
   const configurable = activeSection === "ai" || activeSection === "classification" || activeSection === "email";
@@ -3359,6 +4003,8 @@ function Settings() {
           <header className="settings-section-header">
             <div><span>{activeMeta.icon}</span><div><h2>{activeMeta.label}</h2><p>{activeMeta.hint}</p></div></div>
           </header>
+
+          {activeSection === "account" && <AccountSecurity />}
 
           {configurable && (
             <form ref={formRef} className="settings-form" onSubmit={save}>
@@ -3434,7 +4080,7 @@ function Settings() {
         <div className="section-title-row">
           <div>
             <h2>备份与恢复</h2>
-            <p className="panel-subtitle">下载当前业务数据备份，或在重建网站后导入备份恢复归档内容。</p>
+            <p className="panel-subtitle">导出使用一致性快照；恢复由独立 Worker 分阶段执行，数据替换期间系统进入只读维护状态。</p>
           </div>
           <button
             type="button"
@@ -3445,6 +4091,12 @@ function Settings() {
             {backupBusy ? "准备中" : "下载备份"}
           </button>
         </div>
+        {state.error && <div className="alert warning">{state.error}。若正在恢复，这是维护模式的预期行为；可继续查看下方恢复进度。</div>}
+        <form className="upload-box" onSubmit={verifyBackup}>
+          <input type="file" name="file" accept=".json,.gz,.json.gz,application/gzip,application/json" required />
+          <button className="secondary" disabled={backupBusy}>只校验，不恢复</button>
+        </form>
+        {backupVerification && <div className={`alert ${backupVerification.ok ? "success" : "error"}`}><strong>{backupVerification.ok ? "校验通过" : "校验失败"}</strong> · Schema {backupVerification.schemaVersion ?? "未知"} · {Object.keys(backupVerification.counts ?? {}).length} 张业务表{Array.isArray(backupVerification.errors) && backupVerification.errors.length > 0 && <ul>{backupVerification.errors.map((error: unknown) => <li key={String(error)}>{String(error)}</li>)}</ul>}{Array.isArray(backupVerification.warnings) && backupVerification.warnings.length > 0 && <ul>{backupVerification.warnings.map((warning: unknown) => <li key={String(warning)}>{String(warning)}</li>)}</ul>}</div>}
         <form className="upload-box" onSubmit={importBackup}>
           <input
             type="file"
@@ -3452,9 +4104,34 @@ function Settings() {
             accept=".json,.gz,.json.gz,application/gzip,application/json"
             required
           />
-          <button className="danger" disabled={backupBusy}>导入备份并替换数据</button>
+          <button className="danger" disabled={backupBusy || activeRestores.length > 0}>创建异步恢复任务</button>
           <span>{backupMessage}</span>
         </form>
+        <div className="section-title-row"><div><h3>恢复任务</h3><p className="panel-subtitle">提交前失败保留上传文件 {restoresState.data?.failedRetentionDays ?? 30} 天；事实已提交后的异常会保持维护模式，只重新执行检索重建与完整性验证。</p></div><button className="secondary small" onClick={() => restoresState.reload()}>刷新</button></div>
+        {restoresState.loading && !restoresState.data ? <Loading label="正在读取恢复任务…" /> : restoresState.error ? <ErrorBanner message={restoresState.error} /> : (restoresState.data?.items ?? []).length ? (
+          <div className="run-list">
+            {(restoresState.data?.items ?? []).map((job) => (
+              <div className="run-row" key={job.id}>
+                <div>
+                  <strong>{job.filename}</strong>
+                  <span>{job.phaseMessage || statusLabel(job.status)} · {formatTaskTime(job.updatedAt)}</span>
+                  {job.error && <small className="failed-text">{job.error}</small>}
+                </div>
+                <div className="run-progress">
+                  <div className="progress-bar"><span style={{width:`${Number(job.progress ?? 0)}%`}} /></div>
+                  <small>{job.progress ?? 0}%{Array.isArray(job.warnings) && job.warnings.length ? ` · ${job.warnings.join("；")}` : ""}</small>
+                </div>
+                <div className="button-group">
+                  <span className={`pill ${statusClass(job.status)}`}>{statusLabel(job.status)}</span>
+                  {["queued","validating","validated"].includes(String(job.status)) && <button className="secondary small" onClick={() => void cancelRestore(job.id)}>取消</button>}
+                  {job.status === "failed" && job.stagedAvailable && <button className="secondary small" onClick={() => void retryRestore(job.id)}>重试</button>}
+                  {job.status === "recovery_required" && <button className="secondary small" onClick={() => void retryRestore(job.id)}>继续恢复后处理</button>}
+                  {job.status === "failed" && job.stagedAvailable && <button className="danger small" onClick={() => void deleteRestoreFile(job.id)}>删除恢复文件</button>}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : <p className="muted">还没有恢复任务。</p>}
         <p className="muted">
           备份不包含后台管理员密码、登录会话和一次性配对码。若重建时更换了 APP_MASTER_KEY，加密的 API Key/SMTP 密码会被跳过，导入后需要重新填写。
         </p>
@@ -3575,7 +4252,7 @@ function Settings() {
 }
 
 export default function App() {
-  const [authenticated,setAuthenticated]=useState<boolean|null>(null);const navigate=useNavigate();useEffect(()=>{void api("/api/v1/auth/me").then(()=>setAuthenticated(true)).catch((reason)=>setAuthenticated(reason instanceof ApiError&&reason.status===401?false:false));},[]);async function logout(){await api("/api/v1/auth/logout",{method:"POST"});setAuthenticated(false);navigate("/");}
-  if(authenticated===null)return<Loading/>;if(!authenticated)return<AuthScreen onAuthenticated={()=>setAuthenticated(true)}/>;
-  return <Shell onLogout={()=>void logout()}><Routes><Route path="/" element={<Dashboard/>}/><Route path="/conversations" element={<Conversations/>}/><Route path="/conversations/:id" element={<ConversationDetail/>}/><Route path="/projects" element={<Projects/>}/><Route path="/tags" element={<Tags/>}/><Route path="/classification" element={<Navigate to="/projects" replace/>}/><Route path="/reports" element={<Reports/>}/><Route path="/reports/:id" element={<ReportDetail/>}/><Route path="/imports" element={<Imports/>}/><Route path="/devices" element={<Devices/>}/><Route path="/logs" element={<Logs/>}/><Route path="/settings" element={<Settings/>}/><Route path="/changelog" element={<ChangelogPage/>}/><Route path="*" element={<Navigate to="/" replace/>}/></Routes></Shell>;
+  const [authenticated,setAuthenticated]=useState<boolean|null>(null);const [authError,setAuthError]=useState("");const navigate=useNavigate();useEffect(()=>{void api<UnknownRecord>("/api/v1/auth/me").then((result)=>{instanceTimeZone=String(result.instance?.timezone||instanceTimeZone);setAuthenticated(true);setAuthError("");}).catch((reason)=>{if(reason instanceof ApiError&&reason.status===401){setAuthenticated(false);return;}setAuthError(reason instanceof ApiError?`服务器异常（${reason.status}）：${reason.message}`:"无法连接服务器，请检查网络、反向代理和服务状态");});},[]);async function logout(){await api("/api/v1/auth/logout",{method:"POST"});setAuthenticated(false);navigate("/");}
+  if(authError)return <main className="auth-page"><section className="auth-card"><ErrorBanner message={authError}/><button onClick={()=>window.location.reload()}>重新连接</button></section></main>;if(authenticated===null)return<Loading/>;if(!authenticated)return<AuthScreen onAuthenticated={()=>setAuthenticated(true)}/>;
+  return <Shell onLogout={()=>void logout()}><Routes><Route path="/" element={<Dashboard/>}/><Route path="/conversations" element={<Conversations/>}/><Route path="/conversations/:id" element={<ConversationDetail/>}/><Route path="/activity" element={<ActivityPage/>}/><Route path="/projects" element={<Projects/>}/><Route path="/tags" element={<Tags/>}/><Route path="/classification" element={<Navigate to="/projects" replace/>}/><Route path="/reports" element={<Reports/>}/><Route path="/reports/:id" element={<ReportDetail/>}/><Route path="/imports" element={<Imports/>}/><Route path="/devices" element={<Devices/>}/><Route path="/logs" element={<Logs/>}/><Route path="/trash" element={<Trash/>}/><Route path="/settings" element={<Settings/>}/><Route path="/changelog" element={<ChangelogPage/>}/><Route path="*" element={<Navigate to="/" replace/>}/></Routes></Shell>;
 }

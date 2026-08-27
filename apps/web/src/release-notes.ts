@@ -1,4 +1,4 @@
-import changelogMarkdown from "../../../docs/CHANGELOG.md?raw";
+import changelogMarkdown from "../../../docs/13-版本变更记录.md?raw";
 
 export type ReleaseNote = {
   date: string;

@@ -62,7 +62,7 @@ for (let attempt = 0; attempt < 30; attempt += 1) {
 }
 
 const health = await expectOk(await fetch(`${base}/healthz`));
-const expectedVersion = process.env.E2E_EXPECTED_VERSION ?? "V2.1.2";
+const expectedVersion = process.env.E2E_EXPECTED_VERSION ?? "V2.3.0";
 if (health.version !== expectedVersion) {
   throw new Error(`Expected server ${expectedVersion}, received ${String(health.version)}`);
 }

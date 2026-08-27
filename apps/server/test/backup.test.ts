@@ -111,6 +111,7 @@ describe("backup archive parsing", () => {
       messageSegments: [
         {
           id: "11111111-1111-1111-1111-111111111111",
+          messageId: "33333333-3333-3333-3333-333333333333",
           content: "password=DemoOnly_123",
           href: "https://example.com/path?api_key=DemoOnlyKey",
         },
@@ -119,6 +120,21 @@ describe("backup archive parsing", () => {
         {
           id: "22222222-2222-2222-2222-222222222222",
           searchText: "Authorization: Bearer DemoOnlyTokenValue",
+          contentIntegrityHash: "previous-integrity-hash",
+        },
+      ],
+      messages: [
+        {
+          id: "33333333-3333-3333-3333-333333333333",
+          revisionId: "22222222-2222-2222-2222-222222222222",
+        },
+      ],
+      savedSearches: [
+        {
+          id: "44444444-4444-4444-4444-444444444444",
+          name: "Secrets",
+          normalizedName: "secrets",
+          query: { q: "password=DemoOnly_123" },
         },
       ],
     });
@@ -128,5 +144,34 @@ describe("backup archive parsing", () => {
     expect(sanitized.conversationRevisions?.[0]?.searchText).not.toContain(
       "DemoOnlyTokenValue",
     );
+    expect(sanitized.conversationRevisions?.[0]?.contentIntegrityHash).toBeNull();
+    expect(JSON.stringify(sanitized.savedSearches?.[0]?.query)).not.toContain(
+      "DemoOnly_123",
+    );
+  });
+
+  it("marks legacy revision metadata and content integrity as unknown", () => {
+    const prepared = prepareRestoredBackupTables({
+      conversationRevisions: [{ id: "legacy-revision" }],
+    });
+    expect(prepared.tables.conversationRevisions?.[0]).toMatchObject({
+      metadataCaptured: false,
+      revisionIdentityHash: null,
+      contentIntegrityHash: null,
+    });
+  });
+
+  it("normalizes legacy project names and resolves visual duplicates before restore", () => {
+    const prepared = prepareRestoredBackupTables({
+      projects: [
+        { id: "a", name: "项目 A", createdAt: "2026-01-01T00:00:00.000Z" },
+        { id: "b", name: "　项目  A ", createdAt: "2026-01-02T00:00:00.000Z" },
+      ],
+    });
+    expect(prepared.tables.projects?.map((row) => row.name)).toEqual([
+      "项目 A",
+      "项目 A (2)",
+    ]);
+    expect(new Set(prepared.tables.projects?.map((row) => row.normalizedName)).size).toBe(2);
   });
 });

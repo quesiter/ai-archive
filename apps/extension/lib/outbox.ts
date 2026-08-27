@@ -7,6 +7,8 @@ export interface OutboxRecord {
   nextAttemptAt: number;
   createdAt: number;
   lastError?: string;
+  lastStatusCode?: number;
+  authRevoked?: boolean;
 }
 
 const DB_NAME = "ai-conversation-archive";
@@ -109,7 +111,12 @@ export async function remove(id: string): Promise<void> {
   await transaction("readwrite", (store) => store.delete(id));
 }
 
-export async function markFailed(id: string, error: string, attempts: number): Promise<void> {
+export async function markFailed(
+  id: string,
+  error: string,
+  attempts: number,
+  statusCode?: number,
+): Promise<void> {
   const record = (await transaction("readonly", (store) => store.get(id))) as
     | OutboxRecord
     | undefined;
@@ -120,9 +127,51 @@ export async function markFailed(id: string, error: string, attempts: number): P
       ...record,
       attempts,
       lastError: error.slice(0, 1_000),
+      lastStatusCode: statusCode,
+      authRevoked: false,
       nextAttemptAt: Date.now() + delay,
     }),
   );
+}
+
+export async function markAuthRevoked(
+  id: string,
+  error: string,
+  attempts: number,
+): Promise<void> {
+  const record = (await transaction("readonly", (store) => store.get(id))) as
+    | OutboxRecord
+    | undefined;
+  if (!record) return;
+  await transaction("readwrite", (store) => store.put({
+    ...record,
+    attempts,
+    lastError: error.slice(0, 1_000),
+    lastStatusCode: 401,
+    authRevoked: true,
+    nextAttemptAt: Number.MAX_SAFE_INTEGER,
+  }));
+}
+
+export async function listRecords(): Promise<OutboxRecord[]> {
+  const records = await transaction("readonly", (store) => store.getAll());
+  return (records as OutboxRecord[]).sort((left, right) => left.createdAt - right.createdAt);
+}
+
+export async function retryRecord(id: string): Promise<void> {
+  const record = (await transaction("readonly", (store) => store.get(id))) as
+    | OutboxRecord
+    | undefined;
+  if (!record) return;
+  await transaction("readwrite", (store) => store.put({
+    ...record,
+    nextAttemptAt: Date.now(),
+    authRevoked: false,
+  }));
+}
+
+export async function retryAllRecords(): Promise<void> {
+  for (const record of await listRecords()) await retryRecord(record.id);
 }
 
 export async function outboxCount(): Promise<number> {

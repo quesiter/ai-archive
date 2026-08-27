@@ -5,6 +5,11 @@ import {
   projects,
   reports,
 } from "../schema.js";
+import {
+  isUniqueViolation,
+  normalizeProjectName,
+  projectConflictError,
+} from "./projects.js";
 
 export interface ProjectMergeResult {
   sourceProjectId: string;
@@ -60,24 +65,34 @@ export async function mergeProjectIntoProject(input: {
       .where(eq(reports.projectId, source.id));
     await tx
       .update(conversationProjects)
-      .set({ projectId: target.id, updatedAt: new Date() })
+      .set({ projectId: target.id, suggestedName: null, updatedAt: new Date() })
       .where(eq(conversationProjects.projectId, source.id));
     await tx
       .update(reports)
       .set({ projectId: target.id })
       .where(eq(reports.projectId, source.id));
     await tx.delete(projects).where(eq(projects.id, source.id));
-    const targetProjectName = input.targetProjectName ?? target.name;
-    await tx
-      .update(projects)
-      .set({ name: targetProjectName, updatedAt: new Date() })
-      .where(eq(projects.id, target.id));
+    const normalized = normalizeProjectName(input.targetProjectName ?? target.name);
+    if (!normalized.name) throw new Error("Project name cannot be empty");
+    try {
+      await tx
+        .update(projects)
+        .set({
+          name: normalized.name,
+          normalizedName: normalized.normalizedName,
+          updatedAt: new Date(),
+        })
+        .where(eq(projects.id, target.id));
+    } catch (error) {
+      if (isUniqueViolation(error)) throw projectConflictError();
+      throw error;
+    }
 
     return {
       sourceProjectId: source.id,
       sourceProjectName: source.name,
       targetProjectId: target.id,
-      targetProjectName,
+      targetProjectName: normalized.name,
       movedConversationCount: sourceAssignments.length,
       movedReportCount: sourceReports.length,
     };

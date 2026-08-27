@@ -12,9 +12,13 @@ import type {
 import {
   dueRecords,
   enqueue,
+  listRecords,
+  markAuthRevoked,
   markFailed,
   outboxCount,
   remove,
+  retryAllRecords,
+  retryRecord,
 } from "../lib/outbox";
 import { packagedServerOrigin } from "../lib/packaged-origin";
 
@@ -119,6 +123,12 @@ interface FlushResult {
   };
 }
 
+class UploadHttpError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 async function flushOutbox(force = false): Promise<FlushResult> {
   const settings = (await browser.storage.local.get("deviceToken")) as ExtensionSettings;
   const serverUrl = normalizedServerUrl(packagedServerOrigin());
@@ -175,7 +185,22 @@ async function flushOutbox(force = false): Promise<FlushResult> {
             requiresFullCapture: true,
           };
         }
-        throw new Error(payload.error ?? `上传失败 (${response.status})`);
+        if (response.status === 401) {
+          const authMessage = "设备授权已失效，需要重新配对；待上传数据已保留";
+          await markAuthRevoked(record.id, authMessage, record.attempts + 1);
+          await clearAuthState();
+          await browser.storage.local.set({ authRevoked: true });
+          await setStatus({
+            status: "failed",
+            provider: record.payload.provider,
+            sessionId: record.payload.sessionId,
+            captureMode,
+            message: authMessage,
+            updatedAt: new Date().toISOString(),
+          });
+          return { sent, remaining: await outboxCount() };
+        }
+        throw new UploadHttpError(payload.error ?? `上传失败 (${response.status})`, response.status);
       }
       const result = (await response.json().catch(() => ({}))) as {
         conversationId?: string;
@@ -201,7 +226,12 @@ async function flushOutbox(force = false): Promise<FlushResult> {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await markFailed(record.id, message, record.attempts + 1);
+      await markFailed(
+        record.id,
+        message,
+        record.attempts + 1,
+        error instanceof UploadHttpError ? error.status : undefined,
+      );
       await setStatus({
         status: "failed",
         provider: record.payload.provider,
@@ -249,6 +279,16 @@ export default defineBackground(() => {
       return setStatus(message.state).then(() => ({ ok: true }));
     }
     if (message.type === "flushOutbox") return flushOutbox(true);
+    if (message.type === "getOutbox") return listRecords();
+    if (message.type === "retryOutboxItem") {
+      return retryRecord(message.id).then(() => flushOutbox(true));
+    }
+    if (message.type === "removeOutboxItem") {
+      return remove(message.id).then(() => ({ ok: true }));
+    }
+    if (message.type === "retryAllOutbox") {
+      return retryAllRecords().then(() => flushOutbox(true));
+    }
     if (message.type === "pairDevice") {
       return (async () => {
         const serverUrl = normalizedServerUrl(packagedServerOrigin());
@@ -275,6 +315,8 @@ export default defineBackground(() => {
           deviceToken: payload.token,
           deviceName: payload.name ?? "Chrome",
         });
+        await browser.storage.local.set({ authRevoked: false });
+        await retryAllRecords();
         await flushOutbox();
         return { ok: true, deviceId: payload.deviceId };
       })();

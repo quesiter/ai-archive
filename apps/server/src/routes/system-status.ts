@@ -29,19 +29,30 @@ const HostPayloadSchema = z.object({
   })).max(120),
 });
 
-let importStorageCache: { measuredAt: number; usage: DirectoryUsage } | null = null;
-let importStoragePending: Promise<DirectoryUsage> | null = null;
+type ImportStorageUsage = {
+  total: DirectoryUsage;
+  inbox: DirectoryUsage;
+  processed: DirectoryUsage;
+  failed: DirectoryUsage;
+  restoreStaging: DirectoryUsage;
+};
 
-async function importStorageStatus(): Promise<DirectoryUsage> {
+let importStorageCache: { measuredAt: number; usage: ImportStorageUsage } | null = null;
+let importStoragePending: Promise<ImportStorageUsage> | null = null;
+
+async function importStorageStatus(): Promise<ImportStorageUsage> {
   if (importStorageCache && Date.now() - importStorageCache.measuredAt < 60_000) {
     return importStorageCache.usage;
   }
   if (importStoragePending) return importStoragePending;
-  importStoragePending = measureImportStorage([
-    config.IMPORT_INBOX,
-    config.IMPORT_PROCESSED,
-    config.IMPORT_FAILED,
-  ]).then((usage) => {
+  importStoragePending = Promise.all([
+    measureImportStorage([config.IMPORT_INBOX, config.IMPORT_PROCESSED, config.IMPORT_FAILED]),
+    measureImportStorage([config.IMPORT_INBOX]),
+    measureImportStorage([config.IMPORT_PROCESSED]),
+    measureImportStorage([config.IMPORT_FAILED]),
+    measureImportStorage([config.RESTORE_STAGING]),
+  ]).then(([total, inbox, processed, failed, restoreStaging]) => {
+    const usage = { total, inbox, processed, failed, restoreStaging };
     importStorageCache = { measuredAt: Date.now(), usage };
     return usage;
   }).finally(() => {
@@ -126,7 +137,7 @@ export async function systemStatusRoutes(app: FastifyInstance): Promise<void> {
       databaseStatus(),
       importStorageStatus(),
     ]);
-    const storageUsedBytes = database.sizeBytes + imports.bytes;
+    const storageUsedBytes = database.sizeBytes + imports.total.bytes + imports.restoreStaging.bytes;
     const storageBudgetBytes = config.ARCHIVE_STORAGE_BUDGET_GB
       ? Math.round(config.ARCHIVE_STORAGE_BUDGET_GB * 1024 ** 3)
       : null;
@@ -144,14 +155,27 @@ export async function systemStatusRoutes(app: FastifyInstance): Promise<void> {
       projectStorage: {
         usedBytes: storageUsedBytes,
         databaseBytes: database.sizeBytes,
-        importBytes: imports.bytes,
-        importFiles: imports.files,
+        importBytes: imports.total.bytes,
+        importFiles: imports.total.files,
+        restoreBytes: imports.restoreStaging.bytes,
+        restoreFiles: imports.restoreStaging.files,
+        restoreStaging: imports.restoreStaging,
+        importBreakdown: {
+          inbox: imports.inbox,
+          processed: imports.processed,
+          failed: imports.failed,
+        },
+        importRetentionDays: {
+          processed: config.IMPORT_PROCESSED_RETENTION_DAYS,
+          failed: config.IMPORT_FAILED_RETENTION_DAYS,
+        },
+        restoreFailedRetentionDays: config.RESTORE_FAILED_RETENTION_DAYS,
         budgetBytes: storageBudgetBytes,
         availableBytes: storageBudgetBytes === null
           ? null
           : Math.max(0, storageBudgetBytes - storageUsedBytes),
         percent: storagePercent,
-        incomplete: imports.incomplete,
+        incomplete: imports.total.incomplete || imports.restoreStaging.incomplete,
         alert: projectStorageAlert(storagePercent),
       },
       database,

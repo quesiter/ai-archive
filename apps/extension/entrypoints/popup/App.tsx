@@ -4,6 +4,7 @@ import type {
   ExtensionMessage,
   ExtensionSettings,
 } from "../../lib/messages";
+import type { OutboxRecord } from "../../lib/outbox";
 import {
   packagedServerOrigin,
   serverPermissionPattern,
@@ -62,14 +63,17 @@ export default function App() {
   const [tab, setTab] = useState<CurrentTabState>({});
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [outbox, setOutbox] = useState<OutboxRecord[]>([]);
 
   async function reload(): Promise<void> {
-    const [stored, current] = await Promise.all([
+    const [stored, current, queued] = await Promise.all([
       browser.storage.local.get() as Promise<ExtensionSettings>,
       activeTabState(),
+      browser.runtime.sendMessage({ type: "getOutbox" } satisfies ExtensionMessage) as Promise<OutboxRecord[]>,
     ]);
     setSettings(stored);
     setTab(current);
+    setOutbox(Array.isArray(queued) ? queued : []);
   }
 
   useEffect(() => {
@@ -136,6 +140,18 @@ export default function App() {
     await reload();
   }
 
+  async function outboxAction(action: ExtensionMessage): Promise<void> {
+    setBusy(true);
+    try {
+      await browser.runtime.sendMessage(action);
+      await reload();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const status: CaptureUiState = settings.lastStatus ?? {
     status: "idle",
     message: "尚无采集记录",
@@ -151,6 +167,7 @@ export default function App() {
       {!settings.deviceToken ? (
         <form onSubmit={(event) => void pair(event)}>
           <h2>连接归档服务</h2>
+          {settings.authRevoked && <p className="auth-revoked">设备授权已失效，请重新配对。待上传数据不会被删除。</p>}
           <div className="server-field"><span>归档服务</span><code>{serverOrigin || "未配置服务器地址"}</code><small>地址已随扩展包固定，无需手动输入</small></div>
           <label>配对码<input name="code" minLength={6} maxLength={32} required /></label>
           <button disabled={busy || !serverOrigin}>配对</button>
@@ -165,6 +182,32 @@ export default function App() {
           <footer><span>{settings.deviceName}</span><button className="link" onClick={() => void browser.runtime.sendMessage({type:"flushOutbox"} satisfies ExtensionMessage)}>重试上传</button></footer>
         </>
       )}
+      <section className="outbox-section">
+        <div className="outbox-heading">
+          <h2>待上传 <span>{outbox.length}</span></h2>
+          {outbox.length > 0 && settings.deviceToken && (
+            <button className="link" disabled={busy} onClick={() => void outboxAction({ type: "retryAllOutbox" })}>全部重试</button>
+          )}
+        </div>
+        {outbox.length ? outbox.map((record) => (
+          <article className="outbox-item" key={record.id}>
+            <div>
+              <strong>{record.payload.provider} · {record.payload.title || record.payload.sessionId}</strong>
+              <small>{new Date(record.createdAt).toLocaleString()} · 已尝试 {record.attempts} 次</small>
+              <small>{record.authRevoked ? "设备授权已失效" : record.lastStatusCode ? `HTTP ${record.lastStatusCode}` : "等待网络"}{record.lastError ? ` · ${record.lastError}` : ""}</small>
+              {!record.authRevoked && record.nextAttemptAt > Date.now() && <small>下次重试：{new Date(record.nextAttemptAt).toLocaleString()}</small>}
+            </div>
+            <div className="outbox-actions">
+              <button className="secondary" disabled={busy || !settings.deviceToken} onClick={() => void outboxAction({ type: "retryOutboxItem", id: record.id })}>立即重试</button>
+              <button className="link danger-link" disabled={busy} onClick={() => {
+                if (window.confirm("删除这条待上传记录？尚未归档的数据将无法从 Outbox 恢复。")) {
+                  void outboxAction({ type: "removeOutboxItem", id: record.id });
+                }
+              }}>删除</button>
+            </div>
+          </article>
+        )) : <p className="muted">当前没有等待上传的归档。</p>}
+      </section>
       {message && <div className="message">{message}</div>}
     </main>
   );

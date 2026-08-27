@@ -7,7 +7,7 @@ import {
 } from "@ai-archive/contracts";
 import { z } from "zod";
 import { db } from "../db.js";
-import { errorMessage, requireWebUser } from "../http.js";
+import { errorMessage, requireDevice, requireWebUser } from "../http.js";
 import { devices } from "../schema.js";
 import {
   claimPairingCode,
@@ -62,10 +62,51 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
         kind: devices.kind,
         createdAt: devices.createdAt,
         lastSeenAt: devices.lastSeenAt,
+        clientVersion: devices.clientVersion,
+        os: devices.os,
+        lastScanAt: devices.lastScanAt,
+        lastSuccessfulSyncAt: devices.lastSuccessfulSyncAt,
+        lastErrorAt: devices.lastErrorAt,
+        lastErrorCode: devices.lastErrorCode,
+        trackedFiles: devices.trackedFiles,
+        skippedFiles: devices.skippedFiles,
         revokedAt: devices.revokedAt,
       })
       .from(devices)
       .orderBy(desc(devices.createdAt));
+  });
+
+  app.post("/api/v1/devices/heartbeat", async (request, reply) => {
+    const device = await requireDevice(request, reply);
+    if (!device) return;
+    const input = z.object({
+      clientVersion: z.string().min(1).max(64),
+      os: z.string().min(1).max(120),
+      lastScanAt: z.string().datetime({ offset: true }).optional(),
+      lastSuccessfulSyncAt: z.string().datetime({ offset: true }).optional(),
+      lastErrorAt: z.string().datetime({ offset: true }).nullable().optional(),
+      lastErrorCode: z.string().max(120).nullable().optional(),
+      trackedFiles: z.number().int().min(0).max(10_000_000),
+      skippedFiles: z.number().int().min(0).max(10_000_000),
+    }).parse(request.body);
+    await db.update(devices).set({
+      clientVersion: input.clientVersion,
+      os: input.os,
+      lastScanAt: input.lastScanAt ? new Date(input.lastScanAt) : new Date(),
+      lastSuccessfulSyncAt: input.lastSuccessfulSyncAt
+        ? new Date(input.lastSuccessfulSyncAt)
+        : undefined,
+      lastErrorAt: input.lastErrorAt === undefined
+        ? undefined
+        : input.lastErrorAt === null
+          ? null
+          : new Date(input.lastErrorAt),
+      lastErrorCode: input.lastErrorCode,
+      trackedFiles: input.trackedFiles,
+      skippedFiles: input.skippedFiles,
+      lastSeenAt: new Date(),
+    }).where(eq(devices.id, device.id));
+    return { ok: true };
   });
 
   app.get("/api/v1/device-components", async (request, reply) => {

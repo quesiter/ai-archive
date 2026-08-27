@@ -1,4 +1,4 @@
-import { desc, gte, ne } from "drizzle-orm";
+import { count, desc, gte } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { providerLabels, type Provider } from "@ai-archive/contracts";
@@ -75,27 +75,32 @@ export async function activityRoutes(app: FastifyInstance): Promise<void> {
     const query = z
       .object({
         limit: z.coerce.number().int().min(1).max(60).default(20),
+        offset: z.coerce.number().int().min(0).max(10_000).default(0),
       })
       .parse(request.query);
     const captureSince = new Date(Date.now() - 24 * 60 * 60_000);
-    const [tasks, runs, imports, captures] = await Promise.all([
+    const sourceLimit = query.offset + query.limit;
+    const [tasks, runs, imports, captures, taskCount, runCount, importCount] = await Promise.all([
       db
         .select()
         .from(backgroundTasks)
         .orderBy(desc(backgroundTasks.updatedAt))
-        .limit(20),
+        .limit(sourceLimit),
       db
         .select()
         .from(analysisRuns)
         .orderBy(desc(analysisRuns.updatedAt))
-        .limit(20),
-      db.select().from(importJobs).orderBy(desc(importJobs.updatedAt)).limit(20),
+        .limit(sourceLimit),
+      db.select().from(importJobs).orderBy(desc(importJobs.updatedAt)).limit(sourceLimit),
       db
         .select()
         .from(captureRuns)
         .where(gte(captureRuns.createdAt, captureSince))
         .orderBy(desc(captureRuns.createdAt))
         .limit(200),
+      db.select({ total: count() }).from(backgroundTasks),
+      db.select({ total: count() }).from(analysisRuns),
+      db.select({ total: count() }).from(importJobs),
     ]);
     const captureAnomalies = captures.filter(
       (capture) => capture.status !== "complete",
@@ -111,7 +116,7 @@ export async function activityRoutes(app: FastifyInstance): Promise<void> {
     ).slice(0, 4);
     const latestCaptureAnomaly = captureAnomalies[0];
 
-    const items = [
+    const allItems = [
       ...tasks.map((task) => ({
         id: task.id,
         type: task.kind === "storage_redaction" ? "system" : "classification",
@@ -222,19 +227,30 @@ export async function activityRoutes(app: FastifyInstance): Promise<void> {
       .sort(
         (left, right) =>
           new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
-      )
-      .slice(0, query.limit);
+      );
+    const items = allItems.slice(query.offset, query.offset + query.limit);
+    const total =
+      Number(taskCount[0]?.total ?? 0) +
+      Number(runCount[0]?.total ?? 0) +
+      Number(importCount[0]?.total ?? 0) +
+      (latestCaptureAnomaly ? 1 : 0);
 
     return {
       generatedAt: new Date().toISOString(),
       summary: {
-        active: items.filter((item) =>
+        active: allItems.filter((item) =>
           ["queued", "running", "processing"].includes(String(item.status)),
         ).length,
-        failed: items.filter((item) => item.severity === "error").length,
-        warnings: items.filter((item) => item.severity === "warning").length,
+        failed: allItems.filter((item) => item.severity === "error").length,
+        warnings: allItems.filter((item) => item.severity === "warning").length,
       },
       items,
+      pagination: {
+        total,
+        limit: query.limit,
+        offset: query.offset,
+        hasMore: query.offset + items.length < total,
+      },
     };
   });
 }
