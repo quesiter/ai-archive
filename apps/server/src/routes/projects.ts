@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db } from "../db.js";
@@ -81,6 +81,83 @@ async function enqueueAutoReclassification(
   await enqueueUnlockedReclassification().catch((error) =>
     log.warn({ error }, "Failed to queue project and tag organization"),
   );
+}
+
+function liveProjectStatistics() {
+  return db
+    .select({
+      projectId: conversationProjects.projectId,
+      conversationCount: sql<number>`count(*)::int`.as("conversation_count"),
+      latestActivityAt: sql<Date | null>`max(${conversations.updatedAt})`.as(
+        "latest_activity_at",
+      ),
+      growth7d: sql<number>`count(*) filter (
+        where ${conversations.updatedAt} >= now() - interval '7 days'
+      )::int`.as("growth_7d"),
+      growth30d: sql<number>`count(*) filter (
+        where ${conversations.updatedAt} >= now() - interval '30 days'
+      )::int`.as("growth_30d"),
+    })
+    .from(conversationProjects)
+    .innerJoin(
+      conversations,
+      eq(conversations.id, conversationProjects.conversationId),
+    )
+    .where(
+      and(
+        isNotNull(conversationProjects.projectId),
+        isNull(conversations.deletedAt),
+      ),
+    )
+    .groupBy(conversationProjects.projectId)
+    .as("project_conversation_stats");
+}
+
+export function buildProjectListQuery(input: {
+  limit: number;
+  offset: number;
+  archived?: boolean;
+}) {
+  const statistics = liveProjectStatistics();
+  const conversationCount = sql<number>`coalesce(${statistics.conversationCount}, 0)::int`;
+  const where = input.archived === undefined
+    ? undefined
+    : eq(projects.archived, input.archived);
+
+  return db
+    .select({
+      id: projects.id,
+      name: projects.name,
+      normalizedName: projects.normalizedName,
+      description: projects.description,
+      archived: projects.archived,
+      updatedAt: projects.updatedAt,
+      createdAt: projects.createdAt,
+      conversationCount,
+      latestActivityAt: statistics.latestActivityAt,
+      growth7d: sql<number>`coalesce(${statistics.growth7d}, 0)::int`,
+      growth30d: sql<number>`coalesce(${statistics.growth30d}, 0)::int`,
+    })
+    .from(projects)
+    .leftJoin(statistics, eq(statistics.projectId, projects.id))
+    .where(where)
+    .orderBy(desc(conversationCount), asc(projects.name))
+    .limit(input.limit)
+    .offset(input.offset);
+}
+
+export function buildProjectTotalsQuery() {
+  const statistics = liveProjectStatistics();
+  return db
+    .select({
+      projectCount: sql<number>`count(*) filter (where not ${projects.archived})::int`,
+      archivedProjectCount: sql<number>`count(*) filter (where ${projects.archived})::int`,
+      activeProjectCount: sql<number>`count(*) filter (
+        where not ${projects.archived} and ${statistics.projectId} is not null
+      )::int`,
+    })
+    .from(projects)
+    .leftJoin(statistics, eq(statistics.projectId, projects.id));
 }
 
 async function loadProjectsOverview() {
@@ -205,43 +282,17 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       offset: z.coerce.number().int().min(0).default(0),
       archived: z.enum(["true", "false"]).optional(),
     }).parse(request.query);
-    const where = query.archived ? eq(projects.archived, query.archived === "true") : undefined;
-    const conversationCount = sql<number>`(
-      select count(*)::int from conversation_projects cp
-      inner join conversations c on c.id = cp.conversation_id
-      where cp.project_id = ${projects.id} and c.deleted_at is null
-    )`;
+    const archived = query.archived === undefined
+      ? undefined
+      : query.archived === "true";
+    const where = archived === undefined ? undefined : eq(projects.archived, archived);
     const [[totalRow], items] = await Promise.all([
       db.select({ total: count() }).from(projects).where(where),
-      db.select({
-        id: projects.id,
-        name: projects.name,
-        normalizedName: projects.normalizedName,
-        description: projects.description,
-        archived: projects.archived,
-        updatedAt: projects.updatedAt,
-        createdAt: projects.createdAt,
-        conversationCount,
-        latestActivityAt: sql<Date | null>`(
-          select max(c.updated_at) from conversation_projects cp
-          inner join conversations c on c.id = cp.conversation_id
-          where cp.project_id = ${projects.id} and c.deleted_at is null
-        )`,
-        growth7d: sql<number>`(
-          select count(*)::int from conversation_projects cp
-          inner join conversations c on c.id = cp.conversation_id
-          where cp.project_id = ${projects.id} and c.deleted_at is null
-            and c.updated_at >= now() - interval '7 days'
-        )`,
-        growth30d: sql<number>`(
-          select count(*)::int from conversation_projects cp
-          inner join conversations c on c.id = cp.conversation_id
-          where cp.project_id = ${projects.id} and c.deleted_at is null
-            and c.updated_at >= now() - interval '30 days'
-        )`,
-      }).from(projects).where(where)
-        .orderBy(desc(conversationCount), asc(projects.name))
-        .limit(query.limit).offset(query.offset),
+      buildProjectListQuery({
+        limit: query.limit,
+        offset: query.offset,
+        ...(archived === undefined ? {} : { archived }),
+      }),
     ]);
     const total = Number(totalRow?.total ?? 0);
     return { items, pagination: { total, limit: query.limit, offset: query.offset, hasMore: query.offset + items.length < total } };
@@ -256,14 +307,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/v1/projects/overview", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
     const [[projectTotals], [categorized], [unclassified], [tagTotal]] = await Promise.all([
-      db.select({
-        projectCount: sql<number>`count(*) filter (where not ${projects.archived})::int`,
-        archivedProjectCount: sql<number>`count(*) filter (where ${projects.archived})::int`,
-        activeProjectCount: sql<number>`count(*) filter (where not ${projects.archived} and exists (
-          select 1 from conversation_projects cp inner join conversations c on c.id = cp.conversation_id
-          where cp.project_id = ${projects.id} and c.deleted_at is null
-        ))::int`,
-      }).from(projects),
+      buildProjectTotalsQuery(),
       db.select({ value: count() }).from(conversationProjects)
         .innerJoin(conversations, eq(conversations.id, conversationProjects.conversationId))
         .where(and(isNull(conversations.deletedAt), sql`${conversationProjects.projectId} is not null`)),
