@@ -24,9 +24,8 @@ import {
 } from "../services/queue.js";
 import { getBooleanSetting, getSetting } from "../services/settings.js";
 import {
+  createConversationTextExport,
   createConversationXlsxExport,
-  loadConversationExportData,
-  renderConversationExport,
   type ConversationExportFormat,
 } from "../services/conversation-export.js";
 import { mergeProjectIntoProject } from "../services/project-merge.js";
@@ -397,15 +396,17 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           .header("Cache-Control", "no-store");
         return reply.send(xlsx.stream);
       }
-      const data = await loadConversationExportData({ projectId: params.id });
-      if (!data) return reply.code(404).send({ error: "Project not found" });
-      const content = await renderConversationExport(format, data);
-      const filename = `${safeProjectExportFilename(data.scopeName)}.${format}`;
+      const textExport = await createConversationTextExport(
+        { projectId: params.id },
+        format,
+      );
+      if (!textExport) return reply.code(404).send({ error: "Project not found" });
+      const filename = `${safeProjectExportFilename(textExport.scopeName)}.${format}`;
       reply
         .header("Content-Type", projectExportMimeType(format))
         .header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`)
         .header("Cache-Control", "no-store");
-      return reply.send(content);
+      return reply.send(textExport.stream);
     },
   );
 

@@ -1,4 +1,5 @@
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import type { CaptureMessage } from "@ai-archive/contracts";
 import { z } from "zod";
 import { db } from "../db.js";
 import { config } from "../config.js";
@@ -10,14 +11,44 @@ import {
   projects,
   tags,
 } from "../schema.js";
-import { latestRevisionId } from "./capture.js";
 import { completeStructured } from "./llm.js";
 import { redactForCloud } from "./redaction.js";
-import { loadCaptureRevisionMessages } from "./revision-storage.js";
+import { loadCaptureRevisionMessagesBatch } from "./revision-storage.js";
+import { selectLatestTimelineRevisions } from "./timeline.js";
 
 const ContextResponseSchema = z.object({
   currentContextMarkdown: z.string().min(1).max(80_000),
 });
+
+const AI_CONTEXT_CONVERSATION_LIMIT = 80;
+const AI_CONTEXT_REVISION_BATCH_SIZE = 4;
+
+function batches<T>(values: readonly T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    result.push(values.slice(index, index + size));
+  }
+  return result;
+}
+
+function revisionPreview(
+  messages: readonly CaptureMessage[],
+  limit = 6_000,
+): string {
+  let result = "";
+  for (const message of messages) {
+    if (message.role !== "user" && message.role !== "assistant") continue;
+    for (const segment of message.segments) {
+      if (["reasoning", "tool_status"].includes(segment.type)) continue;
+      const separator = result ? "\n" : "";
+      const remaining = limit - result.length - separator.length;
+      if (remaining <= 0) return result;
+      result += separator + segment.content.slice(0, remaining);
+      if (result.length >= limit) return result;
+    }
+  }
+  return result;
+}
 
 function markdownText(value: string): string {
   return value.replace(/\r\n/g, "\n").trim();
@@ -70,6 +101,60 @@ export async function generateProjectContext(
     )
     .orderBy(desc(conversations.updatedAt));
   const visibleRows = rows.filter((row) => row.updatedAt && row.id);
+  const conversationIds = visibleRows.map((row) => row.id);
+  const revisionRows = conversationIds.length
+    ? await db
+      .select({
+        id: conversationRevisions.id,
+        conversationId: conversationRevisions.conversationId,
+        capturedAt: conversationRevisions.capturedAt,
+        createdAt: conversationRevisions.createdAt,
+        completeness: conversationRevisions.completeness,
+      })
+      .from(conversationRevisions)
+      .where(inArray(conversationRevisions.conversationId, conversationIds))
+    : [];
+  const latestRevisions = selectLatestTimelineRevisions(revisionRows);
+  const tagRows = conversationIds.length
+    ? await db
+      .select({
+        conversationId: conversationTags.conversationId,
+        name: tags.name,
+      })
+      .from(conversationTags)
+      .innerJoin(tags, eq(tags.id, conversationTags.tagId))
+      .where(inArray(conversationTags.conversationId, conversationIds))
+    : [];
+  const tagsByConversation = new Map<string, string[]>();
+  for (const tag of tagRows) {
+    const values = tagsByConversation.get(tag.conversationId) ?? [];
+    values.push(tag.name);
+    tagsByConversation.set(tag.conversationId, values);
+  }
+
+  const selectedRows = visibleRows.flatMap((row) => {
+    const revision = latestRevisions.get(row.id);
+    return revision ? [{ row, revision }] : [];
+  });
+  const contentByRevision = new Map<string, string>();
+  if (options.ai) {
+    const previewRevisionIds = selectedRows
+      .slice(0, AI_CONTEXT_CONVERSATION_LIMIT)
+      .map(({ revision }) => revision.id);
+    for (const revisionBatch of batches(
+      previewRevisionIds,
+      AI_CONTEXT_REVISION_BATCH_SIZE,
+    )) {
+      const messagesByRevision = await loadCaptureRevisionMessagesBatch(revisionBatch);
+      for (const revisionId of revisionBatch) {
+        contentByRevision.set(
+          revisionId,
+          revisionPreview(messagesByRevision.get(revisionId) ?? []),
+        );
+      }
+    }
+  }
+
   const timeline: Array<{
     conversationId: string;
     revisionId: string;
@@ -78,42 +163,15 @@ export async function generateProjectContext(
     capturedAt: Date;
     tags: string[];
     content?: string;
-  }> = [];
-  for (const row of visibleRows) {
-    const revisionId = await latestRevisionId(row.id);
-    if (!revisionId) continue;
-    const [revisionMessages, revisionRows, tagRows] = await Promise.all([
-      loadCaptureRevisionMessages(revisionId),
-      db
-        .select({ capturedAt: conversationRevisions.capturedAt })
-        .from(conversationRevisions)
-        .where(eq(conversationRevisions.id, revisionId))
-        .limit(1),
-      db
-        .select({ name: tags.name })
-        .from(conversationTags)
-        .innerJoin(tags, eq(tags.id, conversationTags.tagId))
-        .where(eq(conversationTags.conversationId, row.id)),
-    ]);
-    const content = revisionMessages
-      .filter((message) => message.role === "user" || message.role === "assistant")
-      .flatMap((message) =>
-        message.segments
-          .filter((segment) => !["reasoning", "tool_status"].includes(segment.type))
-          .map((segment) => segment.content),
-      )
-      .join("\n")
-      .slice(0, 6_000);
-    timeline.push({
-      conversationId: row.id,
-      revisionId,
-      provider: row.provider,
-      title: row.title ?? "未命名会话",
-      capturedAt: revisionRows[0]?.capturedAt ?? row.updatedAt,
-      tags: tagRows.map((tag) => tag.name),
-      ...(options.ai ? { content } : {}),
-    });
-  }
+  }> = selectedRows.map(({ row, revision }) => ({
+    conversationId: row.id,
+    revisionId: revision.id,
+    provider: row.provider,
+    title: row.title ?? "未命名会话",
+    capturedAt: revision.capturedAt ?? row.updatedAt,
+    tags: tagsByConversation.get(row.id) ?? [],
+    ...(options.ai ? { content: contentByRevision.get(revision.id) ?? "" } : {}),
+  }));
   const tagCounts = new Map<string, number>();
   for (const item of timeline) {
     for (const name of item.tags) tagCounts.set(name, (tagCounts.get(name) ?? 0) + 1);
@@ -139,7 +197,7 @@ export async function generateProjectContext(
     const redacted = await redactForCloud(
       JSON.stringify({
         project: { name: project.name, description: project.description },
-        conversations: timeline.slice(0, 80),
+        conversations: timeline.slice(0, AI_CONTEXT_CONVERSATION_LIMIT),
       }),
     );
     const generated = await completeStructured({

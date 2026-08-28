@@ -1306,20 +1306,15 @@ function Conversations() {
 
   async function batchExport(format: "csv" | "md" | "xlsx") {
     if (!selectedIds.size) return;
-    const response = await fetch(`/api/v1/conversations/batch/export?format=${format}`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversationIds: [...selectedIds] }),
-    });
-    if (!response.ok) throw new Error("批量导出失败");
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `已选会话-${selectedIds.size}.${format}`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    await downloadResponse(
+      `/api/v1/conversations/batch/export?format=${format}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationIds: [...selectedIds] }),
+      },
+      `已选会话-${selectedIds.size}.${format}`,
+    );
   }
 
   return (
@@ -1681,12 +1676,81 @@ function messageTime(value: unknown): string {
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
 }
 
+function responseDownloadFilename(response: Response, fallback: string): string {
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (utf8Name) {
+    try {
+      return decodeURIComponent(utf8Name);
+    } catch {
+      // Keep the safe fallback when an upstream filename is malformed.
+    }
+  }
+  const quotedName = disposition.match(/filename="([^"]+)"/i)?.[1];
+  return quotedName || fallback;
+}
+
+function saveDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  // Revoking synchronously can cancel a download in some Chromium builds.
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
+async function downloadResponse(
+  path: string,
+  init: RequestInit,
+  fallbackFilename: string,
+): Promise<void> {
+  const response = await fetch(path, { ...init, credentials: "include" });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { error?: string };
+    throw new ApiError(payload.error ?? response.statusText, response.status);
+  }
+  const blob = await response.blob();
+  saveDownload(blob, responseDownloadFilename(response, fallbackFilename));
+}
+
 function ExportLinks({ path }: { path: string }) {
+  const [downloading, setDownloading] = useState<"csv" | "md" | "xlsx" | null>(null);
+  const [downloadError, setDownloadError] = useState("");
+
+  async function download(format: "csv" | "md" | "xlsx"): Promise<void> {
+    if (downloading) return;
+    setDownloading(format);
+    setDownloadError("");
+    try {
+      await downloadResponse(
+        `${path}?format=${format}`,
+        {},
+        `conversation-export.${format}`,
+      );
+    } catch (reason) {
+      setDownloadError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setDownloading(null);
+    }
+  }
+
   return <div className="export-links" aria-label="导出对话记录">
-    <span>导出</span>
-    <a className="button-link secondary small" href={`${path}?format=csv`}>CSV</a>
-    <a className="button-link secondary small" href={`${path}?format=md`}>Markdown</a>
-    <a className="button-link secondary small" href={`${path}?format=xlsx`}>XLSX</a>
+    <span>{downloading ? `正在生成 ${downloading.toUpperCase()}…` : "导出"}</span>
+    {(["csv", "md", "xlsx"] as const).map((format) => (
+      <button
+        className="secondary small"
+        disabled={downloading !== null}
+        key={format}
+        type="button"
+        onClick={() => void download(format)}
+      >
+        {format === "md" ? "Markdown" : format.toUpperCase()}
+      </button>
+    ))}
+    {downloadError && <span className="export-error" role="alert" title={downloadError}>导出失败：{downloadError}</span>}
   </div>;
 }
 
@@ -1900,26 +1964,29 @@ function ConversationDetail() {
   </>;
 }
 
-function ProjectTimeline({ projectId }: { projectId: string }) {
-  const [visible, setVisible] = useState(false);
+function ProjectTimeline({
+  projectId,
+  active,
+}: {
+  projectId: string;
+  active: boolean;
+}) {
   const [offset, setOffset] = useState(0);
   const state = useLoad(
-    () => visible
+    () => active
       ? api<UnknownRecord>(`/api/v1/projects/${projectId}/timeline?limit=50&offset=${offset}`)
       : Promise.resolve(null as UnknownRecord | null),
-    [visible, projectId, offset],
+    [active, projectId, offset],
   );
-  if (!visible) {
-    return <button className="secondary small" onClick={() => setVisible(true)}>查看项目时间线</button>;
-  }
-  if (state.loading) return <Loading label="加载时间线中…" />;
+  if (!active) return null;
+  if (state.loading) return <Loading label="加载项目会话中…" />;
   if (state.error) return <ErrorBanner message={state.error} />;
   const items = Array.isArray(state.data?.items) ? state.data.items : [];
   return (
     <div className="project-timeline">
       <div className="section-title-row">
-        <strong>项目演进</strong>
-        <button className="ghost small" onClick={() => setVisible(false)}>收起</button>
+        <strong>项目会话</strong>
+        <span className="muted">按最新归档版本排序</span>
       </div>
       {items.length ? items.map((item: UnknownRecord) => (
         <Link className="timeline-item" key={item.revisionId} to={item.href}>
@@ -1943,6 +2010,7 @@ function Projects() {
   const overviewState = useLoad(() => api<UnknownRecord>("/api/v1/projects/overview"), []);
   const [projectOffset, setProjectOffset] = useState(0);
   const [unclassifiedOffset, setUnclassifiedOffset] = useState(0);
+  const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(new Set());
   const projectState = useLoad(
     () => api<PageEnvelope>(`/api/v1/projects?limit=40&offset=${projectOffset}`),
     [projectOffset],
@@ -1964,6 +2032,10 @@ function Projects() {
   const [mergeTargetName, setMergeTargetName] = useState("");
   const [mergeMessage, setMergeMessage] = useState("");
   const [projectDialog, setProjectDialog] = useState<"create" | "merge" | null>(null);
+  const [contextDownload, setContextDownload] = useState<{
+    projectId: string;
+    ai: boolean;
+  } | null>(null);
   const classificationActive = isActiveStatus(classificationTask?.status);
   const classificationClock = useTaskClock(classificationActive);
   const overview = overviewState.data ?? {};
@@ -2003,6 +2075,15 @@ function Projects() {
     unclassifiedState.reload();
     projectOptionsState.reload();
   }, [overviewState.reload, projectState.reload, unclassifiedState.reload, projectOptionsState.reload]);
+
+  function setProjectExpanded(projectId: string, expanded: boolean): void {
+    setExpandedProjectIds((current) => {
+      const next = new Set(current);
+      if (expanded) next.add(projectId);
+      else next.delete(projectId);
+      return next;
+    });
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -2145,27 +2226,19 @@ function Projects() {
   }
 
   async function downloadProjectContext(project: UnknownRecord, ai = true) {
+    if (contextDownload) return;
     setError("");
     async function download(useAi: boolean) {
-      const response = await fetch(`/api/v1/projects/${project.id}/context`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ai: useAi }),
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({})) as { error?: string };
-        throw new Error(payload.error ?? response.statusText);
-      }
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = "PROJECT-CONTEXT.md";
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
+      setContextDownload({ projectId: String(project.id), ai: useAi });
+      await downloadResponse(
+        `/api/v1/projects/${project.id}/context`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ai: useAi }),
+        },
+        "PROJECT-CONTEXT.md",
+      );
     }
     try {
       await download(ai);
@@ -2180,6 +2253,8 @@ function Projects() {
         }
       }
       setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setContextDownload(null);
     }
   }
 
@@ -2332,15 +2407,18 @@ function Projects() {
           <Loading label="加载项目中…" />
         ) : activeProjectGroups.length ? (
           <div className="project-group-list">
-            {categorizedProjectGroups.map((project, index) => {
+            {categorizedProjectGroups.map((project) => {
               const conversations = Array.isArray(project.conversations)
                 ? project.conversations
                 : [];
               const conversationCount = Number(project.conversationCount ?? conversations.length);
+              const projectId = String(project.id);
+              const contextBusy = contextDownload?.projectId === projectId;
               return (
                 <details
                   className="project-group"
                   key={project.id}
+                  onToggle={(event) => setProjectExpanded(projectId, event.currentTarget.open)}
                 >
                   <summary>
                     <div className="project-group-title">
@@ -2355,8 +2433,16 @@ function Projects() {
                   </summary>
                   <div className="project-group-actions">
                     <ExportLinks path={`/api/v1/projects/${project.id}/export`} />
-                    <button className="secondary small" onClick={() => void downloadProjectContext(project, true)}>智能上下文（推荐）</button>
-                    <button className="ghost small" onClick={() => void downloadProjectContext(project, false)}>仅历史索引</button>
+                    <button
+                      className="secondary small"
+                      disabled={contextDownload !== null}
+                      onClick={() => void downloadProjectContext(project, true)}
+                    >{contextBusy && contextDownload.ai ? "正在生成智能上下文…" : "智能上下文（推荐）"}</button>
+                    <button
+                      className="ghost small"
+                      disabled={contextDownload !== null}
+                      onClick={() => void downloadProjectContext(project, false)}
+                    >{contextBusy && !contextDownload.ai ? "正在生成历史索引…" : "仅历史索引"}</button>
                     <button className="secondary small" onClick={() => void editProject(project)}>编辑</button>
                     <button className="danger small" onClick={() => void setProjectArchived(project, true)}>归档</button>
                   </div>
@@ -2393,10 +2479,13 @@ function Projects() {
                         </Link>
                       ))}
                     </div>
-                  ) : (
-                    <p className="project-empty">{conversationCount > 0 ? "会话已改由下方时间线分页加载。" : "这个项目暂时还没有归入会话。"}</p>
-                  )}
-                  <ProjectTimeline projectId={String(project.id)} />
+                  ) : conversationCount <= 0 ? (
+                    <p className="project-empty">这个项目暂时还没有归入会话。</p>
+                  ) : null}
+                  <ProjectTimeline
+                    active={expandedProjectIds.has(projectId)}
+                    projectId={projectId}
+                  />
                 </details>
               );
             })}
@@ -2445,8 +2534,14 @@ function Projects() {
               const conversations = Array.isArray(project.conversations)
                 ? project.conversations
                 : [];
+              const projectId = String(project.id);
+              const contextBusy = contextDownload?.projectId === projectId;
               return (
-                <details className="project-group empty-project-group" key={project.id}>
+                <details
+                  className="project-group empty-project-group"
+                  key={project.id}
+                  onToggle={(event) => setProjectExpanded(projectId, event.currentTarget.open)}
+                >
                   <summary>
                     <div className="project-group-title">
                       <strong>{project.name}</strong>
@@ -2459,8 +2554,16 @@ function Projects() {
                   </summary>
                   <div className="project-group-actions">
                     <ExportLinks path={`/api/v1/projects/${project.id}/export`} />
-                    <button className="secondary small" onClick={() => void downloadProjectContext(project, true)}>智能上下文（推荐）</button>
-                    <button className="ghost small" onClick={() => void downloadProjectContext(project, false)}>仅历史索引</button>
+                    <button
+                      className="secondary small"
+                      disabled={contextDownload !== null}
+                      onClick={() => void downloadProjectContext(project, true)}
+                    >{contextBusy && contextDownload.ai ? "正在生成智能上下文…" : "智能上下文（推荐）"}</button>
+                    <button
+                      className="ghost small"
+                      disabled={contextDownload !== null}
+                      onClick={() => void downloadProjectContext(project, false)}
+                    >{contextBusy && !contextDownload.ai ? "正在生成历史索引…" : "仅历史索引"}</button>
                     <button className="secondary small" onClick={() => void editProject(project)}>编辑</button>
                     <button className="secondary small" onClick={() => void setProjectArchived(project, false)}>恢复项目</button>
                   </div>
@@ -2476,7 +2579,10 @@ function Projects() {
                       ))}
                     </div>
                   )}
-                  <ProjectTimeline projectId={String(project.id)} />
+                  <ProjectTimeline
+                    active={expandedProjectIds.has(projectId)}
+                    projectId={projectId}
+                  />
                 </details>
               );
             })}

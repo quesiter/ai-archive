@@ -1,5 +1,5 @@
 import ExcelJS from "exceljs";
-import { PassThrough, type Readable, type Writable } from "node:stream";
+import { PassThrough, Readable, type Writable } from "node:stream";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { stripInternalConversationMetadata } from "@ai-archive/contracts";
 import { db } from "../db.js";
@@ -391,6 +391,98 @@ export function renderConversationMarkdown(data: ConversationExportData): Buffer
   }
   if (!data.rows.length) lines.push("当前范围内没有可导出的正文消息。", "");
   return Buffer.from(lines.join("\n"), "utf8");
+}
+
+async function* iterateConversationCsvChunks(
+  source: ConversationExportSource,
+): AsyncGenerator<Buffer> {
+  const headers = [
+    "项目",
+    "会话标题",
+    "来源",
+    "会话ID",
+    "消息序号",
+    "角色",
+    "模型",
+    "消息时间",
+    "采集时间",
+    "内容",
+    "原会话链接",
+  ];
+  yield Buffer.from(`\uFEFF${headers.map(csvCell).join(",")}\r\n`, "utf8");
+  for await (const row of iterateConversationExportRows(source)) {
+    yield Buffer.from(`${[
+      row.projectName,
+      row.conversationTitle,
+      row.provider,
+      row.externalSessionId,
+      row.messageOrdinal,
+      row.role === "user" ? "用户" : "AI",
+      row.model,
+      row.messageAt,
+      row.capturedAt,
+      row.content,
+      row.canonicalUrl,
+    ].map(csvCell).join(",")}\r\n`, "utf8");
+  }
+}
+
+async function* iterateConversationMarkdownChunks(
+  source: ConversationExportSource,
+): AsyncGenerator<Buffer> {
+  yield Buffer.from([
+    `# ${source.scope === "project" ? "项目" : "会话"}：${source.scopeName}`,
+    "",
+    `> 导出时间：${source.generatedAt}`,
+    "> 已自动排除工具链调用、推理过程、系统消息和 Codex 运行环境元信息。",
+    "",
+  ].join("\n"), "utf8");
+  let activeConversationId = "";
+  let rowCount = 0;
+  for await (const row of iterateConversationExportRows(source)) {
+    const lines: string[] = [""];
+    rowCount += 1;
+    if (row.conversationId !== activeConversationId) {
+      activeConversationId = row.conversationId;
+      lines.push(
+        `## ${row.conversationTitle}`,
+        "",
+        `- 来源：${row.provider}`,
+        `- 会话 ID：${row.externalSessionId}`,
+        `- 采集时间：${row.capturedAt}`,
+        ...(row.canonicalUrl ? [`- 原会话：${row.canonicalUrl}`] : []),
+        "",
+      );
+    }
+    lines.push(
+      `### ${row.role === "user" ? "用户" : row.model || "AI"} · #${row.messageOrdinal}`,
+      "",
+      row.content,
+      "",
+    );
+    yield Buffer.from(lines.join("\n"), "utf8");
+  }
+  if (!rowCount) yield Buffer.from("\n当前范围内没有可导出的正文消息。\n", "utf8");
+}
+
+export async function createConversationTextExport(
+  input: {
+    conversationId?: string;
+    projectId?: string;
+    conversationIds?: string[];
+  },
+  format: "csv" | "md",
+): Promise<{ scopeName: string; stream: Readable } | null> {
+  const source = await loadConversationExportSource(input);
+  if (!source) return null;
+  return {
+    scopeName: source.scopeName,
+    stream: Readable.from(
+      format === "csv"
+        ? iterateConversationCsvChunks(source)
+        : iterateConversationMarkdownChunks(source),
+    ),
+  };
 }
 
 function chunkCell(value: string, size = 32_000): string[] {

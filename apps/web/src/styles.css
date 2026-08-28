@@ -613,6 +613,7 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .export-links { display: inline-flex; align-items: center; gap: .32rem; flex-wrap: wrap; }
 .export-links > span { color: var(--muted); font-size: .7rem; font-weight: 750; }
 .export-links .button-link { display: inline-flex; align-items: center; }
+.export-links .export-error { max-width: 24rem; overflow: hidden; color: #b4233a; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Reports, projects and imports */
 .report-link, .report-card { display: flex; flex-direction: column; gap: .38rem; padding: .82rem; border-top: 1px solid rgba(52,118,117,.1); }
@@ -658,7 +659,7 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
   list-style-position: inside;
 }
 .project-group[open] summary { border-bottom: 1px solid rgba(52,118,117,.1); }
-.project-group-actions { display: flex; justify-content: flex-end; padding: .45rem .9rem; border-bottom: 1px solid rgba(52,118,117,.08); background: #fbfdfd; }
+.project-group-actions { display: flex; align-items: center; justify-content: flex-end; gap: .4rem; flex-wrap: wrap; padding: .45rem .9rem; border-bottom: 1px solid rgba(52,118,117,.08); background: #fbfdfd; }
 .project-group-title { min-width: 0; }
 .project-group-title strong {
   display: block;

@@ -39,9 +39,8 @@ import {
   loadHydratedRevisionMessages,
 } from "../services/revision-storage.js";
 import {
+  createConversationTextExport,
   createConversationXlsxExport,
-  loadConversationExportData,
-  renderConversationExport,
   type ConversationExportFormat,
 } from "../services/conversation-export.js";
 import { loadConversationTags } from "../services/tags.js";
@@ -475,14 +474,16 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       );
       return reply.send(xlsx.stream);
     }
-    const data = await loadConversationExportData({ conversationIds: input.conversationIds });
-    if (!data) return reply.code(404).send({ error: "No conversations found" });
-    const content = await renderConversationExport(format, data);
+    const textExport = await createConversationTextExport(
+      { conversationIds: input.conversationIds },
+      format,
+    );
+    if (!textExport) return reply.code(404).send({ error: "No conversations found" });
     reply.header("Content-Type", exportMimeType(format)).header(
       "Content-Disposition",
-      `attachment; filename*=UTF-8''${encodeURIComponent(`${safeExportFilename(data.scopeName)}.${format}`)}`,
+      `attachment; filename*=UTF-8''${encodeURIComponent(`${safeExportFilename(textExport.scopeName)}.${format}`)}`,
     );
-    return reply.send(content);
+    return reply.send(textExport.stream);
   });
 
   app.get<{ Params: { id: string }; Querystring: { revisionId?: string } }>(
@@ -609,12 +610,12 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
           .header("Cache-Control", "no-store");
         return reply.send(xlsx.stream);
       }
-      const data = await loadConversationExportData({
-        conversationId: params.id,
-      });
-      if (!data) return reply.code(404).send({ error: "Conversation not found" });
-      const content = await renderConversationExport(format, data);
-      const filename = `${safeExportFilename(data.scopeName)}.${format}`;
+      const textExport = await createConversationTextExport(
+        { conversationId: params.id },
+        format,
+      );
+      if (!textExport) return reply.code(404).send({ error: "Conversation not found" });
+      const filename = `${safeExportFilename(textExport.scopeName)}.${format}`;
       reply
         .header("Content-Type", exportMimeType(format))
         .header(
@@ -622,7 +623,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
           `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
         )
         .header("Cache-Control", "no-store");
-      return reply.send(content);
+      return reply.send(textExport.stream);
     },
   );
 
