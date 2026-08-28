@@ -899,9 +899,16 @@ button.tag-filter-clear:hover { background: #edf7f4; box-shadow: none; transform
 .tag-filter-empty { display: grid; place-items: center; gap: .3rem; min-height: 118px; color: var(--muted); text-align: center; }
 .tag-filter-empty strong { color: #3a555d; font-size: .78rem; }
 .tag-filter-empty span { font-size: .68rem; }
-.project-timeline { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid rgba(52,118,117,.1); }
-.timeline-item { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: .8rem; padding: .68rem 0; border-top: 1px solid rgba(52,118,117,.08); }
-.timeline-item time { color: var(--muted); font-size: .72rem; }
+.project-timeline {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 1rem;
+  padding: 1rem .9rem .75rem;
+  border-top: 1px solid rgba(52,118,117,.1);
+}
+.project-timeline .section-title-row { margin-bottom: .35rem; }
+.timeline-item { display: grid; grid-template-columns: 108px minmax(0, 1fr); gap: .8rem; padding: .68rem 0; border-top: 1px solid rgba(52,118,117,.08); }
+.timeline-item time { padding-top: .08rem; color: var(--muted); font-size: .72rem; white-space: nowrap; }
 .timeline-item > div { min-width: 0; display: flex; flex-direction: column; gap: .24rem; }
 .timeline-item p { margin: 0; color: var(--muted); font-size: .76rem; line-height: 1.5; }
 .tag-metrics {
