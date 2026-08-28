@@ -53,7 +53,7 @@ const report = {
   passed: results.length === checks.length && results.every((item) => item.status === "PASS"),
   results,
   manualChecks: [
-    "Fresh PostgreSQL migration 0000 → 0021",
+    "Fresh PostgreSQL migration 0000 → 0022",
     "V2.2 production-shaped database migration to V2.3",
     "Windows 10/11 portable package smoke",
     "macOS LaunchAgent package smoke",

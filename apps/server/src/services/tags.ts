@@ -33,7 +33,14 @@ export function normalizeTagName(value: string): {
   name: string;
   normalizedName: string;
 } {
-  const name = value.normalize("NFKC").replace(/\s+/g, " ").trim();
+  const name = value
+    .normalize("NFKC")
+    .replace(/\s+/gu, " ")
+    .trim()
+    // Chinese typography normally does not use a space at a Han/Latin or
+    // Han/number boundary. Treat both spellings as one durable tag identity.
+    .replace(/([\p{Script=Latin}\p{Number}])\s+(?=\p{Script=Han})/gu, "$1")
+    .replace(/(\p{Script=Han})\s+(?=[\p{Script=Latin}\p{Number}])/gu, "$1");
   return {
     name,
     normalizedName: name.toLocaleLowerCase("en-US"),

@@ -8,6 +8,8 @@ import {
   localProjectGuess,
   parseClassificationSuggestion,
   parseTagSuggestions,
+  projectRelevanceScore,
+  selectRelevantProjects,
   shouldReuseClassification,
 } from "../src/services/analysis.js";
 
@@ -127,6 +129,43 @@ describe("localProjectGuess", () => {
     expect(result?.projectId).toBe("22222222-2222-2222-2222-222222222222");
     expect(result?.reason).toBe("local_content_match");
     expect(result?.usedAi).toBe(false);
+  });
+});
+
+describe("project candidate relevance", () => {
+  const candidates = [
+    {
+      id: "33333333-3333-3333-3333-333333333333",
+      name: "生活消费与饮食出行",
+      description: "杭州周边自驾、民宿、美食与旅行规划",
+    },
+    {
+      id: "44444444-4444-4444-4444-444444444444",
+      name: "高性能服务器采购配置与预算评估",
+      description: "GPU、CPU、DDR5、NVMe、RAID 与服务器电源配置",
+    },
+    ...projectRows,
+  ];
+  const material = {
+    title: "Qwen3.5 本地部署配置评估",
+    text: "评估双路 CPU、DDR5、GPU、NVMe RAID 和服务器电源配置。",
+  };
+
+  it("keeps semantically related infrastructure projects and removes unrelated lifestyle projects", () => {
+    const selected = selectRelevantProjects(material, candidates);
+    expect(selected.map((project) => project.id)).toContain("44444444-4444-4444-4444-444444444444");
+    expect(selected.map((project) => project.id)).not.toContain("33333333-3333-3333-3333-333333333333");
+    expect(projectRelevanceScore(material, candidates[1]!)).toBeGreaterThan(0);
+    expect(projectRelevanceScore(material, candidates[0]!)).toBe(0);
+  });
+
+  it("caps the model candidate list", () => {
+    const many = Array.from({ length: 120 }, (_, index) => ({
+      id: `${index}`,
+      name: `GPU服务器${index}`,
+      description: "GPU服务器",
+    }));
+    expect(selectRelevantProjects(material, many)).toHaveLength(80);
   });
 });
 

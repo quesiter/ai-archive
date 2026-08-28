@@ -30,7 +30,7 @@ REQUIRED_FILES = {
     "package.json",
     "pnpm-lock.yaml",
     "deploy/docker-compose.yml",
-    "apps/server/migrations/0021_restore_freeze_hardening.sql",
+    "apps/server/migrations/0022_tag_identity_hardening.sql",
     "apps/server/src/services/restore.ts",
     "docs/08-部署与发布.md",
 }

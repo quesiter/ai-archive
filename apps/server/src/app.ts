@@ -113,7 +113,6 @@ export async function buildApp(): Promise<FastifyInstance> {
     if (!request.url.startsWith("/api/v1/")) return;
     const params = request.params as Record<string, unknown> | null;
     if (
-      request.routeOptions.url?.includes(":id") &&
       typeof params?.id === "string" &&
       !z.string().uuid().safeParse(params.id).success
     ) {

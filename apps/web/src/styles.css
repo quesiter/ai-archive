@@ -124,6 +124,7 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .metric strong { font-size: 2.05rem; line-height: 1; color: var(--accent); letter-spacing: 0; }
 .metric small { color: var(--muted); font-size: .72rem; line-height: 1.35; }
 .dashboard-metrics { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+.attention-metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: 0; }
 .dashboard-main-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(320px, .75fr); gap: 1rem; align-items: start; }
 .category-dashboard-list { display: flex; flex-direction: column; }
 .category-dashboard-row {
@@ -306,7 +307,7 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .activity-list { display: flex; flex-direction: column; }
 .activity-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(180px, .85fr) auto;
+  grid-template-columns: minmax(240px, 290px) minmax(280px, 1fr) 64px;
   align-items: center;
   gap: .9rem;
   border-top: 1px solid rgba(52,118,117,.1);
@@ -327,6 +328,7 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .activity-meter { min-width: 0; }
 .activity-meter .progress-bar { margin: 0 0 .28rem; }
 .activity-meter small { color: var(--muted); font-size: .72rem; }
+.activity-row > .pill { justify-self: end; }
 .capture-health-summary { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: .78rem; }
 .capture-provider-list { display: flex; flex-direction: column; }
 .capture-provider-row {
@@ -485,6 +487,15 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .conversation-compact-row:last-child { border-bottom: 0; }
 .conversation-compact-row:hover { background: #f7fbfa; }
 .conversation-compact-main { display: flex; align-items: center; gap: .55rem; min-width: 0; }
+.conversation-compact-main > input[type="checkbox"] {
+  box-sizing: border-box;
+  flex: 0 0 15px;
+  width: 15px;
+  min-width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+}
 .conversation-compact-main > div { display: flex; flex-direction: column; gap: .12rem; min-width: 0; }
 .conversation-compact-main strong {
   overflow: hidden;

@@ -16,6 +16,13 @@ describe("tag normalization", () => {
     expect(normalizeTagName("TypeScript").normalizedName).toBe(
       normalizeTagName("typescript").normalizedName,
     );
+    expect(normalizeTagName("AI 工具开发与自动化")).toEqual({
+      name: "AI工具开发与自动化",
+      normalizedName: "ai工具开发与自动化",
+    });
+    expect(normalizeTagName("工具 AI").normalizedName).toBe(
+      normalizeTagName("工具AI").normalizedName,
+    );
   });
 
   it("rejects sentences and keeps only the strongest reusable suggestion", () => {
@@ -25,10 +32,15 @@ describe("tag normalization", () => {
       normalizeTagSuggestions([
         { name: "React", confidence: 0.6 },
         { name: "ｒｅａｃｔ", confidence: 0.88 },
+        { name: "AI 工具开发与自动化", confidence: 0.75 },
+        { name: "AI工具开发与自动化", confidence: 0.82 },
         { name: "18d0da13-1278-47fc-842d-2587d7ed88cf", confidence: 0.99 },
         { name: "弱标签", confidence: 0.1 },
       ]),
-    ).toEqual([{ name: "react", confidence: 0.88 }]);
+    ).toEqual([
+      { name: "react", confidence: 0.88 },
+      { name: "AI工具开发与自动化", confidence: 0.82 },
+    ]);
   });
 
   it("caps the number of automatic tags", () => {

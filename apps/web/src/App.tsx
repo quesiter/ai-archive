@@ -502,6 +502,11 @@ function formatTaskTime(value: unknown): string {
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { timeZone: instanceTimeZone });
 }
 
+function adapterVersionLabel(value: unknown): string {
+  const version = String(value ?? "").trim();
+  return version && version.toLowerCase() !== "unknown" ? version : "版本未上报";
+}
+
 function useTaskClock(enabled: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -739,7 +744,7 @@ function Dashboard() {
         {reliabilityState.loading ? <Loading label="检查归档可靠性…" /> : reliabilityState.error ? (
           <ErrorBanner message={reliabilityState.error} />
         ) : (
-          <div className="metric-grid">
+          <div className="metric-grid attention-metrics">
             {(reliabilityState.data?.items ?? []).map((item: UnknownRecord) => (
               <Link className="metric" key={item.key} to={item.href}>
                 <span>{item.label}</span>
@@ -1870,7 +1875,7 @@ function ConversationDetail() {
       <div><span>采集模式</span><strong>{captureModeLabels[String(selectedRevision.captureMode)] ?? selectedRevision.captureMode}</strong></div>
       <div><span>触发原因</span><strong>{triggerReasonLabels[String(selectedRevision.triggerReason)] ?? "未记录"}</strong></div>
       <div><span>来源设备</span><strong>{sourceDeviceLabel(selectedRevision)}</strong></div>
-      <div><span>适配器</span><strong>{selectedRevision.adapterVersion ?? "未知"}</strong></div>
+      <div><span>适配器</span><strong>{adapterVersionLabel(selectedRevision.adapterVersion)}</strong></div>
       <div><span>完整性</span><strong>{statusLabel(selectedRevision.completeness)}</strong></div>
       <div><span>采集时间</span><strong>{formatTaskTime(selectedRevision.capturedAt)}</strong></div>
       {selectedRevision.completenessReason && <div className="wide"><span>原因说明</span><strong>{selectedRevision.completenessReason}</strong></div>}
@@ -3216,10 +3221,10 @@ function ActivityPage() {
         <article className="metric"><span>失败</span><strong>{state.data?.summary?.failed ?? 0}</strong></article>
         <article className="metric"><span>警告</span><strong>{state.data?.summary?.warnings ?? 0}</strong></article>
       </div>
-      <div className="run-list">
-        {(state.data?.items ?? []).map((item: UnknownRecord) => <Link className="run-row" key={`${item.type}-${item.id}`} to={item.href || "/logs"}>
-          <div><strong>{item.title}</strong><span>{item.message || formatTaskTime(item.updatedAt)}</span></div>
-          <div className="run-progress"><div className="progress-bar"><span style={{width:`${Number(item.progress ?? 0)}%`}} /></div><small>{item.error || formatTaskTime(item.updatedAt)}</small></div>
+      <div className="activity-list">
+        {(state.data?.items ?? []).map((item: UnknownRecord) => <Link className="activity-row" key={`${item.type}-${item.id}`} to={item.href || "/logs"}>
+          <div className="activity-main"><strong>{item.title}</strong><span>{item.message || formatTaskTime(item.updatedAt)}</span></div>
+          <div className="activity-meter"><div className="progress-bar"><span style={{width:`${Number(item.progress ?? 0)}%`}} /></div><small>{item.error || formatTaskTime(item.updatedAt)}</small></div>
           <span className={`pill ${statusClass(item.status)}`}>{statusLabel(item.status)}</span>
         </Link>)}
       </div>
@@ -3342,7 +3347,7 @@ function Devices() {
     </section>
     <section className="panel">
       <div className="section-title-row"><div><h2>采集适配器健康度</h2><p className="panel-subtitle">按平台和适配器版本观察最近 24 小时成功、部分和失败比例；连续失败或部分率过高会标记为退化。</p></div><button className="secondary small" onClick={() => adaptersState.reload()}>刷新</button></div>
-      {adaptersState.loading ? <Loading label="正在汇总采集健康度…" /> : adaptersState.error ? <ErrorBanner message={adaptersState.error} /> : adaptersState.data?.length ? <div className="run-list">{adaptersState.data.map((adapter) => <div className="run-row" key={`${adapter.provider}-${adapter.adapterVersion}`}><div><strong>{providerLabels[adapter.provider as Provider] ?? adapter.provider} · {adapter.adapterVersion}</strong><span>最后采集 {formatTaskTime(adapter.lastCaptureAt)} · 平均 {Number(adapter.averageMessageCount24h ?? 0).toFixed(1)} 条消息</span></div><div className="run-progress"><div className="progress-bar"><span style={{width:`${Math.round(Number(adapter.rates24h?.success ?? 0)*100)}%`}} /></div><small>24h：成功 {Math.round(Number(adapter.rates24h?.success ?? 0)*100)}% · 部分 {Math.round(Number(adapter.rates24h?.partial ?? 0)*100)}% · 失败 {Math.round(Number(adapter.rates24h?.failed ?? 0)*100)}% · 连续失败 {adapter.consecutiveFailures ?? 0}</small></div><span className={`pill ${adapter.status === "healthy" ? "complete" : adapter.status === "degraded" ? "failed" : "partial"}`}>{adapter.status === "healthy" ? "健康" : adapter.status === "degraded" ? "退化" : "长时间无采集"}</span></div>)}</div> : <p className="muted">最近 30 天还没有采集运行记录。</p>}
+      {adaptersState.loading ? <Loading label="正在汇总采集健康度…" /> : adaptersState.error ? <ErrorBanner message={adaptersState.error} /> : adaptersState.data?.length ? <div className="run-list">{adaptersState.data.map((adapter) => <div className="run-row" key={`${adapter.provider}-${adapter.adapterVersion}`}><div><strong>{providerLabels[adapter.provider as Provider] ?? adapter.provider} · {adapterVersionLabel(adapter.adapterVersion)}</strong><span>最后采集 {formatTaskTime(adapter.lastCaptureAt)} · 平均 {Number(adapter.averageMessageCount24h ?? 0).toFixed(1)} 条消息</span></div><div className="run-progress"><div className="progress-bar"><span style={{width:`${Math.round(Number(adapter.rates24h?.success ?? 0)*100)}%`}} /></div><small>24h：成功 {Math.round(Number(adapter.rates24h?.success ?? 0)*100)}% · 部分 {Math.round(Number(adapter.rates24h?.partial ?? 0)*100)}% · 失败 {Math.round(Number(adapter.rates24h?.failed ?? 0)*100)}% · 连续失败 {adapter.consecutiveFailures ?? 0}</small></div><span className={`pill ${adapter.status === "healthy" ? "complete" : adapter.status === "degraded" ? "failed" : "partial"}`}>{adapter.status === "healthy" ? "健康" : adapter.status === "degraded" ? "退化" : "长时间无采集"}</span></div>)}</div> : <p className="muted">最近 30 天还没有采集运行记录。</p>}
     </section>
   </>;
 }

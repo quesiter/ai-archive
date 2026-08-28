@@ -148,6 +148,7 @@ const DEFAULT_CLASSIFICATION_CONVERSATION_CHAR_LIMIT = 8_000;
 const STABLE_CLASSIFICATION_CONFIDENCE = 0.78;
 const NEW_PROJECT_CONFIDENCE_WITH_EXISTING = 0.74;
 const NEW_PROJECT_CONFIDENCE_EMPTY = 0.55;
+const MAX_RELEVANT_PROJECT_CANDIDATES = 80;
 const RECLASSIFICATION_CHUNK_MAX_ITEMS = 50;
 const ANALYSIS_DEFERRED_STAGE = "deferred";
 
@@ -315,6 +316,63 @@ function normalizedSearchText(value: string): string {
 
 function compactSearchText(value: string): string {
   return normalizedSearchText(value).replace(/\s+/g, "");
+}
+
+const PROJECT_RELEVANCE_STOP_TERMS = new Set([
+  "一个", "一些", "这个", "进行", "相关", "问题", "建议", "方案", "项目", "系统",
+  "配置", "评估", "分析", "管理", "处理", "实现", "设计", "部署", "开发", "使用",
+]);
+
+function relevanceTerms(value: string): Set<string> {
+  const normalized = value.normalize("NFKC").toLocaleLowerCase("en-US");
+  const terms = new Set<string>();
+  for (const match of normalized.matchAll(/[a-z0-9][a-z0-9.+#_-]{1,}/gu)) {
+    terms.add(match[0]);
+  }
+  for (const match of normalized.matchAll(/\p{Script=Han}+/gu)) {
+    const characters = [...match[0]];
+    for (let index = 0; index < characters.length - 1; index += 1) {
+      const term = `${characters[index]}${characters[index + 1]}`;
+      if (!PROJECT_RELEVANCE_STOP_TERMS.has(term)) terms.add(term);
+    }
+  }
+  return terms;
+}
+
+export function projectRelevanceScore(
+  input: { title: string; text: string },
+  project: ProjectRow,
+): number {
+  const coarseName = coarseProjectNameFromMaterial(input.title, input.text) ?? "";
+  const material = `${input.title}\n${input.text.slice(0, DEFAULT_CLASSIFICATION_CONVERSATION_CHAR_LIMIT)}\n${coarseName}`;
+  const materialTerms = relevanceTerms(material);
+  const nameTerms = relevanceTerms(project.name);
+  const descriptionTerms = relevanceTerms(project.description.slice(0, 2_000));
+  let score = 0;
+  for (const term of nameTerms) {
+    if (materialTerms.has(term)) score += 4;
+  }
+  for (const term of descriptionTerms) {
+    if (materialTerms.has(term)) score += 1;
+  }
+  const compactMaterial = compactSearchText(material);
+  const compactName = compactSearchText(project.name);
+  if (compactName.length >= 4 && compactMaterial.includes(compactName)) score += 30;
+  if (coarseName && normalizedName(project.name) === normalizedName(coarseName)) score += 40;
+  return score;
+}
+
+export function selectRelevantProjects(
+  input: { title: string; text: string },
+  projectRows: ProjectRow[],
+  limit = MAX_RELEVANT_PROJECT_CANDIDATES,
+): ProjectRow[] {
+  return projectRows
+    .map((project) => ({ project, score: projectRelevanceScore(input, project) }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((left, right) => right.score - left.score || left.project.name.localeCompare(right.project.name, "zh-CN"))
+    .slice(0, Math.max(0, limit))
+    .map((candidate) => candidate.project);
 }
 
 export function isLikelyOverSpecificProjectName(
@@ -703,9 +761,16 @@ async function organizeConversation(
       .where(eq(conversationTags.conversationId, material.conversationId)),
   ]);
   const existingAssignment = assignmentRows[0];
-  const projectRows = allProjects.filter(
+  const eligibleProjects = allProjects.filter(
     (project) => !isLikelyOverSpecificProjectName(project.name, material.title),
   );
+  const projectRows = selectRelevantProjects(material, eligibleProjects);
+  if (existingAssignment?.lockedByUser) {
+    const lockedProject = allProjects.find((project) => project.id === existingAssignment.projectId);
+    if (lockedProject && !projectRows.some((project) => project.id === lockedProject.id)) {
+      projectRows.unshift(lockedProject);
+    }
+  }
   const activeExistingProjectId =
     existingAssignment?.projectId &&
     projectRows.some((project) => project.id === existingAssignment.projectId)
@@ -771,7 +836,7 @@ async function organizeConversation(
         projects: projectContext,
         existingTags: availableTags.map((tag) => tag.name),
         categoryHints: COARSE_PROJECT_HINTS,
-        currentProject: existingAssignment
+        currentProject: existingAssignment && (existingAssignment.lockedByUser || activeExistingProjectId)
           ? {
               projectId: existingAssignment.projectId,
               confidence: existingAssignment.confidence,
@@ -820,6 +885,16 @@ async function organizeConversation(
   let confidence = parsed.confidence;
   let projectId = parsed.existingProjectId;
   let reason = projectId ? "existing" : "none";
+  if (
+    !projectId &&
+    suggestedName &&
+    projectRelevanceScore(material, { id: "suggested", name: suggestedName, description: "" }) === 0
+  ) {
+    suggestedName = coarseProjectNameFromMaterial(material.title, material.text);
+    confidence = Math.min(confidence, 0.72);
+    projectId = resolveProjectId(null, suggestedName, projectRows);
+    reason = suggestedName ? "rejected_irrelevant_suggestion" : "irrelevant_suggestion";
+  }
   if (suggestedName && !projectId && isLikelyOverSpecificProjectName(suggestedName, material.title)) {
     suggestedName = coarseProjectNameFromMaterial(material.title, material.text);
     confidence = Math.min(confidence, 0.78);

@@ -115,15 +115,15 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
     return components.map(publicDeviceComponent);
   });
 
-  app.get<{ Params: { id: string } }>(
-    "/api/v1/device-components/:id/download",
+  app.get<{ Params: { componentId: string } }>(
+    "/api/v1/device-components/:componentId/download",
     async (request, reply) => {
       const user = await requireWebUser(request, reply);
       if (!user) return;
-      const { id } = z
-        .object({ id: z.enum(["chrome", "windows", "macos"]) })
+      const { componentId } = z
+        .object({ componentId: z.enum(["chrome", "windows", "macos"]) })
         .parse(request.params);
-      const component = await resolveDeviceComponent(id);
+      const component = await resolveDeviceComponent(componentId);
       if (!component?.absolutePath || !component.filename) {
         return reply.code(404).send({ error: "Device component is not available" });
       }

@@ -17,17 +17,17 @@ describe("V2.3 long-term reliability migration", () => {
     expect(sql).toMatch(/rebuilding_search/i);
   });
 
-  it("registers every migration through 0021 in order", async () => {
+  it("registers every migration through 0022 in order", async () => {
     const journal = JSON.parse(await readFile(
       new URL("../migrations/meta/_journal.json", import.meta.url),
       "utf8",
     )) as { entries: Array<{ idx: number; tag: string }> };
     expect(journal.entries.at(-1)).toMatchObject({
-      idx: 21,
-      tag: "0021_restore_freeze_hardening",
+      idx: 22,
+      tag: "0022_tag_identity_hardening",
     });
     expect(journal.entries.map((entry) => entry.idx)).toEqual(
-      Array.from({ length: 22 }, (_, index) => index),
+      Array.from({ length: 23 }, (_, index) => index),
     );
   });
 
@@ -52,5 +52,17 @@ describe("V2.3 long-term reliability migration", () => {
     expect(sql).toMatch(/staged_deleted_at timestamptz/i);
     expect(sql).toMatch(/recovery_required/i);
     expect(sql).toMatch(/restore_jobs_staging_cleanup_idx/i);
+  });
+
+  it("merges visually equivalent Han/Latin tags without losing relation state", async () => {
+    const sql = await readFile(
+      new URL("../migrations/0022_tag_identity_hardening.sql", import.meta.url),
+      "utf8",
+    );
+    expect(sql).toMatch(/tag_identity_map/i);
+    expect(sql).toMatch(/ON CONFLICT \(conversation_id, tag_id\) DO UPDATE/i);
+    expect(sql).toMatch(/bool_or\(link\.locked_by_user\)/i);
+    expect(sql).toMatch(/conversation_tags\.source = 'manual'/i);
+    expect(sql).toMatch(/DELETE FROM tags/i);
   });
 });
