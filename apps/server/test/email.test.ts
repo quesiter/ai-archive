@@ -31,7 +31,7 @@ vi.mock("../src/services/network-target.js", () => ({
   })),
 }));
 
-import { testReportEmail } from "../src/services/email.js";
+import { sendReportEmail, testReportEmail } from "../src/services/email.js";
 
 beforeEach(() => {
   mocks.settings = new Map([["smtp.password", "stored-secret"]]);
@@ -50,6 +50,46 @@ beforeEach(() => {
 });
 
 describe("report email test", () => {
+  it.each(["weekly", "monthly"] as const)("sends the complete %s report body instead of its summary", async (kind) => {
+    for (const [key, value] of Object.entries({
+      "smtp.host": "smtp.example.com",
+      "smtp.port": "587",
+      "smtp.secure": "false",
+      "smtp.from": "sender@example.com",
+      "smtp.to": "recipient@example.com",
+    })) {
+      mocks.settings.set(key, value);
+    }
+    const bodyMarkdown = `## 完整正文\n\n${"详细内容".repeat(5_000)}\n\n<script>alert("unsafe")</script>`;
+
+    const sent = await sendReportEmail({
+      id: "00000000-0000-4000-8000-000000000001",
+      kind,
+      projectId: null,
+      periodStart: new Date("2026-08-01T00:00:00.000Z"),
+      periodEnd: new Date("2026-09-01T00:00:00.000Z"),
+      title: kind === "weekly" ? "周报" : "月报",
+      summary: "这段摘要不应出现在邮件正文中",
+      bodyMarkdown,
+      emailStatus: "queued",
+      emailAttempts: 0,
+      emailSentAt: null,
+      emailError: null,
+      createdAt: new Date("2026-09-01T00:00:00.000Z"),
+    });
+
+    expect(sent).toBe(true);
+    expect(mocks.sendMail).toHaveBeenCalledWith(expect.objectContaining({
+      text: `${bodyMarkdown}\n\n在线查看报告：https://archive.example.test/reports/00000000-0000-4000-8000-000000000001`,
+    }));
+    const message = mocks.sendMail.mock.calls[0]?.[0] as { text: string; html: string };
+    expect(message.text).not.toContain("这段摘要不应出现在邮件正文中");
+    expect(message.html).toContain("详细内容".repeat(5_000));
+    expect(message.html).toContain("&lt;script&gt;alert(&quot;unsafe&quot;)&lt;/script&gt;");
+    expect(message.html).not.toContain("<script>");
+    expect(mocks.close).toHaveBeenCalledOnce();
+  });
+
   it("verifies SMTP and sends a real test message with the saved masked password", async () => {
     const result = await testReportEmail({
       host: "smtp.example.com",

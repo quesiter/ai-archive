@@ -99,13 +99,14 @@ export async function sendReportEmail(report: ReportRow): Promise<boolean> {
   if (!smtp.host || !smtp.port || !smtp.from || !smtp.to) return false;
   const transporter = await createSmtpTransport(smtp);
   const reportUrl = `${config.APP_ORIGIN}/reports/${report.id}`;
+  const reportBody = report.bodyMarkdown;
   try {
     await transporter.sendMail({
       from: smtp.from,
       to: smtp.to,
       subject: report.title,
-      text: `${report.summary}\n\n查看完整报告：${reportUrl}`,
-      html: `<p>${escapeHtml(report.summary)}</p><p><a href="${escapeHtml(reportUrl)}">查看完整报告</a></p>`,
+      text: `${reportBody}\n\n在线查看报告：${reportUrl}`,
+      html: `<div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(reportBody)}</div><p><a href="${escapeHtml(reportUrl)}">在线查看报告</a></p>`,
       disableFileAccess: true,
       disableUrlAccess: true,
     });
