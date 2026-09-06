@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, isNull, like, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db } from "../db.js";
@@ -28,7 +28,7 @@ import {
   createConversationXlsxExport,
   type ConversationExportFormat,
 } from "../services/conversation-export.js";
-import { mergeProjectIntoProject } from "../services/project-merge.js";
+import { mergeProjectIntoProject, mergeProjectsIntoProject } from "../services/project-merge.js";
 import { generateProjectContext } from "../services/project-context.js";
 import { selectLatestTimelineRevisions } from "../services/timeline.js";
 import { safeStoredError, writeOperationLog } from "../services/operation-log.js";
@@ -112,16 +112,23 @@ function liveProjectStatistics() {
     .as("project_conversation_stats");
 }
 
+export function buildProjectListFilter(input: { archived?: boolean; q?: string }) {
+  const query = normalizeProjectName(input.q ?? "").normalizedName;
+  return and(
+    input.archived === undefined ? undefined : eq(projects.archived, input.archived),
+    query ? like(projects.normalizedName, `%${query.replace(/[\\%_]/g, "\\$&")}%`) : undefined,
+  );
+}
+
 export function buildProjectListQuery(input: {
   limit: number;
   offset: number;
   archived?: boolean;
+  q?: string;
 }) {
   const statistics = liveProjectStatistics();
   const conversationCount = sql<number>`coalesce(${statistics.conversationCount}, 0)::int`;
-  const where = input.archived === undefined
-    ? undefined
-    : eq(projects.archived, input.archived);
+  const where = buildProjectListFilter(input);
 
   return db
     .select({
@@ -280,16 +287,19 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       limit: z.coerce.number().int().min(1).max(200).default(50),
       offset: z.coerce.number().int().min(0).default(0),
       archived: z.enum(["true", "false"]).optional(),
+      q: z.string().trim().max(200).default(""),
     }).parse(request.query);
     const archived = query.archived === undefined
       ? undefined
       : query.archived === "true";
-    const where = archived === undefined ? undefined : eq(projects.archived, archived);
+    const filter = { q: query.q, ...(archived !== undefined ? { archived } : {}) };
+    const where = buildProjectListFilter(filter);
     const [[totalRow], items] = await Promise.all([
       db.select({ total: count() }).from(projects).where(where),
       buildProjectListQuery({
         limit: query.limit,
         offset: query.offset,
+        q: query.q,
         ...(archived === undefined ? {} : { archived }),
       }),
     ]);
@@ -527,6 +537,31 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  app.post("/api/v1/projects/merge", async (request, reply) => {
+    const user = await requireWebUser(request, reply);
+    if (!user) return;
+    const input = z.object({
+      sourceProjectIds: z.array(z.string().uuid()).min(1),
+      targetProjectId: z.string().uuid(),
+      targetName: ProjectInputSchema.shape.name.optional(),
+    }).parse(request.body);
+    const result = await mergeProjectsIntoProject({
+      sourceProjectIds: input.sourceProjectIds,
+      targetProjectId: input.targetProjectId,
+      ...(input.targetName !== undefined ? { targetProjectName: input.targetName } : {}),
+    });
+    if (!result) return reply.code(404).send({ error: "Source or target project not found, or target is archived" });
+    await writeOperationLog({
+      scope: "classification",
+      message: `${result.sourceProjectIds.length} 个项目（${result.sourceProjectNames.join("、")}）已合并到“${result.targetProjectName}”`,
+      status: "completed",
+      entityType: "project",
+      entityId: result.targetProjectId,
+      metadata: { ...result, userId: user.id },
+    });
+    return result;
+  });
+
   app.post<{ Params: { id: string } }>(
     "/api/v1/projects/:id/merge",
     async (request, reply) => {
@@ -535,7 +570,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       const params = z.object({ id: z.string().uuid() }).parse(request.params);
       const input = z.object({
         targetProjectId: z.string().uuid(),
-        targetName: z.string().trim().min(1).max(200).optional(),
+        targetName: ProjectInputSchema.shape.name.optional(),
       }).parse(request.body);
       if (input.targetProjectId === params.id) {
         return reply.code(400).send({ error: "Source and target projects must be different" });

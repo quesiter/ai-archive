@@ -301,6 +301,19 @@ label { display: flex; flex-direction: column; gap: .4rem; font-size: .82rem; co
 .modal-form textarea { width: 100%; resize: vertical; }
 .modal-actions { display: flex; justify-content: flex-end; gap: .65rem; margin-top: .25rem; }
 .modal-merge-arrow { color: var(--muted); font-size: .75rem; font-weight: 700; text-align: center; }
+.merge-source-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.merge-source-fieldset legend { margin-bottom: .5rem; font-size: .86rem; font-weight: 600; }
+.merge-source-fieldset > input { width: 100%; }
+.merge-source-list { max-height: 200px; overflow-y: auto; margin: .5rem 0; border: 1px solid var(--line); border-radius: 8px; }
+.merge-source-option { display: flex; flex-direction: row; align-items: center; gap: .6rem; padding: .55rem .65rem; cursor: pointer; }
+.merge-source-option:hover { background: #f7fbfa; }
+.merge-source-option input { width: auto; margin: 0; flex: 0 0 auto; }
+.merge-source-option span { min-width: 0; overflow-wrap: anywhere; }
+.merge-source-option:has(input:disabled) { opacity: .55; cursor: default; }
+.merge-source-list > p { margin: .65rem; }
+.project-search-row { display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; margin-bottom: .85rem; }
+.project-search-row input { flex: 1 1 240px; min-width: 0; }
+.project-search-row > span { font-size: .78rem; }
 .modal-warning { margin: 0; padding: .65rem .72rem; border-radius: 8px; background: #fff4f4; color: #9b4150; font-size: .76rem; line-height: 1.5; }
 .panel-subtitle { margin: .24rem 0 0; color: var(--muted); font-size: .76rem; }
 .activity-panel { margin-bottom: 1rem; }

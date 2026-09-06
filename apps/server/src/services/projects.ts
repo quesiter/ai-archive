@@ -17,10 +17,8 @@ export function projectConflictError(): Error & { statusCode: number } {
 }
 
 export function isUniqueViolation(error: unknown): boolean {
-  return Boolean(
-    error &&
-      typeof error === "object" &&
-      "code" in error &&
-      (error as { code?: unknown }).code === "23505",
-  );
+  if (!error || typeof error !== "object") return false;
+  if ("code" in error && error.code === "23505") return true;
+  // Drizzle wraps PostgreSQL errors in a query error with the original cause.
+  return "cause" in error && error.cause !== error && isUniqueViolation(error.cause);
 }

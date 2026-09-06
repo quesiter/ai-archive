@@ -11,6 +11,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm --filter @ai-archive/contracts build && pnpm -r --if-present test",
     "test:e2e-api": "node scripts/e2e-api.mjs",
+    "test:e2e-projects": "node scripts/e2e-projects.mjs",
     "release:qualify": "node scripts/release-qualification.mjs",
     "docs:check": "node scripts/check-docs.mjs",
     "benchmark:search": "pnpm --filter @ai-archive/server benchmark:search",

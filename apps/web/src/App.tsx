@@ -44,15 +44,26 @@ function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const requestIdRef = useRef(0);
   const reload = useCallback(() => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError("");
     void loader()
-      .then(setData)
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
-      .finally(() => setLoading(false));
+      .then((value) => {
+        if (requestId === requestIdRef.current) setData(value);
+      })
+      .catch((reason) => {
+        if (requestId === requestIdRef.current) setError(reason instanceof Error ? reason.message : String(reason));
+      })
+      .finally(() => {
+        if (requestId === requestIdRef.current) setLoading(false);
+      });
   }, dependencies);
-  useEffect(reload, [reload]);
+  useEffect(() => {
+    reload();
+    return () => { requestIdRef.current += 1; };
+  }, [reload]);
   return { data, error, loading, reload };
 }
 
@@ -2009,11 +2020,13 @@ function ProjectTimeline({
 function Projects() {
   const overviewState = useLoad(() => api<UnknownRecord>("/api/v1/projects/overview"), []);
   const [projectOffset, setProjectOffset] = useState(0);
+  const [projectSearchInput, setProjectSearchInput] = useState("");
+  const [projectSearch, setProjectSearch] = useState("");
   const [unclassifiedOffset, setUnclassifiedOffset] = useState(0);
   const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(new Set());
   const projectState = useLoad(
-    () => api<PageEnvelope>(`/api/v1/projects?limit=40&offset=${projectOffset}`),
-    [projectOffset],
+    () => api<PageEnvelope>(`/api/v1/projects?${new URLSearchParams({ limit: "40", offset: String(projectOffset), q: projectSearch })}`),
+    [projectOffset, projectSearch],
   );
   const unclassifiedState = useLoad(
     () => api<PageEnvelope>(`/api/v1/unclassified?limit=40&offset=${unclassifiedOffset}`),
@@ -2027,7 +2040,9 @@ function Projects() {
   const [classificationMessage, setClassificationMessage] = useState("");
   const [classificationTask, setClassificationTask] = useState<UnknownRecord | null>(null);
   const [classificationRunMode, setClassificationRunMode] = useState<"economy" | "full">("economy");
-  const [mergeSourceId, setMergeSourceId] = useState("");
+  const [mergeSourceIds, setMergeSourceIds] = useState<string[]>([]);
+  const [mergeSourceSearch, setMergeSourceSearch] = useState("");
+  const [mergePending, setMergePending] = useState(false);
   const [mergeTargetId, setMergeTargetId] = useState("");
   const [mergeTargetName, setMergeTargetName] = useState("");
   const [mergeMessage, setMergeMessage] = useState("");
@@ -2041,6 +2056,7 @@ function Projects() {
   const overview = overviewState.data ?? {};
   const projectGroups = projectState.data?.items ?? [];
   const projectOptions = projectOptionsState.data ?? [];
+  const visibleMergeSources = filterConversationTags(projectOptions, mergeSourceSearch);
   const activeProjectGroups = projectGroups.filter((project) => !project.archived);
   const archivedProjectGroups = projectGroups.filter((project) => project.archived);
   const categorizedProjectGroups = activeProjectGroups.filter(
@@ -2171,27 +2187,33 @@ function Projects() {
 
   async function mergeProjects(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const source = projectOptions.find((project) => project.id === mergeSourceId);
+    if (mergePending) return;
+    const sources = projectOptions.filter((project) => mergeSourceIds.includes(project.id));
     const target = projectOptions.find((project) => project.id === mergeTargetId);
     const targetName = mergeTargetName.trim();
-    if (!source || !target || source.id === target.id || !targetName) return;
-    if (!window.confirm(`确认把项目“${source.name}”合并到“${target.name}”，并将合并后的项目命名为“${targetName}”？源项目将在迁移完成后删除，此操作不可撤销。`)) return;
+    if (!sources.length || sources.length !== mergeSourceIds.length || !target || target.archived || mergeSourceIds.includes(target.id) || !targetName) return;
+    if (!window.confirm(`确认把 ${sources.length} 个源项目（${sources.map((project) => `“${project.name}”`).join("、")}）合并到“${target.name}”，并将合并后的项目命名为“${targetName}”？所有源项目将在迁移完成后删除，此操作不可撤销。`)) return;
     setError("");
+    setMergePending(true);
     setMergeMessage("正在合并项目…");
     try {
-      const result = await api<UnknownRecord>(`/api/v1/projects/${source.id}/merge`, {
+      const result = await api<UnknownRecord>("/api/v1/projects/merge", {
         method: "POST",
-        ...jsonBody({ targetProjectId: target.id, targetName }),
+        ...jsonBody({ sourceProjectIds: mergeSourceIds, targetProjectId: target.id, targetName }),
       });
-      setMergeMessage(`合并完成：迁移 ${result.movedConversationCount ?? 0} 个会话和 ${result.movedReportCount ?? 0} 份关联报告。`);
-      setMergeSourceId("");
+      setMergeMessage(`已将 ${result.sourceProjectIds.length} 个源项目合并到“${result.targetProjectName}”：迁移 ${result.movedConversationCount ?? 0} 个会话和 ${result.movedReportCount ?? 0} 份关联报告。`);
+      setMergeSourceIds([]);
+      setMergeSourceSearch("");
       setMergeTargetId("");
       setMergeTargetName("");
       setProjectDialog(null);
+      setProjectOffset(0);
       reloadProjectsData();
     } catch (reason) {
       setMergeMessage("");
       setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setMergePending(false);
     }
   }
 
@@ -2388,7 +2410,8 @@ function Projects() {
               onClick={() => {
                 setError("");
                 setMergeMessage("");
-                setMergeSourceId("");
+                setMergeSourceIds([]);
+                setMergeSourceSearch("");
                 setMergeTargetId("");
                 setMergeTargetName("");
                 setProjectDialog("merge");
@@ -2403,6 +2426,42 @@ function Projects() {
             >新建项目</button>
           </div>
         </div>
+        <form
+          className="project-search-row"
+          role="search"
+          aria-label="项目搜索"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setProjectSearch(projectSearchInput.trim());
+            setProjectOffset(0);
+            setExpandedProjectIds(new Set());
+          }}
+        >
+          <input
+            aria-label="搜索项目名称"
+            type="search"
+            maxLength={200}
+            placeholder="搜索项目名称（含已归档项目）"
+            value={projectSearchInput}
+            onChange={(event) => setProjectSearchInput(event.target.value)}
+          />
+          <button type="submit" className="secondary">搜索</button>
+          {(projectSearchInput || projectSearch) && (
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                setProjectSearchInput("");
+                setProjectSearch("");
+                setProjectOffset(0);
+                setExpandedProjectIds(new Set());
+              }}
+            >清除</button>
+          )}
+          {projectSearch && !projectState.loading && !projectState.error && (
+            <span className="muted" role="status">找到 {projectState.data?.pagination.total ?? 0} 个项目</span>
+          )}
+        </form>
         {projectState.loading ? (
           <Loading label="加载项目中…" />
         ) : activeProjectGroups.length ? (
@@ -2490,7 +2549,7 @@ function Projects() {
               );
             })}
             {emptyProjectGroups.length > 0 && (
-              <details className="project-group empty-project-group">
+              <details className="project-group empty-project-group" key={projectSearch} open={projectSearch ? true : undefined}>
                 <summary>
                   <div className="project-group-title">
                     <strong>空项目</strong>
@@ -2516,18 +2575,20 @@ function Projects() {
             )}
           </div>
         ) : (
-          <Loading label="还没有项目。创建项目或运行整理后会在这里显示。" />
+          <Loading label={projectSearch
+            ? (archivedProjectGroups.length ? "本页匹配的项目均已归档，请查看下方列表。" : "没有找到匹配的项目，请更换关键词或清除搜索。")
+            : "本页没有未归档项目。可翻页查看，或创建项目。"} />
         )}
       </section>
 
-      {archivedProjectGroups.length > 0 && (
+      {!projectState.loading && archivedProjectGroups.length > 0 && (
         <section className="project-board">
           <div className="section-title-row">
             <div>
               <h2>已归档项目</h2>
               <p className="panel-subtitle">保留原有会话、标签、时间线和导出；恢复后可重新接收归类。</p>
             </div>
-            <span className="pill">{archivedProjectCount} 个</span>
+            <span className="pill">本页 {archivedProjectGroups.length} 个</span>
           </div>
           <div className="project-group-list">
             {archivedProjectGroups.map((project) => {
@@ -2648,21 +2709,49 @@ function Projects() {
 
       {projectDialog === "merge" && (
         <Modal
-          description="源项目的会话和关联报告将迁移到目标项目，随后删除源项目。"
-          onClose={() => setProjectDialog(null)}
+          description="可选择多个源项目，将全部会话和关联报告迁移到一个目标项目，随后删除源项目。"
+          onClose={() => { if (!mergePending) setProjectDialog(null); }}
           title="合并项目"
         >
-          <ErrorBanner message={error} />
+          <ErrorBanner message={error || projectOptionsState.error} />
           <form className="stack modal-form" onSubmit={mergeProjects}>
-            <label>A · 源项目
-              <select value={mergeSourceId} onChange={(event) => setMergeSourceId(event.target.value)} required>
-                <option value="">请选择要删除的源项目</option>
-                {projectOptions.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-              </select>
-            </label>
+            <fieldset className="merge-source-fieldset" disabled={mergePending || projectOptionsState.loading}>
+              <legend>A · 源项目（可多选，已选 {mergeSourceIds.length} 个）</legend>
+              <input
+                aria-label="搜索源项目"
+                type="search"
+                placeholder="搜索源项目名称"
+                value={mergeSourceSearch}
+                onChange={(event) => setMergeSourceSearch(event.target.value)}
+              />
+              <div className="merge-source-list">
+                {projectOptionsState.loading ? <p className="muted">加载项目中…</p> : visibleMergeSources.length ? (
+                  visibleMergeSources.map((project) => (
+                    <label className="merge-source-option" key={project.id}>
+                      <input
+                        type="checkbox"
+                        checked={mergeSourceIds.includes(project.id)}
+                        disabled={project.id === mergeTargetId}
+                        onChange={(event) => {
+                          const checked = event.target.checked;
+                          setMergeSourceIds((current) => checked
+                            ? [...current, project.id]
+                            : current.filter((id) => id !== project.id));
+                        }}
+                      />
+                      <span>{project.name}{project.archived ? "（已归档）" : ""}{project.id === mergeTargetId ? "（目标项目）" : ""}</span>
+                    </label>
+                  ))
+                ) : <p className="muted">没有匹配的源项目。</p>}
+              </div>
+              {mergeSourceIds.length > 0 && (
+                <button className="secondary small" type="button" onClick={() => setMergeSourceIds([])}>清空已选</button>
+              )}
+            </fieldset>
             <div className="modal-merge-arrow">↓ 会话和报告迁移至</div>
             <label>B · 目标项目
               <select
+                disabled={mergePending || projectOptionsState.loading}
                 value={mergeTargetId}
                 onChange={(event) => {
                   const targetId = event.target.value;
@@ -2673,12 +2762,12 @@ function Projects() {
                 required
               >
                 <option value="">请选择保留的目标项目</option>
-                {projectOptions.filter((project) => !project.archived && project.id !== mergeSourceId).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+                {projectOptions.filter((project) => !project.archived && !mergeSourceIds.includes(project.id)).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select>
             </label>
             <label>合并后项目名称
               <input
-                disabled={!mergeTargetId}
+                disabled={mergePending || !mergeTargetId}
                 maxLength={200}
                 onChange={(event) => setMergeTargetName(event.target.value)}
                 placeholder="请先选择目标项目"
@@ -2688,8 +2777,8 @@ function Projects() {
             </label>
             <p className="modal-warning">合并后无法撤销，请确认源项目与目标项目选择正确。</p>
             <div className="modal-actions">
-              <button className="secondary" onClick={() => setProjectDialog(null)} type="button">取消</button>
-              <button className="danger" disabled={!mergeSourceId || !mergeTargetId || !mergeTargetName.trim() || mergeSourceId === mergeTargetId}>确认合并</button>
+              <button className="secondary" disabled={mergePending} onClick={() => setProjectDialog(null)} type="button">取消</button>
+              <button className="danger" disabled={mergePending || !mergeSourceIds.length || !mergeTargetId || !mergeTargetName.trim() || mergeSourceIds.includes(mergeTargetId)}>{mergePending ? "正在合并…" : `确认合并${mergeSourceIds.length ? ` ${mergeSourceIds.length} 个项目` : ""}`}</button>
             </div>
           </form>
         </Modal>
