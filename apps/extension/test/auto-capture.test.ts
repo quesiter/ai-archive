@@ -7,6 +7,13 @@ import {
 } from "../lib/auto-capture";
 
 describe("auto capture activity gating", () => {
+  it("does not let a server repair bypass user activity gating", () => {
+    const now = 1_000_000;
+    expect(shouldDeferAutoCapture({
+      reason: "incremental_base_mismatch", forceFull: true,
+      lastUserActivityAt: now - 2_000, now,
+    })).toBe(true);
+  });
   it("waits for the page to go idle before auto capturing", () => {
     const now = 1_000_000;
     expect(

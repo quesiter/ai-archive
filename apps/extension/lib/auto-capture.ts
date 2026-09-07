@@ -17,6 +17,6 @@ export function shouldDeferAutoCapture(input: {
   lastUserActivityAt: number;
   now?: number | undefined;
 }): boolean {
-  if (input.forceFull || input.reason === "manual_retry") return false;
+  if (input.reason === "manual_retry") return false;
   return remainingIdleDelay(input.lastUserActivityAt, input.now) > 0;
 }

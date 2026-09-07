@@ -2,7 +2,7 @@
 
 知言归藏是个人自托管的 AI 会话归档、历史检索与项目演进系统。它把网页 AI 平台与 OpenClaw、Codex、Claude Code 的会话统一保存到 PostgreSQL，通过 Revision 保留历史，并提供项目、多标签、全文搜索、时间线、Project Context、周报/月报、导出和备份恢复。
 
-当前源码版本：V2.3.0。
+当前源码版本：V2.3.1。
 
 ## 核心能力
 

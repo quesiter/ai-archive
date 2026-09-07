@@ -38,7 +38,7 @@ type PaginationData = {
   hasMore: boolean;
 };
 type PageEnvelope = { items: UnknownRecord[]; pagination: PaginationData };
-const WEB_VERSION = "V2.3.0";
+const WEB_VERSION = "V2.3.1";
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);

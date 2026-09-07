@@ -1,6 +1,6 @@
 # 知言归藏 macOS 本地同步代理
 
-> 同步日期：2026-08-28。当前代理版本 `V2.3.0`，支持 Intel 与 Apple Silicon，要求 Node.js 22 或 24 LTS。代理只读 OpenClaw、Codex、Claude Code 会话，不读取模型密钥、Cookie 或 credential 文件。
+> 同步日期：2026-09-07。当前代理版本 `V2.3.1`，支持 Intel 与 Apple Silicon，要求 Node.js 22 或 24 LTS。代理只读 OpenClaw、Codex、Claude Code 会话，不读取模型密钥、Cookie 或 credential 文件。
 
 | 文档属性 | 内容 |
 | --- | --- |
@@ -11,7 +11,7 @@
 ## 1. 首次使用
 
 1. 在 Web“设备”页生成“OpenClaw/Codex 同步代理”配对码。
-2. 把 `ai-conversation-archive-macos-sync-V2.3.0.tar.gz` 复制到 Mac 并解压。
+2. 把 `ai-conversation-archive-macos-sync-V2.3.1.tar.gz` 复制到 Mac 并解压。
 3. 保持 `AI-Archive-Sync.command` 与 `openclaw-sync.cjs` 在同一目录。
 4. 双击 `AI-Archive-Sync.command`，输入配对码。
 5. 配对成功后输入 `Y` 安装当前用户 LaunchAgent。
@@ -136,7 +136,7 @@ rm -f "$HOME/.config/ai-archive/openclaw-sync.json"
 
 ```sh
 python scripts/package-macos-sync.py
-python scripts/package-macos-sync.py --verify release/ai-conversation-archive-macos-sync-V2.3.0.tar.gz
+python scripts/package-macos-sync.py --verify release/ai-conversation-archive-macos-sync-V2.3.1.tar.gz
 ```
 
 脚本校验目录结构、入口 shebang、LF 换行，并固定入口 0755、其他文件 0644。若双击只显示 `bad interpreter`，脚本未启动，也不会同步；重新用官方打包脚本生成或检查换行/执行权限。
@@ -151,4 +151,4 @@ python scripts/package-macos-sync.py --verify release/ai-conversation-archive-ma
 - 401：设备已撤销或配置与服务器不匹配，重新配对。
 - 后续答案缺失：升级代理，运行 `rebuild`，保留服务端旧 Revision。
 - 网络/5xx：代理从5秒指数退避，最高15分钟、最多6次；429遵循`Retry-After`；其他验证类4xx不无限重试。
-- Web设备状态长期不更新：检查heartbeat；正常时会回传V2.3.0、macOS、最近扫描/成功同步/错误和跟踪/跳过文件数。
+- Web设备状态长期不更新：检查heartbeat；正常时会回传V2.3.1、macOS、最近扫描/成功同步/错误和跟踪/跳过文件数。

@@ -65,14 +65,12 @@ export function decideCaptureAction(input: {
       message: "适配器版本变化，需要完整校验",
     };
   }
-  if (input.state.messageCount > input.light.messageCount) {
+  if (input.state.messageCount >= input.light.messageCount) {
     // A virtualized conversation can expose fewer messages while the user is
     // scrolling, or immediately after a full scan restores the original
     // viewport. That is not evidence that the branch changed. Require
     // stronger evidence before starting another expensive full scan.
     const branchEvidence =
-      input.previousStreaming ||
-      input.requestedReason === "new_session" ||
       input.requestedReason === "branch_changed" ||
       input.requestedReason === "manual_retry" ||
       input.requestedReason === "incremental_base_mismatch";
@@ -92,7 +90,7 @@ export function decideCaptureAction(input: {
         return {
           action: "append",
           triggerReason: input.requestedReason,
-          message: "Virtualized tail changed; try appending after the archived baseline",
+          message: "可见消息发生变化，先验证增量基线",
         };
       }
       return {
@@ -101,11 +99,13 @@ export function decideCaptureAction(input: {
         message: "检测到的是虚拟列表视口变化，已跳过",
       };
     }
-    return {
-      action: "full",
-      triggerReason: "branch_changed",
-      message: "消息数量减少，可能切换了分支",
-    };
+    if (input.state.messageCount > input.light.messageCount) {
+      return {
+        action: "full",
+        triggerReason: "branch_changed",
+        message: "消息数量减少，可能切换了分支",
+      };
+    }
   }
   if (
     input.state.messageCount === input.light.messageCount &&

@@ -14,6 +14,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 EXCLUDED_DIRECTORIES = {
+    ".e2e-data",
     ".git",
     ".output",
     ".pnpm-store",
@@ -23,6 +24,7 @@ EXCLUDED_DIRECTORIES = {
     "dist",
     "node_modules",
     "release",
+    "tmp",
 }
 EXCLUDED_FILES = {".env", ".DS_Store", "Thumbs.db", "desktop.ini"}
 REQUIRED_FILES = {

@@ -6,9 +6,38 @@ import type {
   MessageRole,
 } from "@ai-archive/contracts";
 import type { AdapterRuntime, ExtractedMessage } from "./adapters/types";
+import type { NativeConversation } from "./native-conversation";
 
-const sleep = (milliseconds: number) =>
-  new Promise((resolve) => setTimeout(resolve, milliseconds));
+export class CaptureInterruptedError extends Error {
+  constructor() {
+    super("采集已停止，页面控制权已交还给你");
+    this.name = "CaptureInterruptedError";
+  }
+}
+
+function checkActive(adapter: AdapterRuntime, sessionId: string | null, signal?: AbortSignal): void {
+  if (signal?.aborted || adapter.getSessionId() !== sessionId) throw new CaptureInterruptedError();
+}
+
+const sleep = (milliseconds: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new CaptureInterruptedError());
+    const abort = () => {
+      clearTimeout(timer);
+      reject(new CaptureInterruptedError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+
+export interface ConversationScanOptions {
+  triggerReason?: CaptureTriggerReason;
+  signal?: AbortSignal;
+  readNative?: (visible: ExtractedMessage[]) => Promise<NativeConversation | null>;
+}
 
 function elementScrollContainer(element: HTMLElement): HTMLElement {
   let current: HTMLElement | null = element.parentElement;
@@ -35,14 +64,16 @@ function atBottom(container: HTMLElement): boolean {
   );
 }
 
-async function waitForGeneration(adapter: AdapterRuntime): Promise<boolean> {
+async function waitForGeneration(adapter: AdapterRuntime, signal?: AbortSignal): Promise<boolean> {
   const deadline = Date.now() + 120_000;
+  const sessionId = adapter.getSessionId();
   let quietPasses = 0;
   while (Date.now() < deadline) {
+    checkActive(adapter, sessionId, signal);
     if (!adapter.isStreaming()) quietPasses += 1;
     else quietPasses = 0;
     if (quietPasses >= 2) return true;
-    await sleep(800);
+    await sleep(800, signal);
   }
   return false;
 }
@@ -52,6 +83,7 @@ export interface ReachConversationTopOptions {
   stablePasses?: number;
   delayMs?: number;
   wait?: (milliseconds: number) => Promise<void>;
+  signal?: AbortSignal;
 }
 
 export interface ReachConversationTopResult {
@@ -107,14 +139,17 @@ export async function reachConversationTop(
   const stablePasses = options.stablePasses ?? (chatGptHistory ? 12 : 2);
   const delayMs = options.delayMs ?? (chatGptHistory ? 650 : 450);
   const maxIterations = options.maxIterations ?? (chatGptHistory ? 160 : 100);
-  const wait = options.wait ?? sleep;
+  const wait = options.wait ?? ((milliseconds: number) => sleep(milliseconds, options.signal));
+  const sessionId = adapter.getSessionId();
   let container = initialContainer;
   let stableHeightPasses = 0;
   let previousEvidence = "";
   let visibleMessages = adapter.extractVisibleMessages();
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
+    checkActive(adapter, sessionId, options.signal);
     forceScrollToTop(container, visibleMessages[0]);
     await wait(delayMs);
+    checkActive(adapter, sessionId, options.signal);
     visibleMessages = adapter.extractVisibleMessages();
     const currentContainer = scrollContainerForMessages(visibleMessages, container);
     if (currentContainer !== container) {
@@ -174,16 +209,19 @@ export function mergeVisible(
 async function scanToBottom(
   initialContainer: HTMLElement,
   adapter: AdapterRuntime,
+  signal?: AbortSignal,
 ): Promise<{
   messages: ExtractedMessage[];
   bottomReached: boolean;
   container: HTMLElement;
 }> {
   const ordered: ExtractedMessage[] = [];
+  const sessionId = adapter.getSessionId();
   let container = initialContainer;
   let stableBottomPasses = 0;
   let previousHeight = -1;
   for (let iteration = 0; iteration < 2_000; iteration += 1) {
+    checkActive(adapter, sessionId, signal);
     const visibleMessages = adapter.extractVisibleMessages();
     const currentContainer = scrollContainerForMessages(visibleMessages, container);
     if (currentContainer !== container) {
@@ -206,7 +244,7 @@ async function scanToBottom(
       container.scrollTop + step,
       container.scrollHeight - container.clientHeight,
     );
-    await sleep(180);
+    await sleep(180, signal);
   }
   return { messages: ordered, bottomReached: atBottom(container), container };
 }
@@ -301,41 +339,56 @@ function fallbackTitle(messages: CaptureMessage[]): string | undefined {
 
 export async function scanConversation(
   adapter: AdapterRuntime,
-  options: {
-    triggerReason?: CaptureTriggerReason;
-  } = {},
+  options: ConversationScanOptions = {},
 ): Promise<CaptureSnapshotV1> {
   const sessionId = adapter.getSessionId();
   if (!sessionId) throw new Error("当前页面还没有稳定的对话 Session ID");
-  const generationStable = await waitForGeneration(adapter);
+  const generationStable = await waitForGeneration(adapter, options.signal);
+  checkActive(adapter, sessionId, options.signal);
   const initialMessages = adapter.extractVisibleMessages();
   if (initialMessages.length < 1) throw new Error("未识别到对话消息");
+  const native = await options.readNative?.(initialMessages);
+  checkActive(adapter, sessionId, options.signal);
   const initialContainer = elementScrollContainer(initialMessages[0]!.element);
-  const originalTop = initialContainer.scrollTop;
-  const originalHeight = initialContainer.scrollHeight;
-  const topResult = await reachConversationTop(initialContainer, adapter);
-  const scanned = await scanToBottom(topResult.container, adapter);
-  const finalStable = generationStable && !adapter.isStreaming();
-  const restoreRatio = originalHeight > initialContainer.clientHeight
-    ? originalTop / (originalHeight - initialContainer.clientHeight)
-    : 0;
-  scanned.container.scrollTop = Math.max(
-    0,
-    restoreRatio * Math.max(
+  // A full payload does not authorize moving the page. New sessions, branch
+  // changes and server-requested repairs must all remain passive, including
+  // when the user is idle or the archived append baseline is no longer mounted.
+  const allowScroll = options.triggerReason === "manual_retry";
+  const hasLayout = initialContainer.clientHeight > 0;
+  let topReached = Boolean(native) || hasLayout && atTop(initialContainer);
+  let bottomReached = Boolean(native) || hasLayout && atBottom(initialContainer);
+  let messages: CaptureMessage[] = native?.messages ?? initialMessages.map(
+    ({ key: _key, element: _element, ...message }, ordinal) => ({ ...message, ordinal }),
+  );
+  if (allowScroll && !native) {
+    const originalTop = initialContainer.scrollTop;
+    const originalHeight = initialContainer.scrollHeight;
+    const topResult = await reachConversationTop(initialContainer, adapter, {
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    const scanned = await scanToBottom(topResult.container, adapter, options.signal);
+    checkActive(adapter, sessionId, options.signal);
+    topReached = topResult.reached;
+    bottomReached = scanned.bottomReached;
+    messages = scanned.messages.map(
+      ({ key: _key, element: _element, ...message }, ordinal) => ({ ...message, ordinal }),
+    );
+    const restoreRatio = originalHeight > initialContainer.clientHeight
+      ? originalTop / (originalHeight - initialContainer.clientHeight)
+      : 0;
+    scanned.container.scrollTop = Math.max(
       0,
-      scanned.container.scrollHeight - scanned.container.clientHeight,
-    ),
-  );
+      restoreRatio * Math.max(
+        0,
+        scanned.container.scrollHeight - scanned.container.clientHeight,
+      ),
+    );
+  }
+  const finalStable = generationStable && !adapter.isStreaming();
 
-  const messages: CaptureMessage[] = scanned.messages.map(
-    ({ key: _key, element: _element, ...message }, ordinal) => ({
-      ...message,
-      ordinal,
-    }),
-  );
   const roles = new Set(messages.map((message) => message.role));
   const rolesValid = roles.has("user") && roles.has("assistant");
-  const complete = topResult.reached && scanned.bottomReached && finalStable && rolesValid;
+  const complete = topReached && bottomReached && finalStable && rolesValid;
   const fingerprintInput = messages
     .map((message) =>
       `${message.role}:${message.segments
@@ -343,12 +396,14 @@ export async function scanConversation(
         .join("|")}`,
     )
     .join("\n");
-  const title = adapter.getTitle() ?? fallbackTitle(messages);
+  const title = native?.title ?? adapter.getTitle() ?? fallbackTitle(messages);
+  const branchFingerprint = await sha256(fingerprintInput);
+  checkActive(adapter, sessionId, options.signal);
   return {
     schemaVersion: 1,
     provider: adapter.definition.provider,
     sessionId,
-    branchFingerprint: await sha256(fingerprintInput),
+    branchFingerprint,
     ...(title ? { title } : {}),
     canonicalUrl: adapter.getCanonicalUrl(),
     adapterVersion: adapter.definition.version,
@@ -357,14 +412,16 @@ export async function scanConversation(
     ...(options.triggerReason ? { triggerReason: options.triggerReason } : {}),
     completeness: {
       status: complete ? "complete" : "partial",
-      topReached: topResult.reached,
-      bottomReached: scanned.bottomReached,
+      topReached,
+      bottomReached,
       stable: finalStable,
       ...(!complete
         ? {
-            reason: !topResult.reached
+            reason: !allowScroll && (!topReached || !bottomReached)
+              ? "自动采集仅保存已加载消息；如需补全历史，请手动完整采集（会滚动页面）"
+              : !topReached
               ? "未能确认首轮"
-              : !scanned.bottomReached
+              : !bottomReached
                 ? "未能确认末轮"
                 : !finalStable
                   ? "回答仍在生成或内容不稳定"
@@ -385,14 +442,18 @@ export async function scanAppendedMessages(
     lastMessageId?: string | undefined;
     lastMessageTextHash?: string | undefined;
   },
-  options: {
-    triggerReason?: CaptureTriggerReason;
-  } = {},
+  options: ConversationScanOptions = {},
 ): Promise<CaptureDeltaV1 | null> {
   const sessionId = adapter.getSessionId();
   if (!sessionId) throw new Error("当前页面还没有稳定的对话 Session ID");
   if (adapter.isStreaming()) return null;
-  const visible = adapter.extractVisibleMessages();
+  const mounted = adapter.extractVisibleMessages();
+  const native = await options.readNative?.(mounted);
+  checkActive(adapter, sessionId, options.signal);
+  if (adapter.isStreaming()) return null;
+  const visible: CaptureMessage[] = native?.messages ?? mounted.map(
+    ({ key: _key, element: _element, ...message }) => message,
+  );
   let baseIndex = -1;
   for (const [index, message] of visible.entries()) {
     if (base.lastMessageId && message.externalMessageId === base.lastMessageId) {
@@ -426,11 +487,12 @@ export async function scanAppendedMessages(
   const appended = visible.slice(baseIndex + 1);
   if (!appended.length) return null;
   const appendedMessages: CaptureMessage[] = appended.map(
-    ({ key: _key, element: _element, ...message }, index) => ({
+    (message, index) => ({
       ...message,
       ordinal: base.messageCount + index,
     }),
   );
+  checkActive(adapter, sessionId, options.signal);
   return {
     schemaVersion: 1,
     captureMode: "append",

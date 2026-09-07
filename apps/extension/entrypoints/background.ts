@@ -129,7 +129,26 @@ class UploadHttpError extends Error {
   }
 }
 
-async function flushOutbox(force = false): Promise<FlushResult> {
+let flushInFlight: Promise<FlushResult> = Promise.resolve({ sent: 0, remaining: 0 });
+const captureOutcomes = new Map<string, Pick<FlushResult, "lastResult" | "requiresFullCapture">>();
+
+function rememberCaptureOutcome(id: string, outcome: Pick<FlushResult, "lastResult" | "requiresFullCapture">): void {
+  captureOutcomes.set(id, outcome);
+  if (captureOutcomes.size > 100) captureOutcomes.delete(captureOutcomes.keys().next().value!);
+}
+
+function flushOutbox(force = false, targetId?: string): Promise<FlushResult> {
+  // Alarms, multiple tabs and manual retries share one queue. Serial uploads
+  // keep dependent append revisions ordered and avoid simultaneous retries.
+  const next = flushInFlight.catch(() => ({ sent: 0, remaining: 0 }))
+    .then(() => performFlushOutbox(force, targetId));
+  flushInFlight = next;
+  return next;
+}
+
+async function performFlushOutbox(force = false, targetId?: string): Promise<FlushResult> {
+  const previousOutcome = targetId ? captureOutcomes.get(targetId) : undefined;
+  if (previousOutcome) return { sent: 0, remaining: await outboxCount(), ...previousOutcome };
   const settings = (await browser.storage.local.get("deviceToken")) as ExtensionSettings;
   const serverUrl = normalizedServerUrl(packagedServerOrigin());
   if (!settings.deviceToken) {
@@ -171,18 +190,20 @@ async function flushOutbox(force = false): Promise<FlushResult> {
           isDeltaPayload(record.payload)
         ) {
           await remove(record.id);
+          rememberCaptureOutcome(record.id, { requiresFullCapture: true });
           await setStatus({
             status: "failed",
             provider: record.payload.provider,
             sessionId: record.payload.sessionId,
             captureMode: "append",
-            message: "增量基线不一致，正在回退完整采集",
+            message: "增量基线不一致，将重新读取已加载的会话数据",
             updatedAt: new Date().toISOString(),
           });
           return {
             sent,
             remaining: await outboxCount(),
-            requiresFullCapture: true,
+            requiresFullCapture: !targetId || targetId === record.id,
+            ...(lastResult ? { lastResult } : {}),
           };
         }
         if (response.status === 401) {
@@ -198,7 +219,7 @@ async function flushOutbox(force = false): Promise<FlushResult> {
             message: authMessage,
             updatedAt: new Date().toISOString(),
           });
-          return { sent, remaining: await outboxCount() };
+          return { sent, remaining: await outboxCount(), ...(lastResult ? { lastResult } : {}) };
         }
         throw new UploadHttpError(payload.error ?? `上传失败 (${response.status})`, response.status);
       }
@@ -209,15 +230,24 @@ async function flushOutbox(force = false): Promise<FlushResult> {
         completeness?: "complete" | "partial";
         captureMode?: "full" | "append" | "import";
       };
-      lastResult = {
-        ...result,
-        captureMode,
-        messageCount: result.messageCount ?? payloadMessageCount(record.payload),
-      };
+      if (!targetId || targetId === record.id) {
+        lastResult = {
+          ...result,
+          captureMode,
+          messageCount: result.messageCount ?? payloadMessageCount(record.payload),
+        };
+      }
+      rememberCaptureOutcome(record.id, {
+        lastResult: {
+          ...result,
+          captureMode,
+          messageCount: result.messageCount ?? payloadMessageCount(record.payload),
+        },
+      });
       await remove(record.id);
       sent += 1;
       await setStatus({
-        status: "complete",
+        status: result.completeness ?? (isDeltaPayload(record.payload) ? "complete" : record.payload.completeness.status),
         provider: record.payload.provider,
         sessionId: record.payload.sessionId,
         captureMode,
@@ -263,16 +293,17 @@ export default defineBackground(() => {
     if (message.type === "enqueueCapture") {
       return (async () => {
         const payload = CapturePayloadV1Schema.parse(message.payload);
-        await enqueue(payload);
+        const captureId = await enqueue(payload);
+        captureOutcomes.delete(captureId);
         await setStatus({
           status: "queued",
           provider: payload.provider,
           sessionId: payload.sessionId,
           captureMode: isDeltaPayload(payload) ? "append" : "full",
-          message: isDeltaPayload(payload) ? "增量采集等待上传" : "完整采集等待上传",
+          message: isDeltaPayload(payload) ? "增量采集等待上传" : "会话快照等待上传",
           updatedAt: new Date().toISOString(),
         });
-        return flushOutbox();
+        return flushOutbox(false, captureId);
       })();
     }
     if (message.type === "captureState") {

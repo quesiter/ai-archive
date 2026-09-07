@@ -47,7 +47,7 @@ for (const check of checks) {
 }
 
 const report = {
-  version: "V2.3.0",
+  version: "V2.3.1",
   startedAt: startedAt.toISOString(),
   completedAt: new Date().toISOString(),
   passed: results.length === checks.length && results.every((item) => item.status === "PASS"),

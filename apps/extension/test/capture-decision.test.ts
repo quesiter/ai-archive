@@ -128,7 +128,7 @@ describe("capture decision state machine", () => {
     ).toMatchObject({ action: "append", triggerReason: "new_messages" });
   });
 
-  it("still rescans a shorter branch after generation or an explicit route change", () => {
+  it("validates append before assuming a smaller viewport is a new branch, including after generation", () => {
     const shorter = {
       ...light,
       messageCount: 3,
@@ -142,13 +142,16 @@ describe("capture decision state machine", () => {
         requestedReason: "stream_finished",
         previousStreaming: true,
       }),
-    ).toMatchObject({ action: "full", triggerReason: "branch_changed" });
+    ).toMatchObject({ action: "append" });
     expect(
       decideCaptureAction({
         light: shorter,
         state: { ...state, messageCount: 24 },
         requestedReason: "new_session",
       }),
-    ).toMatchObject({ action: "full", triggerReason: "branch_changed" });
+    ).toMatchObject({ action: "append" });
+    expect(decideCaptureAction({
+      light: shorter, state: { ...state, messageCount: 24 }, requestedReason: "branch_changed",
+    })).toMatchObject({ action: "full", triggerReason: "branch_changed" });
   });
 });

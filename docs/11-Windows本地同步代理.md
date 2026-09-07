@@ -1,6 +1,6 @@
 # 知言归藏 Windows 本地同步代理
 
-> 同步日期：2026-08-28。当前代理版本 `V2.3.0`。代理只读扫描本地 OpenClaw、Codex、Claude Code 会话并通过设备 Token 上传；不会读取模型密钥、Cookie 或 credential 文件。
+> 同步日期：2026-09-07。当前代理版本 `V2.3.1`。代理只读扫描本地 OpenClaw、Codex、Claude Code 会话并通过设备 Token 上传；不会读取模型密钥、Cookie 或 credential 文件。
 
 | 文档属性 | 内容 |
 | --- | --- |
@@ -11,7 +11,7 @@
 ## 1. 首次使用
 
 1. 安装 Node.js 22 或 24 LTS，确认 `node` 在 `PATH` 中。
-2. 解压 `ai-conversation-archive-windows-sync-V2.3.0.zip` 到固定目录，例如 `C:\AIArchiveSync`。
+2. 解压 `ai-conversation-archive-windows-sync-V2.3.1.zip` 到固定目录，例如 `C:\AIArchiveSync`。
 3. 在 Web“设备”页创建“OpenClaw/Codex 同步代理”配对码。
 4. 双击 `sync-local-windows.bat`，输入配对码。
 5. 默认先执行近期安全重建，再安装并启动当前用户的隐藏计划任务。
@@ -127,6 +127,6 @@ Remove-Item -LiteralPath "$env:USERPROFILE\.config\ai-archive\openclaw-sync.json
 - 401：设备撤销或 Token/服务器不匹配，重新配对。
 - 409 incremental base mismatch：代理应自动回退完整快照；持续出现时检查状态文件和服务日志。
 - 网络/5xx：代理从5秒指数退避，最高15分钟、最多6次；429遵循`Retry-After`；其他验证类4xx不无限重试。
-- Web设备状态长期不更新：检查heartbeat请求；正常时会回传V2.3.0、Windows、最近扫描/成功同步/错误和跟踪/跳过文件数。
+- Web设备状态长期不更新：检查heartbeat请求；正常时会回传V2.3.1、Windows、最近扫描/成功同步/错误和跟踪/跳过文件数。
 
-发布包由仓库根目录 `pnpm package:windows-sync` 生成，默认输出 `release/ai-conversation-archive-windows-sync-V2.3.0.zip`，并复用同一core脚本。
+发布包由仓库根目录 `pnpm package:windows-sync` 生成，默认输出 `release/ai-conversation-archive-windows-sync-V2.3.1.zip`，并复用同一core脚本。

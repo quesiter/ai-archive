@@ -5,12 +5,15 @@ import {
   shouldDeferAutoCapture,
 } from "../lib/auto-capture";
 import { decideCaptureAction } from "../lib/capture-decision";
+import { createNativeConversationReader, type NativeConversation } from "../lib/native-conversation";
 import type { CaptureUiState, ExtensionMessage, ExtensionSettings } from "../lib/messages";
 import {
   lightweightConversationFingerprint,
   messageTextFingerprint,
   scanAppendedMessages,
   scanConversation,
+  CaptureInterruptedError,
+  type ConversationScanOptions,
   type LightweightConversationFingerprint,
 } from "../lib/scanner";
 import type {
@@ -61,7 +64,6 @@ const providerLabels: Record<string, string> = {
 const EFFECTIVE_CHANGE_DEBOUNCE_MS = 4_000;
 const STREAMING_RECHECK_MS = 2_000;
 const SESSION_POLL_MS = 3_000;
-const SKIPPED_STATUS_MS = 1_400;
 const AUTO_CAPTURE_DEFERRED_MESSAGE = "检测到你正在操作页面，自动采集已暂缓";
 
 interface LocalConversationState extends LightweightConversationFingerprint {
@@ -72,6 +74,7 @@ interface LocalConversationState extends LightweightConversationFingerprint {
   lastFullScanAt?: string;
   lastChangeDetectedAt?: string;
   completeness?: "complete" | "partial";
+  lastObservedSignature?: string;
 }
 
 interface FloatingIndicator {
@@ -137,7 +140,6 @@ function createFloatingIndicator(actions: {
         box-shadow: 0 9px 26px rgba(20,83,76,.18); cursor: pointer; display: grid; place-items: center;
         position: relative; font-weight: 900; transform: translateX(7px); transition: transform .16s ease; }
       .toggle:hover, .toggle:focus-visible { transform: translateX(0); }
-      .toggle.scanning, .toggle.syncing, .toggle.checking, .toggle.waiting { animation: tab-breathe 1.5s ease-in-out infinite; }
       .dot { position: absolute; right: -2px; top: -2px; width: 11px; height: 11px; border-radius: 50%;
         background: #81928e; border: 2px solid #f8fffd; }
       .dot.checking, .dot.waiting, .dot.scanning, .dot.syncing, .dot.queued { background: #4c79b8; }
@@ -152,7 +154,7 @@ function createFloatingIndicator(actions: {
       .provider { max-width: 184px; padding: 3px 7px; border-radius: 6px; background: rgba(222,246,240,.82);
         color:#177564; font-size:10px; font-weight:700; overflow-wrap:anywhere; line-height:1.25; }
       .status { display:flex; align-items:center; gap:7px; margin-top:12px; font-size:12px; font-weight:780; }
-      .message { margin:8px 0 12px; color:#60787d; font-size:11px; line-height:1.5; max-height:48px; overflow:hidden; }
+      .message { margin:8px 0 12px; color:#60787d; font-size:11px; line-height:1.5; overflow-wrap:anywhere; }
       .meta { display:grid; grid-template-columns: 74px 1fr; gap: 5px 8px; margin: 0 0 12px; font-size:10.5px; color:#60787d; }
       .meta span:nth-child(2n) { color:#17343b; overflow-wrap:anywhere; }
       .actions { display:flex; gap:7px; }
@@ -160,7 +162,6 @@ function createFloatingIndicator(actions: {
         font-family:inherit; font-size:10.5px; font-weight:750; cursor:pointer; }
       button.action.secondary { background:#e6f4f1; color:#147461; }
       button.action:disabled { opacity:.45; cursor:not-allowed; }
-      @keyframes tab-breathe { 0%,100% { filter:saturate(1); } 50% { filter:saturate(1.35); } }
       @media (max-width: 520px) { .shell { top: 74px; } .panel { right: 50px; width: min(282px, calc(100vw - 64px)); } }
     </style>
     <div class="shell">
@@ -174,7 +175,7 @@ function createFloatingIndicator(actions: {
           <span>消息数</span><span class="count">-</span>
           <span>上次同步</span><span class="last">-</span>
         </div>
-        <div class="actions"><button class="action retry" type="button">重新采集</button><button class="action secondary pause" type="button">暂停本站</button></div>
+        <div class="actions"><button class="action retry" type="button" title="补全历史消息，会滚动页面">完整采集（会滚动）</button><button class="action secondary pause" type="button">暂停本站</button></div>
       </section>
       <button class="toggle" type="button" aria-label="查看知言归藏采集状态" aria-expanded="false"><span>知</span><span class="dot"></span></button>
     </div>`;
@@ -214,7 +215,7 @@ function createFloatingIndicator(actions: {
       lastState.captureMode === "append"
         ? "增量"
         : lastState.captureMode === "full"
-          ? "完整"
+          ? "快照"
           : "-";
     count.textContent = typeof lastState.messageCount === "number" ? String(lastState.messageCount) : "-";
     last.textContent = lastState.updatedAt ? new Date(lastState.updatedAt).toLocaleString() : "-";
@@ -261,14 +262,12 @@ export default defineContentScript({
     let evaluationInFlight = false;
     let debounceTimer: ReturnType<typeof setTimeout> | undefined;
     let scheduledDueAt = 0;
-    let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let lastUrl = location.href;
     let lastSessionKey = "";
     let indicator: FloatingIndicator | undefined;
     let lastPublishedState: CaptureUiState | undefined;
     let observer: MutationObserver | undefined;
     let observedRoot: HTMLElement | null = null;
-    let previousLightSignature = "";
     let previousStreaming = false;
     let pendingReason: CaptureTriggerReason | null = null;
     let pendingDelay: number | undefined;
@@ -277,18 +276,17 @@ export default defineContentScript({
     let autoCaptureDeferred = false;
     let suppressObserverMutations = false;
     let invalidated = false;
-    let completedCaptureBaseline: {
-      sessionKey: string;
-      messageCount: number;
-      capturedAt: number;
-    } | null = null;
+    const nativeReader = createNativeConversationReader();
+    let nativeRead: Promise<NativeConversation | null> | undefined;
+    let captureController: AbortController | undefined;
+    let manualCaptureActive = false;
 
     const reasonPriority: Record<CaptureTriggerReason, number> = {
       manual_retry: 100,
       new_session: 95,
       branch_changed: 94,
       adapter_upgraded: 93,
-      incremental_base_mismatch: 92,
+      incremental_base_mismatch: 99,
       stream_finished: 80,
       new_messages: 70,
       historical_import: 60,
@@ -332,22 +330,6 @@ export default defineContentScript({
       return next;
     }
 
-    function captureSessionKey(provider: string, sessionId: string): string {
-      return `${provider}:${sessionId}`;
-    }
-
-    function rememberCompletedCapture(
-      provider: string,
-      sessionId: string,
-      messageCount: number,
-    ): void {
-      completedCaptureBaseline = {
-        sessionKey: captureSessionKey(provider, sessionId),
-        messageCount,
-        capturedAt: Date.now(),
-      };
-    }
-
     async function isPaused(): Promise<boolean> {
       const settings = (await browser.storage.local.get("pausedHosts")) as ExtensionSettings;
       return Boolean(settings.pausedHosts?.[location.hostname]);
@@ -357,6 +339,7 @@ export default defineContentScript({
       const settings = (await browser.storage.local.get("pausedHosts")) as ExtensionSettings;
       const pausedHosts = { ...(settings.pausedHosts ?? {}) };
       pausedHosts[location.hostname] = !pausedHosts[location.hostname];
+      if (pausedHosts[location.hostname]) captureController?.abort();
       await browser.storage.local.set({ pausedHosts });
       indicator?.setPaused(Boolean(pausedHosts[location.hostname]));
     }
@@ -387,6 +370,7 @@ export default defineContentScript({
     function recordUserActivity(): void {
       lastUserActivityAt = Date.now();
       autoCaptureDeferred = false;
+      if (manualCaptureActive) captureController?.abort();
     }
 
     function autoCaptureIdleDelay(): number {
@@ -394,6 +378,8 @@ export default defineContentScript({
     }
 
     async function publishState(state: Omit<CaptureUiState, "updatedAt">): Promise<void> {
+      const fields = ["status", "provider", "sessionId", "triggerReason", "captureMode", "messageCount", "outboxCount", "message"] as const;
+      if (lastPublishedState && fields.every((field) => lastPublishedState?.[field] === state[field])) return;
       const fullState = { ...state, updatedAt: new Date().toISOString() };
       lastPublishedState = fullState;
       indicator?.update(fullState);
@@ -429,6 +415,7 @@ export default defineContentScript({
               : mutation.target.parentElement;
           if (!target) return false;
           if (target.closest("#ai-archive-floating-indicator")) return false;
+          if (target.closest("input, textarea, [contenteditable='true'], [role='textbox']")) return false;
           if (!observedRoot?.contains(target)) return false;
           return true;
         });
@@ -484,24 +471,21 @@ export default defineContentScript({
     }
 
     function publishSkipped(light: LightweightConversationFingerprint): void {
+      // Routine checks should not flash "unchanged", reset a successful save
+      // indicator or write Chrome storage on every unrelated DOM mutation.
+      if (
+        lastPublishedState?.provider === light.provider &&
+        lastPublishedState.sessionId === light.sessionId &&
+        ["idle", "complete", "partial", "queued", "failed"].includes(lastPublishedState.status)
+      ) return;
       void publishState({
-        status: "skipped",
+        status: "idle",
         provider: light.provider,
         sessionId: light.sessionId,
         triggerReason: "new_messages",
         messageCount: light.messageCount,
-        message: "内容未变化，已跳过",
+        message: "自动保存已开启，页面位置保持不变。",
       });
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => {
-        void publishState({
-          status: "idle",
-          provider: light.provider,
-          sessionId: light.sessionId,
-          messageCount: light.messageCount,
-          message: "待机，只会在检测到有效变化后采集。",
-        });
-      }, SKIPPED_STATUS_MS);
     }
 
     async function enqueuePayload(payload: CapturePayloadV1) {
@@ -536,6 +520,16 @@ export default defineContentScript({
         isDeltaPayload(payload)
           ? payload.appendedMessages.at(-1)
           : payload.messages.at(-1);
+      const observedSignature = lightSignature(light);
+      if (completeness === "partial") {
+        const previous = await loadConversationState(payload.provider, payload.sessionId);
+        if (previous?.completeness === "complete" && payload.triggerReason !== "incremental_base_mismatch") {
+          // A viewport-only save is useful evidence, but must not replace the
+          // trusted archive baseline used to append the next complete answer.
+          await saveConversationState({ ...previous, lastObservedSignature: observedSignature });
+          return;
+        }
+      }
       await saveConversationState({
         provider: payload.provider,
         sessionId: payload.sessionId,
@@ -557,10 +551,8 @@ export default defineContentScript({
           : {}),
         lastChangeDetectedAt: new Date().toISOString(),
         completeness,
+        lastObservedSignature: observedSignature,
       });
-      if (completeness === "complete") {
-        rememberCompletedCapture(payload.provider, payload.sessionId, payloadMessageCount);
-      }
     }
 
     async function withObserverSuppressed<T>(operation: () => Promise<T>): Promise<T> {
@@ -587,22 +579,45 @@ export default defineContentScript({
         triggerReason: reason,
         captureMode: "full",
         messageCount: light.messageCount,
-        message: reason === "new_session"
-          ? "正在回溯会话开头并加载历史消息"
-          : "正在执行完整校验扫描",
+        message: reason === "manual_retry"
+          ? "正在补全历史消息，必要时会滚动页面；操作页面可停止"
+          : "正在归档已加载消息，保持页面位置不变",
       });
-      const snapshot = await scanConversation(adapter, { triggerReason: reason });
+      const snapshot = await scanConversation(adapter, scanOptions(adapter, reason));
+      if (captureController?.signal.aborted || adapter.getSessionId() !== light.sessionId) {
+        throw new CaptureInterruptedError();
+      }
       const result = await enqueuePayload(snapshot);
       await updateStateFromPayload(snapshot, light, result?.lastResult);
       await publishState({
-        status: snapshot.completeness.status,
+        status: result?.lastResult ? snapshot.completeness.status : "queued",
         provider: snapshot.provider,
         sessionId: snapshot.sessionId,
         triggerReason: reason,
         captureMode: "full",
         messageCount: snapshot.messages.length,
-        message: `${snapshot.messages.length} 条消息已完整归档`,
+        message: !result?.lastResult
+          ? `${snapshot.messages.length} 条消息已保存到本地队列，等待上传`
+          : snapshot.completeness.status === "complete"
+          ? `${snapshot.messages.length} 条消息已完整归档`
+          : `已保存 ${snapshot.messages.length} 条消息；${snapshot.completeness.reason ?? "历史可能尚未加载完整"}`,
       });
+    }
+
+    function scanOptions(
+      adapter: NonNullable<ReturnType<typeof adapterForLocation>>,
+      reason: CaptureTriggerReason,
+    ): ConversationScanOptions {
+      return {
+        triggerReason: reason,
+        ...(captureController ? { signal: captureController.signal } : {}),
+        readNative: (visible) => nativeRead ??= nativeReader(
+          adapter.definition.provider,
+          adapter.getSessionId() ?? "",
+          visible.flatMap((message) => message.externalMessageId ? [message.externalMessageId] : []),
+          captureController?.signal,
+        ),
+      };
     }
 
     async function runAppendCapture(
@@ -626,7 +641,7 @@ export default defineContentScript({
         branchFingerprint: state.branchFingerprint,
         lastMessageId: state.lastMessageId,
         lastMessageTextHash: state.lastMessageTextHash,
-      }, { triggerReason: reason });
+      }, scanOptions(adapter, reason));
       if (!delta) return false;
       await publishState({
         status: "scanning",
@@ -637,28 +652,25 @@ export default defineContentScript({
         messageCount: delta.baseMessageCount + delta.appendedMessages.length,
         message: `正在增量同步 ${delta.appendedMessages.length} 条新增消息`,
       });
+      if (captureController?.signal.aborted || adapter.getSessionId() !== light.sessionId) {
+        throw new CaptureInterruptedError();
+      }
       const result = await enqueuePayload(delta);
       if (result?.requiresFullCapture) {
         schedule("incremental_base_mismatch", 200, { forceFull: true });
         return true;
       }
-      await updateStateFromPayload(delta, {
-        ...light,
-        messageCount: delta.baseMessageCount + delta.appendedMessages.length,
-        lastMessageId: delta.appendedMessages.at(-1)?.externalMessageId,
-        lastMessageRole: delta.appendedMessages.at(-1)?.role,
-        lastMessageTextHash: delta.appendedMessages.at(-1)
-          ? await messageTextFingerprint(delta.appendedMessages.at(-1)!)
-          : light.lastMessageTextHash,
-      }, result?.lastResult);
+      await updateStateFromPayload(delta, light, result?.lastResult);
       await publishState({
-        status: "complete",
+        status: result?.lastResult ? "complete" : "queued",
         provider: delta.provider,
         sessionId: delta.sessionId,
         triggerReason: reason,
         captureMode: "append",
         messageCount: delta.baseMessageCount + delta.appendedMessages.length,
-        message: `增量同步完成，新增 ${delta.appendedMessages.length} 条消息`,
+        message: result?.lastResult
+          ? `增量同步完成，新增 ${delta.appendedMessages.length} 条消息`
+          : `${delta.appendedMessages.length} 条新增消息已保存到本地队列，等待上传`,
       });
       return true;
     }
@@ -676,6 +688,9 @@ export default defineContentScript({
       // hashing can yield to several MutationObserver callbacks.
       evaluationInFlight = true;
       scanning = true;
+      captureController = new AbortController();
+      manualCaptureActive = reason === "manual_retry";
+      nativeRead = undefined;
       let activeLight: LightweightConversationFingerprint | null = null;
       let preserveStreaming = false;
       let discardPending = false;
@@ -692,7 +707,7 @@ export default defineContentScript({
         }
         attachObserver();
         const light = await lightweightConversationFingerprint(adapter);
-        if (!light) {
+        if (!light || light.messageCount === 0) {
           discardPending = true;
           return;
         }
@@ -742,26 +757,11 @@ export default defineContentScript({
           messageCount: light.messageCount,
           message: "等待 AI 生成完成",
         });
-        schedule("stream_finished", STREAMING_RECHECK_MS);
+        schedule(reason === "manual_retry" ? reason : "stream_finished", STREAMING_RECHECK_MS, options);
         return;
       }
 
-      const baseline = completedCaptureBaseline;
-      const sameCapture = baseline?.sessionKey === captureSessionKey(
-        light.provider,
-        light.sessionId,
-      );
-      const recentViewportRemount =
-        !options.forceFull &&
-        !previousStreaming &&
-        reason === "new_messages" &&
-        state?.completeness === "complete" &&
-        sameCapture &&
-        baseline !== null &&
-        light.messageCount < baseline.messageCount &&
-        (light.virtualized === true || Date.now() - baseline.capturedAt < 20_000);
-      if (recentViewportRemount) {
-        previousLightSignature = signature;
+      if (!options.forceFull && state?.lastObservedSignature === signature) {
         publishSkipped(light);
         return;
       }
@@ -774,23 +774,14 @@ export default defineContentScript({
         previousStreaming,
       });
 
-      if (
-        decision.action === "skip" ||
-        (!state && previousLightSignature === signature && reason !== "new_session")
-      ) {
-        previousLightSignature = signature;
+      if (decision.action === "skip") {
         publishSkipped(light);
         return;
       }
 
-      previousLightSignature = signature;
       if (decision.action === "full") {
         await withObserverSuppressed(async () => {
           await runFullCapture(adapter, light, decision.triggerReason);
-          const settled = await lightweightConversationFingerprint(adapter);
-          if (settled && !settled.streaming) {
-            previousLightSignature = lightSignature(settled);
-          }
           // One delayed lightweight check catches a message that finished
           // mounting while the full scan was running, without immediately
           // launching another full DOM walk.
@@ -807,15 +798,10 @@ export default defineContentScript({
             decision.triggerReason,
           );
           if (!appendOk) {
-            // A missing incremental baseline is not proof that the archive is
-            // unchanged. Virtualized providers can unmount the archived tail,
-            // so fall back to the authoritative full walk instead of silently
-            // skipping potentially new messages.
+            // A virtualized page can unmount the archived tail. Preserve the
+            // loaded messages in a passive snapshot; only manual capture may
+            // scroll to fill any missing history.
             await runFullCapture(adapter, light, "branch_changed");
-          }
-          const settled = await lightweightConversationFingerprint(adapter);
-          if (settled && !settled.streaming) {
-            previousLightSignature = lightSignature(settled);
           }
           schedule("new_messages", 1_000);
         });
@@ -823,8 +809,9 @@ export default defineContentScript({
       }
       publishSkipped(light);
       } catch (error) {
+        if (invalidated) return;
         await publishState({
-          status: "failed",
+          status: error instanceof CaptureInterruptedError ? "idle" : "failed",
           ...(activeLight
             ? {
                 provider: activeLight.provider,
@@ -838,6 +825,9 @@ export default defineContentScript({
       } finally {
         if (!preserveStreaming) previousStreaming = false;
         scanning = false;
+        manualCaptureActive = false;
+        captureController = undefined;
+        nativeRead = undefined;
         evaluationInFlight = false;
         if (discardPending) {
           consumePending();
@@ -859,11 +849,14 @@ export default defineContentScript({
 
     void refreshFloatingIndicator();
     attachObserver();
+    lastSessionKey = currentSessionKey();
     schedule("new_session", 2_000);
 
     const routeTimer = setInterval(() => {
       if (location.href !== lastUrl) {
+        captureController?.abort();
         lastUrl = location.href;
+        lastSessionKey = currentSessionKey();
         attachObserver();
         schedule("new_session", 3_000);
       }
@@ -876,6 +869,7 @@ export default defineContentScript({
         return;
       }
       if (sessionKey !== lastSessionKey) {
+        captureController?.abort();
         lastSessionKey = sessionKey;
         schedule("new_session", 3_000);
       }
@@ -890,6 +884,9 @@ export default defineContentScript({
         ("showFloatingIndicator" in changes || "pausedHosts" in changes)
       ) {
         void refreshFloatingIndicator();
+        if ("pausedHosts" in changes) {
+          void isPaused().then((paused) => { if (paused) captureController?.abort(); });
+        }
       }
     };
     browser.storage.onChanged.addListener(storageListener);
@@ -919,6 +916,7 @@ export default defineContentScript({
 
     ctx.onInvalidated(() => {
       invalidated = true;
+      captureController?.abort();
       detachObserver();
       for (const eventName of activityEvents) {
         window.removeEventListener(eventName, activityListener, { capture: true } as AddEventListenerOptions);
@@ -928,7 +926,6 @@ export default defineContentScript({
       if (debounceTimer) clearTimeout(debounceTimer);
       scheduledDueAt = 0;
       consumePending();
-      if (idleTimer) clearTimeout(idleTimer);
       browser.storage.onChanged.removeListener(storageListener);
       indicator?.destroy();
     });
