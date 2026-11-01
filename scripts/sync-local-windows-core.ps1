@@ -21,7 +21,7 @@ function Invoke-Checked([string]$Program, [string[]]$Arguments) {
 
 function Show-Usage {
   Write-Host @"
-知言归藏 Windows 本地同步（启动器 V2.4.12）
+知言归藏 Windows 本地同步（启动器 V2.5.2）
 
   sync-local-windows.bat              安装或重启后台同步
   sync-local-windows.bat run          前台同步近期记录并持续监听，终端需保持打开

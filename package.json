@@ -1,6 +1,6 @@
 {
   "name": "ai-conversation-archive",
-  "version": "2.4.12",
+  "version": "2.5.2",
   "private": true,
   "packageManager": "pnpm@11.8.0",
   "engines": {
@@ -31,7 +31,9 @@
     "dev:web": "pnpm --filter @ai-archive/web dev",
     "dev:extension": "pnpm --filter @ai-archive/extension dev",
     "db:migrate": "pnpm --filter @ai-archive/server db:migrate",
-    "db:generate": "pnpm --filter @ai-archive/server db:generate"
+    "db:generate": "pnpm --filter @ai-archive/server db:generate",
+    "release:next-version": "node scripts/release-version.mjs",
+    "test:version-rules": "node --test scripts/release-version.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

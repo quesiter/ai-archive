@@ -1,0 +1,5 @@
+191bfc78f57c4957b7928e8a43c04f3f26e369d4c26e7d9c95414fbfce062d19  ai-archiveextension-V2.5.2-chrome.zip
+a37c5d7fe6c36ef4c7f57881db3aeaa761001e7311da9576463677b11fcaef78  ai-conversation-archive-windows-sync-V2.5.2.zip
+03cadee90a98ab6cb46171e9170a88a426fdd4c75ccc1faa54c762e5ffffeb2b  ai-conversation-archive-macos-sync-V2.5.2.tar.gz
+63660cd5db1539353bc4b6fb9c07be55a95309704889667a73e31dd98745816e  ai-conversation-archive-nas-V2.5.2-clean-install.tar.gz
+e07b72ef9ad4264a42c2d987c0ccca23b9580b2900ae9ca5a3897d668c676900  release-qualification-V2.5.2.json

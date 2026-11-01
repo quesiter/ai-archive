@@ -39,7 +39,7 @@ describe("parseReleaseNotes", () => {
 
   it("keeps one group per day and retains all merged update topics", () => {
     expect(new Set(releaseNotes.map(note=>note.date)).size).toBe(releaseNotes.length);
-    expect(releaseNotes[0]).toMatchObject({date:"2026-11-01",version:"V2.4.12",title:"性能优化、采集适配与归档核验"});
+    expect(releaseNotes[0]).toMatchObject({date:"2026-11-01",version:"V2.5.2",title:"性能优化、采集适配与归档核验"});
     for (const topic of ["词条", "追加采集", "全文副本", "豆包", "Grok Build", "备份恢复", "Date"]) expect(releaseNotes[0]!.body).toContain(topic);
     expect(releaseNotes.filter(note=>note.date === "2026-11-01")).toHaveLength(1);
     expect(releaseNotes[0]!.body).not.toMatch(/V2\.4\.(?:9|10|11)\b/);

@@ -9,6 +9,7 @@ if (![22, 24].includes(nodeMajor)) {
 
 const checks = [
   { id: "release", label: "Release Consistency", args: ["release:check"] },
+  { id: "version-rules", label: "Version Number Rules", args: ["test:version-rules"] },
   { id: "typecheck", label: "Typecheck", args: ["typecheck"] },
   { id: "unit", label: "Unit Tests", args: ["-r", "--workspace-concurrency=1", "--if-present", "test", "--maxWorkers=4"] },
   { id: "docs", label: "Documentation", args: ["docs:check"] },
@@ -64,7 +65,7 @@ const report = {
   scope: "automated-checks-only",
   productionReady: false,
   manualChecks: [
-    "Fresh PostgreSQL migration 0000 → 0028",
+    "Fresh PostgreSQL migration 0000 → 0030",
     "V2.2 production-shaped database migration to the current release",
     "Windows 10/11 portable package smoke",
     "macOS LaunchAgent package smoke",

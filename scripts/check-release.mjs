@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { isCanonicalReleaseVersion } from "./release-version.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const read = (path) => readFileSync(resolve(root, path), "utf8");
 const version = JSON.parse(read("package.json")).version;
 const errors = [];
+if (!isCanonicalReleaseVersion(version)) errors.push("version: minor and patch must be 0–9; carry at 10");
 for (const name of ["server", "web", "extension", "openclaw-sync"]) {
   const actual = JSON.parse(read(`apps/${name}/package.json`)).version;
   if (actual !== version) errors.push(`${name}: ${actual} != ${version}`);

@@ -7,7 +7,7 @@ import { ApiError } from "./api.js";
 
 export type { PaginationData, PageEnvelope } from "./api-types.js";
 
-export const WEB_VERSION = "V2.4.12";
+export const WEB_VERSION = "V2.5.2";
 
 export function useLoad<T>(loader: () => Promise<T>, dependencies: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
