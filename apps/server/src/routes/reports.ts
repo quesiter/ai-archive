@@ -1,4 +1,5 @@
 import { and, count, desc, eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db } from "../db.js";
@@ -7,6 +8,7 @@ import { analysisRuns, reports } from "../schema.js";
 import { analysisWindow } from "../services/analysis.js";
 import { writeOperationLog } from "../services/operation-log.js";
 import { enqueueAnalysis, enqueueReportEmail } from "../services/queue.js";
+import { queueReportRegeneration, ReportRegenerationQueueError } from "../services/report-regeneration.js";
 
 function safeReportFilename(value: string): string {
   return value.normalize("NFKC").replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-").replace(/\s+/g, " ").trim().slice(0, 100) || "report";
@@ -21,13 +23,14 @@ async function queueAnalysisRun(kind: "weekly" | "monthly") {
       status: "queued",
       windowStart,
       windowEnd,
-      stats: { stage: "queued" },
+      stats: { stage: "queued", generationId: randomUUID(), sendEmail: true, responseDiagnostics: [] },
+      updatedAt: new Date(),
     })
     .onConflictDoNothing({
       target: [analysisRuns.kind, analysisRuns.windowStart, analysisRuns.windowEnd],
     })
     .returning();
-  if (run) return run;
+  if (run) return { run, shouldEnqueue: true };
 
   const [existing] = await db
     .select()
@@ -41,7 +44,7 @@ async function queueAnalysisRun(kind: "weekly" | "monthly") {
     )
     .limit(1);
   if (!existing) throw new Error("Failed to resolve queued analysis run");
-  if (existing.status === "completed" || existing.status === "running") return existing;
+  if (["completed", "running", "queued"].includes(existing.status)) return { run: existing, shouldEnqueue: false };
 
   [run] = await db
     .update(analysisRuns)
@@ -49,15 +52,45 @@ async function queueAnalysisRun(kind: "weekly" | "monthly") {
       status: "queued",
       error: null,
       completedAt: null,
-      stats: { stage: "queued" },
+      stats: { ...existing.stats, stage: "queued", generationId: randomUUID(), responseDiagnostics: [],
+        previousGeneration: { generationId: existing.stats.generationId ?? null, status: existing.status,
+          responseDiagnostics: Array.isArray(existing.stats.responseDiagnostics) ? existing.stats.responseDiagnostics.slice(-6) : [] },
+      },
       updatedAt: new Date(),
     })
-    .where(eq(analysisRuns.id, existing.id))
+    .where(and(eq(analysisRuns.id, existing.id), eq(analysisRuns.status, "failed")))
     .returning();
-  return run ?? existing;
+  if (run) return { run, shouldEnqueue: true };
+  const [current] = await db.select().from(analysisRuns).where(eq(analysisRuns.id, existing.id)).limit(1);
+  return { run: current ?? existing, shouldEnqueue: false };
 }
 
 export async function reportRoutes(app: FastifyInstance): Promise<void> {
+  app.post<{ Params: { id: string } }>("/api/v1/reports/:id/regenerate", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    const { id } = z.object({ id: z.guid() }).parse(request.params);
+    try {
+      const result = await queueReportRegeneration(id);
+      if (!result) return reply.code(404).send({ error: "Report not found" });
+      return reply.code(202).send(result);
+    } catch (error) {
+      if (error instanceof ReportRegenerationQueueError) return reply.code(503).send({ error: error.message });
+      throw error;
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/v1/reports/:id/generation", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    const { id } = z.object({ id: z.guid() }).parse(request.params);
+    const [report] = await db.select().from(reports).where(eq(reports.id, id)).limit(1);
+    if (!report) return reply.code(404).send({ error: "Report not found" });
+    const [run] = await db.select().from(analysisRuns).where(and(
+      eq(analysisRuns.kind, report.kind),
+      eq(analysisRuns.windowStart, report.periodStart),
+      eq(analysisRuns.windowEnd, report.periodEnd),
+    )).limit(1);
+    return { run: run ?? null };
+  });
   app.get("/api/v1/reports", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
     const query = z.object({
@@ -100,7 +133,7 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/reports/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const [report] = await db
         .select()
         .from(reports)
@@ -113,7 +146,7 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
 
   app.get<{ Params: { id: string } }>("/api/v1/reports/:id/download", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
-    const params = z.object({ id: z.string().uuid() }).parse(request.params);
+    const params = z.object({ id: z.guid() }).parse(request.params);
     const [report] = await db.select().from(reports).where(eq(reports.id, params.id)).limit(1);
     if (!report) return reply.code(404).send({ error: "Report not found" });
     const content = `# ${report.title}\n\n> ${report.summary}\n\n${report.bodyMarkdown}\n`;
@@ -125,7 +158,7 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
 
   app.post<{ Params: { id: string } }>("/api/v1/reports/:id/email/retry", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
-    const params = z.object({ id: z.string().uuid() }).parse(request.params);
+    const params = z.object({ id: z.guid() }).parse(request.params);
     const [report] = await db.update(reports).set({
       emailStatus: "queued",
       emailError: null,
@@ -144,8 +177,11 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
     const input = z
       .object({ kind: z.enum(["weekly", "monthly"]).default("weekly") })
       .parse(request.body ?? {});
-    const run = await queueAnalysisRun(input.kind);
-    const jobId = await enqueueAnalysis(input.kind);
+    const { run, shouldEnqueue } = await queueAnalysisRun(input.kind);
+    if (!shouldEnqueue) return reply.code(202).send({ jobId: null, run, alreadyActive: run.status !== "completed" });
+    const jobId = await enqueueAnalysis(input.kind, undefined, { runId: run.id,
+      ...(typeof run.stats.generationId === "string" ? { generationId: run.stats.generationId } : {}),
+    });
     if (!jobId) {
       const [failedRun] = await db
         .update(analysisRuns)
@@ -156,7 +192,7 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
           completedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(analysisRuns.id, run.id))
+        .where(and(eq(analysisRuns.id, run.id), eq(analysisRuns.status, "queued")))
         .returning();
       await writeOperationLog({
         scope: "analysis",

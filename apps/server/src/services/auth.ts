@@ -17,7 +17,8 @@ import {
   sha256,
 } from "./crypto.js";
 
-const WEB_SESSION_DAYS = 30;
+export const WEB_SESSION_MAX_AGE = 90 * 86_400;
+const WEB_SESSION_RENEW_WINDOW_MS = 89 * 86_400_000;
 const PENDING_TOTP_MINUTES = 10;
 const DUMMY_PASSWORD_HASH =
   "$argon2id$v=19$m=19456,t=2,p=1$hw8wQUjy5Rh5SOo41guauQ$3oNTAJQ5Fv5YWslDsTK7i9Uketwtv2ylpdR8F8vV/lc";
@@ -87,7 +88,7 @@ export async function login(input: {
     throw new Error("Invalid username, password, or TOTP code");
   }
   const token = randomToken();
-  const expiresAt = new Date(Date.now() + WEB_SESSION_DAYS * 86_400_000);
+  const expiresAt = new Date(Date.now() + WEB_SESSION_MAX_AGE * 1_000);
   await db.insert(webSessions).values({
     tokenHash: sha256(token),
     userId: user.id,
@@ -98,10 +99,11 @@ export async function login(input: {
 
 export async function authenticateWebSession(
   token: string | undefined,
+  onRenew?: (expiresAt: Date) => void,
 ): Promise<{ id: string; username: string } | null> {
   if (!token) return null;
   const [result] = await db
-    .select({ id: users.id, username: users.username })
+    .select({ id: users.id, username: users.username, expiresAt: webSessions.expiresAt, sessionId: webSessions.id })
     .from(webSessions)
     .innerJoin(users, eq(users.id, webSessions.userId))
     .where(
@@ -111,7 +113,16 @@ export async function authenticateWebSession(
       ),
     )
     .limit(1);
-  return result ?? null;
+  if (!result) return null;
+  if (onRenew && result.expiresAt.getTime() - Date.now() < WEB_SESSION_RENEW_WINDOW_MS) {
+    const expiresAt = new Date(Date.now() + WEB_SESSION_MAX_AGE * 1_000);
+    const renewed = await db.update(webSessions).set({ expiresAt })
+      .where(and(eq(webSessions.id, result.sessionId), gt(webSessions.expiresAt, new Date())))
+      .returning({ id: webSessions.id });
+    if (!renewed.length) return null;
+    onRenew(expiresAt);
+  }
+  return { id: result.id, username: result.username };
 }
 
 export async function logout(token: string | undefined): Promise<void> {

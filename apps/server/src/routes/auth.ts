@@ -5,6 +5,7 @@ import {
   requireSameOrigin,
   requireWebUser,
   SESSION_COOKIE,
+  setWebSessionCookie,
 } from "../http.js";
 import {
   bootstrapAdmin,
@@ -22,7 +23,7 @@ import {
 
 const BootstrapSchema = z.object({
   username: z.string().min(3).max(64),
-  password: z.string().min(12).max(256),
+  password: z.string().min(11).max(256),
 });
 
 const LoginSchema = z.object({
@@ -62,13 +63,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     try {
       const input = LoginSchema.parse(request.body);
       const result = await login(input);
-      reply.setCookie(SESSION_COOKIE, result.token, {
-        path: "/",
-        httpOnly: true,
-        secure: config.cookieSecure,
-        sameSite: "strict",
-        expires: result.expiresAt,
-      });
+      setWebSessionCookie(reply, result.token, result.expiresAt);
       return { user: { username: input.username }, expiresAt: result.expiresAt };
     } catch {
       request.log.warn("administrator login rejected");
@@ -95,7 +90,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const input = z.object({
       currentPassword: z.string().min(1).max(256),
       totpCode: z.string().regex(/^\d{6}$/),
-      newPassword: z.string().min(12).max(256),
+      newPassword: z.string().min(11).max(256),
     }).parse(request.body);
     await changeAdminPassword({ userId: user.id, ...input });
     return { ok: true };
@@ -139,7 +134,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       const user = await requireWebUser(request, reply);
       if (!user) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const sessions = await listWebSessions(user.id, request.cookies[SESSION_COOKIE]);
       const target = sessions.find((session) => session.id === params.id);
       if (!target || !(await revokeWebSession(user.id, params.id))) {

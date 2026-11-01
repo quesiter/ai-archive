@@ -8,6 +8,7 @@ export interface LocalConversationBaseline {
   lastMessageRole?: MessageRole | undefined;
   lastMessageTextHash?: string | undefined;
   completeness?: "complete" | "partial" | undefined;
+  baselineContentHash?: string | undefined;
 }
 
 export type CaptureDecision =
@@ -23,7 +24,7 @@ export function decideCaptureAction(input: {
   forceFullReason?: CaptureTriggerReason | null | undefined;
   previousStreaming?: boolean | undefined;
 }): CaptureDecision {
-  if (input.light.streaming) {
+  if (input.light.streaming && input.requestedReason !== "manual_retry") {
     return {
       action: "wait",
       triggerReason: "stream_finished",
@@ -88,7 +89,7 @@ export function decideCaptureAction(input: {
         input.state.lastMessageTextHash !== input.light.lastMessageTextHash;
       if (tailChanged) {
         return {
-          action: "append",
+          action: input.state.baselineContentHash ? "append" : "full",
           triggerReason: input.requestedReason,
           message: "可见消息发生变化，先验证增量基线",
         };
@@ -118,7 +119,7 @@ export function decideCaptureAction(input: {
       message: "最后消息变化，可能重新生成或切换了分支",
     };
   }
-  if (input.state.completeness !== "complete") {
+  if (input.state.completeness !== "complete" || !input.state.baselineContentHash) {
     return {
       action: "full",
       triggerReason: "new_messages",

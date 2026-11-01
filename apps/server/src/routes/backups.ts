@@ -9,6 +9,7 @@ import { requireWebUser } from "../http.js";
 import {
   createBackupArchiveStream,
   verifyBackupArchive,
+  assertBackupReadMemory,
 } from "../services/backup.js";
 import { writeOperationLog } from "../services/operation-log.js";
 import { safeStoredError } from "../services/operation-log.js";
@@ -29,8 +30,12 @@ import { enqueueRestoreBackup } from "../services/queue.js";
 
 async function readFilePart(part: { file: AsyncIterable<Buffer | Uint8Array | string> }): Promise<Buffer> {
   const chunks: Buffer[] = [];
+  let bytes = 0;
   for await (const chunk of part.file) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    assertBackupReadMemory(bytes);
+    chunks.push(buffer);
   }
   return Buffer.concat(chunks);
 }
@@ -72,8 +77,8 @@ export async function backupRoutes(app: FastifyInstance): Promise<void> {
     ) {
       return reply.code(400).send({ error: "Only .json or .json.gz backup files are accepted" });
     }
-    const buffer = await readFilePart(part);
     try {
+      const buffer = await readFilePart(part);
       return await verifyBackupArchive(part.filename, buffer);
     } catch (error) {
       return reply.code(400).send({ error: safeStoredError(error) });
@@ -126,7 +131,7 @@ export async function backupRoutes(app: FastifyInstance): Promise<void> {
 
   app.get<{ Params: { id: string } }>("/api/v1/backups/restores/:id", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
-    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const { id } = z.object({ id: z.guid() }).parse(request.params);
     const job = await getRestoreJob(id);
     if (!job) return reply.code(404).send({ error: "Restore job not found" });
     return toPublicRestoreJob(job);
@@ -134,7 +139,7 @@ export async function backupRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete<{ Params: { id: string } }>("/api/v1/backups/restores/:id", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
-    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const { id } = z.object({ id: z.guid() }).parse(request.params);
     if (!(await cancelRestoreJob(id))) {
       return reply.code(409).send({ error: "Restore cannot be cancelled after data replacement starts" });
     }
@@ -145,7 +150,7 @@ export async function backupRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/backups/restores/:id/staged-file",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+      const { id } = z.object({ id: z.guid() }).parse(request.params);
       const result = await deleteFailedRestoreStagedFile(id);
       if (result === "not_found") return reply.code(404).send({ error: "Restore job not found" });
       if (result === "not_failed") {
@@ -167,7 +172,7 @@ export async function backupRoutes(app: FastifyInstance): Promise<void> {
 
   app.post<{ Params: { id: string } }>("/api/v1/backups/restores/:id/retry", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
-    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const { id } = z.object({ id: z.guid() }).parse(request.params);
     const retryResult = await retryRestoreJob(id);
     if (retryResult === "not_found") return reply.code(404).send({ error: "Restore job not found" });
     if (retryResult === "missing_file") {

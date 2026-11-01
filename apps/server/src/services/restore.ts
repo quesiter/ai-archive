@@ -6,9 +6,11 @@ import { config } from "../config.js";
 import { db } from "../db.js";
 import { restoreJobs } from "../schema.js";
 import { checkArchiveIntegrity } from "./archive-integrity.js";
-import { restoreBackupArchive, verifyBackupArchive, type BackupPhase } from "./backup.js";
+import { assertBackupReadMemory, parseBackupArchive, restoreParsedBackupArchive, verifyParsedBackupArchive, type BackupPhase } from "./backup.js";
 import { safeStoredError, writeOperationLog } from "./operation-log.js";
 import { rebuildConversationSearchChunks } from "./search-chunks.js";
+import { consolidateArchiveConversations } from "./conversation-accumulation.js";
+import { backfillArchiveReadModels } from "./archive-read-models.js";
 
 export const ACTIVE_RESTORE_STATUSES = [
   "restoring",
@@ -310,6 +312,8 @@ async function resumePostCommitRestore(job: RestoreJob): Promise<void> {
     completedAt: null,
     updatedAt: new Date(),
   }).where(eq(restoreJobs.id, job.id));
+  await consolidateArchiveConversations();
+  await backfillArchiveReadModels();
   const searchChunkCount = await rebuildConversationSearchChunks();
   const rebuildWarning = `已从恢复后的消息重建 ${searchChunkCount} 个全文检索分块。`;
   const warnings = [...new Set([...(job.warnings ?? []), rebuildWarning])];
@@ -351,14 +355,16 @@ export async function processRestoreJob(id: string): Promise<void> {
       error: null,
       updatedAt: new Date(),
     }).where(eq(restoreJobs.id, id));
+    assertBackupReadMemory((await stat(job.stagedPath)).size);
     const buffer = await readFile(job.stagedPath);
-    const verification = await verifyBackupArchive(job.filename, buffer);
+    const backup = await parseBackupArchive(job.filename, buffer);
+    const verification = verifyParsedBackupArchive(backup);
     if (!verification.ok) {
       throw new Error(`Backup verification failed: ${verification.errors.join("; ")}`);
     }
     const current = await getRestoreJob(id);
     if (current?.status === "cancelled") return;
-    const result = await restoreBackupArchive(job.filename, buffer, {
+    const result = await restoreParsedBackupArchive(backup, {
       restoreJobId: id,
       onPhase: async (phase, progress) => {
         if (phase === "restoring") {

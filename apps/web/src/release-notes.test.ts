@@ -37,13 +37,22 @@ describe("parseReleaseNotes", () => {
     });
   });
 
-  it("shows the latest maintained changelog entry first", () => {
-    expect(releaseNotes[0]).toMatchObject({
-      date: "2026-09-07",
-      version: "V2.3.1",
-      title: "自动保存不再打断聊天",
-    });
-    expect(releaseNotes[0]?.body).toContain("不再写页面滚动位置");
-    expect(releaseNotes[0]?.body).toContain("用户操作");
+  it("keeps one group per day and retains all merged update topics", () => {
+    expect(new Set(releaseNotes.map(note=>note.date)).size).toBe(releaseNotes.length);
+    expect(releaseNotes[0]).toMatchObject({date:"2026-11-01",version:"V2.4.12",title:"性能优化、采集适配与归档核验"});
+    for (const topic of ["词条", "追加采集", "全文副本", "豆包", "Grok Build", "备份恢复", "Date"]) expect(releaseNotes[0]!.body).toContain(topic);
+    expect(releaseNotes.filter(note=>note.date === "2026-11-01")).toHaveLength(1);
+    expect(releaseNotes[0]!.body).not.toMatch(/V2\.4\.(?:9|10|11)\b/);
+    const october = releaseNotes.find(note=>note.date === "2026-10-26")!;
+    expect(october.version).toBe("V2.4.8");
+    for (const topic of ["Retry-After", "不自动重放", "设备上报版本", "项目分类证据策略"]) expect(october.body).toContain(topic);
+    const performance = releaseNotes.find(note=>note.date === "2026-10-25")!;
+    expect(performance).toMatchObject({version:"V2.4.7",title:"性能与稳定性完善"});
+    expect(performance.body).toContain("Chokidar 4"); expect(performance.body).toContain("可用内存");
+    const recapture = releaseNotes.find(note=>note.date === "2026-10-08")!;
+    expect(recapture.body).toContain("0025_recapture_jobs"); expect(recapture.body).toContain("逐条重新读取原会话");
+    const merged = releaseNotes.find(note=>note.date === "2026-10-07")!;
+    expect(merged.version).toBe("V2.4.3"); expect(merged.body).toContain("三端组件统一更新");
+    expect(releaseNotes.find(note=>note.date === "2026-09-19")?.version).toBe("V2.4.0");
   });
 });

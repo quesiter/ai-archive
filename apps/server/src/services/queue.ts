@@ -1,6 +1,7 @@
 import PgBoss from "pg-boss";
 import { config } from "../config.js";
 import { AI_RATE_LIMIT_RETRY_DELAY_MS } from "./llm.js";
+import { safeStoredError } from "./operation-log.js";
 
 const AI_RETRY_DELAY_SECONDS = Math.round(AI_RATE_LIMIT_RETRY_DELAY_MS / 1_000);
 // Safety retries cover a full weekly quota window if creating a delayed replacement job fails.
@@ -41,6 +42,12 @@ export interface AiQueueScheduleOptions {
   startAfter?: Date | string;
 }
 
+export interface AnalysisJobData {
+  requestedAt?: string;
+  runId?: string;
+  generationId?: string;
+}
+
 function scheduledSingletonKey(
   base: string,
   schedule: AiQueueScheduleOptions | undefined,
@@ -51,21 +58,61 @@ function scheduledSingletonKey(
 }
 
 let bossPromise: Promise<PgBoss> | null = null;
+let stoppingPromise: Promise<void> | null = null;
+
+async function closeBoss(boss: PgBoss, graceful: boolean): Promise<void> {
+  let stopFailed = false;
+  let stopError: unknown;
+  try {
+    await boss.stop({ graceful, timeout: 10_000 });
+  } catch (error) {
+    stopFailed = true;
+    stopError = error;
+  }
+  try {
+    // pg-boss 10's stop() skips cleanup if start() opened its pool but failed
+    // before marking the instance started. Close that owned pool explicitly.
+    const database = boss.getDb() as PgBoss.Db & {
+      opened?: boolean;
+      close?: () => Promise<void>;
+    };
+    if (database.opened && database.close) await database.close();
+  } catch (error) {
+    if (!stopFailed) throw error;
+  }
+  if (stopFailed) throw stopError;
+}
 
 export function getBoss(): Promise<PgBoss> {
+  if (stoppingPromise) {
+    return stoppingPromise.catch(() => undefined).then(() => getBoss());
+  }
   if (!bossPromise) {
-    bossPromise = (async () => {
-      const boss = new PgBoss({
-        connectionString: config.DATABASE_URL,
-        schema: "pgboss",
-        application_name: "ai-conversation-archive",
-      });
-      await boss.start();
-      for (const name of Object.values(queueNames)) {
-        await boss.createQueue(name);
+    const initialization: Promise<PgBoss> = Promise.resolve().then(async () => {
+      let boss: PgBoss | undefined;
+      try {
+        boss = new PgBoss({
+          connectionString: config.DATABASE_URL,
+          schema: "pgboss",
+          application_name: "ai-conversation-archive",
+        });
+        boss.on("error", (error) => {
+          console.warn("Queue client error:", safeStoredError(error));
+        });
+        await boss.start();
+        for (const name of Object.values(queueNames)) {
+          await boss.createQueue(name);
+        }
+        return boss;
+      } catch (error) {
+        // A failed initialization must neither poison later enqueue attempts
+        // nor leave the abandoned client's connections running.
+        if (boss) await closeBoss(boss, false).catch(() => undefined);
+        if (bossPromise === initialization) bossPromise = null;
+        throw error;
       }
-      return boss;
-    })();
+    });
+    bossPromise = initialization;
   }
   return bossPromise;
 }
@@ -73,14 +120,17 @@ export function getBoss(): Promise<PgBoss> {
 export async function enqueueAnalysis(
   kind: "weekly" | "monthly",
   schedule?: AiQueueScheduleOptions,
+  data: AnalysisJobData = {},
 ): Promise<string | null> {
   const boss = await getBoss();
   return boss.send(
     kind === "weekly" ? queueNames.weekly : queueNames.monthly,
-    { requestedAt: new Date().toISOString() },
+    { ...data, requestedAt: new Date().toISOString() },
     {
       ...(schedule?.startAfter ? { startAfter: schedule.startAfter } : {}),
-      singletonKey: scheduledSingletonKey(kind, schedule),
+      retryLimit: 0,
+      expireInMinutes: 30,
+      singletonKey: scheduledSingletonKey(data.runId ? `${kind}:${data.runId}:${data.generationId ?? "current"}` : kind, schedule),
     },
   );
 }
@@ -153,7 +203,10 @@ export async function enqueueNightlyAiMaintenance(
         `${input.runKey}:${input.stage}:${taskKey}`,
         schedule,
       ),
-      expireInHours: 48,
+      // pg-boss 10 rejects expiration values at or above its 24-hour ceiling.
+      // Keep enough time for the staged maintenance flow without crashing the
+      // worker as soon as the nightly cron tries to enqueue it.
+      expireInHours: 23,
       retryLimit: 12,
       retryDelay: 300,
       retryBackoff: false,
@@ -225,9 +278,19 @@ export async function enqueueRestoreBackup(restoreJobId: string): Promise<string
   });
 }
 
-export async function stopBoss(): Promise<void> {
-  if (!bossPromise) return;
-  const boss = await bossPromise;
-  await boss.stop({ graceful: true, timeout: 10_000 });
-  bossPromise = null;
+export function stopBoss(): Promise<void> {
+  if (stoppingPromise) return stoppingPromise;
+  const current = bossPromise;
+  if (!current) return Promise.resolve();
+  const stopping = (async () => {
+    // Initialization already cleans up its own failure. Shutdown must still
+    // finish when the database was unavailable during the first enqueue.
+    const boss = await current.catch(() => null);
+    if (boss) await closeBoss(boss, true);
+  })().finally(() => {
+    if (bossPromise === current) bossPromise = null;
+    if (stoppingPromise === stopping) stoppingPromise = null;
+  });
+  stoppingPromise = stopping;
+  return stopping;
 }

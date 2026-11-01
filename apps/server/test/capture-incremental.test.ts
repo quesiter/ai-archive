@@ -23,6 +23,7 @@ const baseRevision = {
   completeness: "complete",
   branchFingerprint: "branch-fingerprint-1",
   messageCount: 2,
+  contentIntegrityHash: "a".repeat(64),
 };
 
 function delta(overrides: Partial<CaptureDeltaV1> = {}): CaptureDeltaV1 {
@@ -36,6 +37,7 @@ function delta(overrides: Partial<CaptureDeltaV1> = {}): CaptureDeltaV1 {
     capturedAt: "2026-07-25T04:00:00.000Z",
     triggerReason: "new_messages",
     baseRevisionId: baseRevision.id,
+    baseContentHash: baseRevision.contentIntegrityHash,
     baseMessageCount: 2,
     baseLastMessageId: "a1",
     appendedMessages: [
@@ -57,6 +59,36 @@ function delta(overrides: Partial<CaptureDeltaV1> = {}): CaptureDeltaV1 {
 }
 
 describe("incremental capture validation", () => {
+  it("requires the exact mutable content baseline, even when the stable revision ID and count still match", async () => {
+    const { validateDeltaBase } = await import("../src/services/capture.js");
+    for (const baseContentHash of [undefined, "b".repeat(64)]) {
+      expect(() => validateDeltaBase({ delta: delta({ baseContentHash }), baseRevision: baseRevision as never, baseMessages }))
+        .toThrow(/content baseline/);
+    }
+  });
+  it("backfills parent metadata with an empty delta without changing revision identity", async () => {
+    const { mergedSnapshotFromDelta, revisionIdentityHash, snapshotHash, contentIntegrityHash, validateDeltaBase } =
+      await import("../src/services/capture.js");
+    const input = {
+      delta: delta({ parentSessionId: "parent-session", appendedMessages: [] }),
+      baseRevision: baseRevision as never,
+      baseMessages,
+    };
+    expect(() => validateDeltaBase(input)).not.toThrow();
+    const snapshot = mergedSnapshotFromDelta(input);
+    const { parentSessionId, ...withoutParent } = snapshot;
+    expect(parentSessionId).toBe("parent-session");
+    expect(snapshot.messages).toEqual(baseMessages);
+    expect(snapshotHash(snapshot)).toBe(snapshotHash(withoutParent));
+    expect(revisionIdentityHash(snapshot)).toBe(revisionIdentityHash(withoutParent));
+    expect(contentIntegrityHash(snapshot)).toBe(contentIntegrityHash(withoutParent));
+    const withReason = mergedSnapshotFromDelta({
+      ...input,
+      baseRevision: { ...baseRevision, completenessReason: "Read from local Codex session" } as never,
+    });
+    expect(withReason.completeness.reason).toBe("Read from local Codex session");
+  });
+
   it("keeps current idempotency strict but bypasses unverifiable legacy hashes", async () => {
     const { captureIdempotencyReplayMode } = await import("../src/services/capture.js");
     expect(captureIdempotencyReplayMode({

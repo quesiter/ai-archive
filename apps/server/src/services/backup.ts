@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { availableMemory } from "node:process";
 import { Readable } from "node:stream";
 import { promisify } from "node:util";
+import { getHeapStatistics } from "node:v8";
 import { createGzip, gunzip, gzip } from "node:zlib";
 import { eq, sql } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
@@ -18,6 +20,8 @@ import {
   conversationTags,
   conversations,
   devices,
+  recaptureJobs,
+  recaptureItems,
   importJobs,
   messageSegments,
   messages,
@@ -37,6 +41,7 @@ import {
   redactSensitiveUrlForStorage,
 } from "./redaction.js";
 import { rebuildConversationSearchChunks } from "./search-chunks.js";
+import { backfillArchiveReadModels } from "./archive-read-models.js";
 import { normalizeProjectName } from "./projects.js";
 
 const gzipAsync = promisify(gzip);
@@ -49,6 +54,35 @@ const INSERT_BATCH_SIZE = 300;
 export const MAX_BACKUP_COMPRESSED_BYTES = 512 * 1024 * 1024;
 export const MAX_BACKUP_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024;
 const MAX_BACKUP_ROWS_PER_TABLE = 2_000_000;
+const BACKUP_MEMORY_RESERVE_BYTES = 32 * 1024 * 1024;
+// JSON decoding, schema validation, reference indexes and restore preparation
+// retain several object graphs. Small JSON rows cost far more than their bytes.
+const BACKUP_JSON_MEMORY_MULTIPLIER = 32;
+
+function backupMemoryAllowance(): number {
+  const heap = getHeapStatistics();
+  return Math.max(0, Math.floor(Math.min(
+    availableMemory(),
+    heap.heap_size_limit - heap.used_heap_size,
+  ) * 0.75 - BACKUP_MEMORY_RESERVE_BYTES));
+}
+
+function backupMemoryError(bytes: number, limit: number): Error {
+  const mib = (value: number) => Math.ceil(value / (1024 * 1024));
+  return new Error(
+    `Insufficient memory to safely verify or restore this backup (${mib(bytes)} MiB; current safe limit ${mib(limit)} MiB). ` +
+    "Increase the app and worker memory limits and retry, or use a PostgreSQL disaster recovery backup in an isolated environment.",
+  );
+}
+
+export function assertBackupReadMemory(bytes: number): void {
+  if (bytes > MAX_BACKUP_COMPRESSED_BYTES) {
+    throw new Error("Backup exceeds the compressed size limit");
+  }
+  // Multipart buffering also needs space for the final concatenated Buffer.
+  const limit = Math.floor(backupMemoryAllowance() / 2);
+  if (bytes > limit) throw backupMemoryError(bytes, limit);
+}
 
 type BackupRow = Record<string, unknown>;
 type BackupTables = Record<string, BackupRow[]>;
@@ -63,6 +97,8 @@ interface TableSpec {
 const tableSpecs = [
   { key: "devices", table: devices, dateFields: ["lastSeenAt", "lastScanAt", "lastSuccessfulSyncAt", "lastErrorAt", "revokedAt", "createdAt"] },
   { key: "conversations", table: conversations, dateFields: ["updatedAt", "deletedAt", "createdAt"] },
+  { key: "recaptureJobs", table: recaptureJobs, dateFields: ["lastRunnerSeenAt", "createdAt", "updatedAt"] },
+  { key: "recaptureItems", table: recaptureItems, dateFields: ["leaseExpiresAt", "startedAt", "completedAt"] },
   { key: "conversationRevisions", table: conversationRevisions, dateFields: ["capturedAt", "createdAt"] },
   { key: "messages", table: messages, dateFields: ["sourceCreatedAt", "createdAt"] },
   { key: "messageSegments", table: messageSegments, dateFields: ["createdAt"] },
@@ -91,7 +127,7 @@ const BackupEnvelopeSchema = z.object({
     appVersion: z.string().optional(),
     masterKeyFingerprint: z.string().optional(),
   }).default({}),
-  tables: z.record(z.array(z.record(z.unknown())).max(MAX_BACKUP_ROWS_PER_TABLE)),
+  tables: z.record(z.string(), z.array(z.record(z.string(), z.unknown())).max(MAX_BACKUP_ROWS_PER_TABLE)),
 }).superRefine((value, context) => {
   const allowedTables = new Set(tableSpecs.map((spec) => spec.key));
   const legacyIgnoredTables = new Set(["knowledgeItems", "knowledge_items"]);
@@ -105,6 +141,8 @@ const BackupEnvelopeSchema = z.object({
     }
   }
 });
+
+export type ParsedBackupArchive = z.infer<typeof BackupEnvelopeSchema>;
 
 export type BackupImportResult = {
   ok: true;
@@ -189,7 +227,7 @@ function selectRowsSql(table: PgTable): string {
   >;
   const selectList = columns
     .map(([fieldName, column]) =>
-      `${quoteIdentifier(column.name)} as ${quoteIdentifier(fieldName)}`,
+      `${table === conversationRevisions && fieldName === "searchText" ? "''" : quoteIdentifier(column.name)} as ${quoteIdentifier(fieldName)}`,
     )
     .join(", ");
   return `select ${selectList} from ${quotedTableName(table)}`;
@@ -274,10 +312,10 @@ export function sanitizeRestoredBackupTables(tables: BackupTables): BackupTables
         : [],
     ),
   );
-  const sanitized: BackupTables = { ...tables };
+  const sanitized: BackupTables = { ...tables, conversationRevisions: (tables.conversationRevisions ?? []).map(row => ({ ...row, searchText: "" })) };
   const textFields: Record<string, string[]> = {
     conversations: ["title"],
-    conversationRevisions: ["searchText", "completenessReason", "capturedTitle"],
+    conversationRevisions: ["completenessReason", "capturedTitle"],
     messageSegments: ["content"],
     captureRuns: ["error"],
     projects: ["name", "description"],
@@ -309,6 +347,8 @@ export function sanitizeRestoredBackupTables(tables: BackupTables): BackupTables
   }));
   sanitized.conversationRevisions = (sanitized.conversationRevisions ?? []).map((row) => ({
     ...row,
+    searchText: "",
+    ...(row.mergeEvidence !== undefined ? { mergeEvidence: sanitizeBackupValue(row.mergeEvidence, customRules) } : {}),
     ...(typeof row.capturedCanonicalUrl === "string"
       ? { capturedCanonicalUrl: redactSensitiveUrlForStorage(row.capturedCanonicalUrl, customRules).text }
       : {}),
@@ -370,7 +410,8 @@ export function sanitizeRestoredBackupTables(tables: BackupTables): BackupTables
     const changed = before && (
       before.completenessReason !== row.completenessReason ||
       before.capturedTitle !== row.capturedTitle ||
-      before.capturedCanonicalUrl !== row.capturedCanonicalUrl
+      before.capturedCanonicalUrl !== row.capturedCanonicalUrl ||
+      JSON.stringify(before.mergeEvidence) !== JSON.stringify(row.mergeEvidence)
     );
     if ((typeof row.id === "string" && invalidatedRevisionIds.has(row.id)) || changed) {
       return { ...row, contentIntegrityHash: null };
@@ -448,19 +489,44 @@ export async function createBackupArchiveStream(): Promise<{
   return { filename: backupFilename(), stream, counts };
 }
 
-export async function parseBackupArchive(
+let pendingBackupParse: Promise<void> = Promise.resolve();
+
+export function parseBackupArchive(
   filename: string,
   buffer: Buffer,
-): Promise<z.infer<typeof BackupEnvelopeSchema>> {
+): Promise<ParsedBackupArchive> {
+  // Concurrent gzip requests must not each reserve the same free memory.
+  const parsing = pendingBackupParse.then(() => decodeBackupArchive(filename, buffer));
+  pendingBackupParse = parsing.then(() => undefined, () => undefined);
+  return parsing;
+}
+
+async function decodeBackupArchive(
+  filename: string,
+  buffer: Buffer,
+): Promise<ParsedBackupArchive> {
   if (buffer.length > MAX_BACKUP_COMPRESSED_BYTES) {
     throw new Error("Backup exceeds the compressed size limit");
   }
-  const payload = isGzip(buffer, filename)
-    ? await gunzipAsync(buffer, { maxOutputLength: MAX_BACKUP_UNCOMPRESSED_BYTES })
-    : buffer;
+  const memoryLimit = Math.floor(backupMemoryAllowance() / BACKUP_JSON_MEMORY_MULTIPLIER);
+  const outputLimit = Math.min(MAX_BACKUP_UNCOMPRESSED_BYTES, memoryLimit);
+  if (outputLimit < 1) throw backupMemoryError(buffer.length, outputLimit);
+  let payload: Buffer;
+  try {
+    payload = isGzip(buffer, filename)
+      ? await gunzipAsync(buffer, { maxOutputLength: outputLimit })
+      : buffer;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ERR_BUFFER_TOO_LARGE" && memoryLimit < MAX_BACKUP_UNCOMPRESSED_BYTES) {
+      throw backupMemoryError(outputLimit + 1, memoryLimit);
+    }
+    throw error;
+  }
   if (payload.length > MAX_BACKUP_UNCOMPRESSED_BYTES) {
     throw new Error("Backup expands beyond the allowed size");
   }
+  const parseLimit = Math.min(memoryLimit, Math.floor(backupMemoryAllowance() / BACKUP_JSON_MEMORY_MULTIPLIER));
+  if (payload.length > parseLimit) throw backupMemoryError(payload.length, parseLimit);
   const parsed = JSON.parse(payload.toString("utf8").replace(/^\uFEFF/, ""));
   return BackupEnvelopeSchema.parse(parsed);
 }
@@ -474,6 +540,10 @@ export async function verifyBackupArchive(
   buffer: Buffer,
 ): Promise<BackupVerificationResult> {
   const backup = await parseBackupArchive(filename, buffer);
+  return verifyParsedBackupArchive(backup);
+}
+
+export function verifyParsedBackupArchive(backup: ParsedBackupArchive): BackupVerificationResult {
   const prepared = prepareRestoredBackupTables(backup.tables);
   const tables = prepared.tables;
   const errors: string[] = [];
@@ -515,6 +585,9 @@ export async function verifyBackupArchive(
   checkReference("messages", "revisionId", revisionIds);
   checkReference("messageSegments", "messageId", messageIds);
   checkReference("captureRuns", "deviceId", deviceIds, true);
+  checkReference("recaptureJobs", "deviceId", deviceIds);
+  checkReference("recaptureItems", "jobId", backupIdSet(tables, "recaptureJobs"));
+  checkReference("recaptureItems", "conversationId", conversationIds, true);
   checkReference("conversationProjects", "conversationId", conversationIds);
   checkReference("conversationProjects", "projectId", projectIds, true);
   checkReference("conversationTags", "conversationId", conversationIds);
@@ -571,6 +644,15 @@ export function prepareRestoredBackupTables(input: BackupTables): {
   }
   delete tables.knowledgeItems;
   delete tables.knowledge_items;
+  // A restore must never start navigating a paired browser on its own.
+  tables.recaptureJobs = (tables.recaptureJobs ?? []).map((row) => ({ ...row,
+    ...(row.status === "running" ? { status: "paused", message: "备份已恢复，请手动继续补采" } : {}),
+    lastRunnerSeenAt: null,
+  }));
+  tables.recaptureItems = (tables.recaptureItems ?? []).map((row) => ({ ...row,
+    ...(row.status === "running" ? { status: "pending", startedAt: null } : {}),
+    leaseToken: null, leaseExpiresAt: null,
+  }));
   const usedProjectNames = new Set<string>();
   tables.projects = (tables.projects ?? []).map((row, index) => {
     const original = normalizeProjectName(typeof row.name === "string" ? row.name : "");
@@ -597,12 +679,26 @@ export function prepareRestoredBackupTables(input: BackupTables): {
   }
   tables.conversationRevisions = (tables.conversationRevisions ?? []).map((row) => ({
     ...row,
+    searchText: "",
+    // Display references and counts are derived again after sanitizing a restore.
+    presentationMessageCount: null,
+    storedMessageCount: null,
+    sourceContentPending: null,
+    archiveReview: null,
+    isAccumulated: row.isAccumulated === true,
+    mergeEvidence: row.mergeEvidence && typeof row.mergeEvidence === "object" && !Array.isArray(row.mergeEvidence)
+      ? row.mergeEvidence : { variants: [], warnings: [] },
     metadataCaptured:
       typeof row.metadataCaptured === "boolean" ? row.metadataCaptured : false,
     revisionIdentityHash:
       typeof row.revisionIdentityHash === "string" ? row.revisionIdentityHash : null,
     contentIntegrityHash:
       typeof row.contentIntegrityHash === "string" ? row.contentIntegrityHash : null,
+  }));
+  tables.captureRuns = (tables.captureRuns ?? []).map((row) => ({
+    ...row,
+    requestHash: typeof row.requestHash === "string" ? row.requestHash : null,
+    receipt: row.receipt && typeof row.receipt === "object" && !Array.isArray(row.receipt) ? row.receipt : null,
   }));
   return { tables, warnings };
 }
@@ -617,6 +713,16 @@ export async function restoreBackupArchive(
 ): Promise<BackupImportResult> {
   await options.onPhase?.("validating", 10);
   const backup = await parseBackupArchive(filename, buffer);
+  return restoreParsedBackupArchive(backup, options);
+}
+
+export async function restoreParsedBackupArchive(
+  backup: ParsedBackupArchive,
+  options: {
+    onPhase?: (phase: BackupPhase, progress: number) => Promise<void>;
+    restoreJobId?: string;
+  } = {},
+): Promise<BackupImportResult> {
   const prepared = prepareRestoredBackupTables(backup.tables);
   let tables = prepared.tables;
   const warnings = prepared.warnings;
@@ -652,12 +758,13 @@ export async function restoreBackupArchive(
       await tx.delete(spec.table);
     }
     for (const spec of tableSpecs) {
-      const rows = (tables[spec.key] ?? []).map((row) =>
-        reviveDates(row, spec.dateFields),
-      );
+      const rows = tables[spec.key] ?? [];
       counts[spec.key] = rows.length;
       for (const batch of chunks(rows, INSERT_BATCH_SIZE)) {
-        if (batch.length) await tx.insert(spec.table).values(batch as never);
+        if (batch.length) {
+          const revived = batch.map((row) => reviveDates(row, spec.dateFields));
+          await tx.insert(spec.table).values(revived as never);
+        }
       }
     }
     if (options.restoreJobId) {
@@ -674,6 +781,9 @@ export async function restoreBackupArchive(
     }
   });
   await options.onPhase?.("rebuilding_search", 75);
+  const { consolidateArchiveConversations } = await import("./conversation-accumulation.js");
+  await consolidateArchiveConversations();
+  await backfillArchiveReadModels();
   const searchChunkCount = await rebuildConversationSearchChunks();
   warnings.push(`已从恢复后的消息重建 ${searchChunkCount} 个全文检索分块。`);
 

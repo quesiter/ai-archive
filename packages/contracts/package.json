@@ -1,6 +1,6 @@
 {
   "name": "@ai-archive/contracts",
-  "version": "2.3.1",
+  "version": "2.4.12",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./presentation": {
+      "types": "./dist/presentation.d.ts",
+      "import": "./dist/presentation.js"
     }
   },
   "scripts": {
@@ -17,7 +21,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "zod": "^3.25.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "typescript": "^5.8.0",

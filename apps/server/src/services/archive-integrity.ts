@@ -1,10 +1,10 @@
-import { asc } from "drizzle-orm";
-import { db, sqlClient } from "../db.js";
+import { asc, sql } from "drizzle-orm";
+import { db } from "../db.js";
 import {
   conversationRevisions,
   conversations,
 } from "../schema.js";
-import { contentIntegrityHash } from "./capture.js";
+import { contentIntegrityHash, storedTokenUsage } from "./capture.js";
 import {
   completeBackgroundTask,
   failBackgroundTask,
@@ -17,7 +17,11 @@ import {
 } from "./revision-storage.js";
 import { safeStoredError } from "./operation-log.js";
 
-const CHECK_BATCH_SIZE = 100;
+// Hydrating a revision reconstructs every stored message. Some imported
+// histories contain tens of thousands of messages in one revision, so loading
+// several revisions together can exceed the worker's V8 heap before the first
+// progress heartbeat. Keep the memory bound to one reconstructed revision.
+const CHECK_BATCH_SIZE = 1;
 const MAX_ERROR_SAMPLES = 50;
 
 export interface ArchiveIntegrityResult {
@@ -40,23 +44,24 @@ export interface ArchiveIntegrityResult {
 export async function checkArchiveIntegrity(
   onProgress?: (processed: number, total: number) => Promise<void>,
 ): Promise<ArchiveIntegrityResult> {
+  return db.transaction(async (tx) => {
   const [conversationRows, revisionRows, [counts], [relational]] = await Promise.all([
-    db.select({ id: conversations.id, provider: conversations.provider, externalSessionId: conversations.externalSessionId }).from(conversations),
-    db.select().from(conversationRevisions).orderBy(asc(conversationRevisions.createdAt)),
-    sqlClient<{
+    tx.select({ id: conversations.id, provider: conversations.provider, externalSessionId: conversations.externalSessionId }).from(conversations),
+    tx.select().from(conversationRevisions).orderBy(asc(conversationRevisions.createdAt)),
+    tx.execute<{
       messages: number;
       segments: number;
       chunks: number;
-    }[]>`
+    }>(sql`
       select
         (select count(*)::int from messages) as messages,
         (select count(*)::int from message_segments) as segments,
         (select count(*)::int from conversation_search_chunks) as chunks
-    `,
-    sqlClient<{
+    `),
+    tx.execute<{
       orphan_rows: number;
       missing_search_chunks: number;
-    }[]>`
+    }>(sql`
       select
         (
           (select count(*) from conversation_revisions r left join conversations c on c.id = r.conversation_id where c.id is null) +
@@ -71,7 +76,7 @@ export async function checkArchiveIntegrity(
           where exists (select 1 from message_segments s where s.message_id = m.id and length(trim(s.content)) > 0)
             and not exists (select 1 from conversation_search_chunks chunk where chunk.message_id = m.id)
         ) as missing_search_chunks
-    `,
+    `),
   ]);
   const conversationById = new Map(conversationRows.map((row) => [row.id, row]));
   const revisionById = new Map(revisionRows.map((row) => [row.id, row]));
@@ -84,7 +89,7 @@ export async function checkArchiveIntegrity(
   for (let offset = 0; offset < revisionRows.length; offset += CHECK_BATCH_SIZE) {
     const batch = revisionRows.slice(offset, offset + CHECK_BATCH_SIZE);
     const batchMessages = await loadCaptureRevisionMessagesBatch(
-      batch.map((revision) => revision.id),
+      batch.map((revision) => revision.id), tx,
     ).catch(() => null);
     for (const revision of batch) {
       const conversation = conversationById.get(revision.conversationId);
@@ -102,7 +107,7 @@ export async function checkArchiveIntegrity(
       }
       try {
         const hydrated = batchMessages?.get(revision.id) ??
-          await loadCaptureRevisionMessages(revision.id);
+          await loadCaptureRevisionMessages(revision.id, tx);
         const calculated = revision.contentIntegrityHash ? contentIntegrityHash({
           schemaVersion: 1,
           provider: conversation.provider,
@@ -128,7 +133,8 @@ export async function checkArchiveIntegrity(
             ...(revision.completenessReason ? { reason: revision.completenessReason } : {}),
           },
           messages: hydrated,
-        }) : null;
+          ...(revision.isAccumulated && storedTokenUsage(revision) ? { tokenUsage: storedTokenUsage(revision)! } : {}),
+        }, revision.isAccumulated ? revision.mergeEvidence : undefined) : null;
         if (calculated !== null && calculated !== revision.contentIntegrityHash) {
           hashMismatches += 1;
           if (errors.length < MAX_ERROR_SAMPLES) errors.push(`Revision ${revision.id} snapshot hash mismatch`);
@@ -161,6 +167,7 @@ export async function checkArchiveIntegrity(
     missingSearchChunks,
     errors,
   };
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }
 
 export async function runArchiveIntegrityTask(taskId: string): Promise<ArchiveIntegrityResult> {

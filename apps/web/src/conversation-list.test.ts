@@ -68,3 +68,11 @@ describe("buildConversationListSearch", () => {
     expect(filterConversationTags(tags, "  ")).toBe(tags);
   });
 });
+
+it("preserves source device selection in requests and active filter counts",()=>{
+ const query={...baseQuery,sourceDevice:"name:qml-pc"};
+ const search=new URLSearchParams(buildConversationListSearch(query));
+ expect(search.get("sourceDevice")).toBe("name:qml-pc");
+ expect(countActiveConversationListFilters(query)).toBe(2);
+ expect(new URLSearchParams(buildConversationListSearch({...query,sourceDevice:""})).has("sourceDevice")).toBe(false);
+});

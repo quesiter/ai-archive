@@ -1,17 +1,18 @@
 import { defineContentScript } from "wxt/utils/define-content-script";
 import { adapterForLocation } from "../lib/adapters/runtime";
-import {
-  remainingIdleDelay,
-  shouldDeferAutoCapture,
-} from "../lib/auto-capture";
 import { decideCaptureAction } from "../lib/capture-decision";
+import { fullCaptureResult, type CaptureReceipt } from "../lib/capture-result";
 import { createNativeConversationReader, type NativeConversation } from "../lib/native-conversation";
 import type { CaptureUiState, ExtensionMessage, ExtensionSettings } from "../lib/messages";
+import type { BatchCaptureResult } from "../lib/batch-capture";
+import { batchDiagnosticIssue, readBatchPageIssue, type BatchPageIssue } from "../lib/batch-page-state";
 import {
   lightweightConversationFingerprint,
   messageTextFingerprint,
   scanAppendedMessages,
   scanConversation,
+  interruptedConversationSnapshot,
+  mergeVisible,
   CaptureInterruptedError,
   type ConversationScanOptions,
   type LightweightConversationFingerprint,
@@ -27,6 +28,8 @@ const matches = [
   "https://chat.openai.com/*",
   "https://gemini.google.com/*",
   "https://grok.com/*",
+  "https://www.doubao.com/*",
+  "https://doubao.com/*",
   "https://yuanbao.tencent.com/*",
   "https://agent.minimax.io/*",
   "https://agent.minimaxi.com/*",
@@ -54,6 +57,7 @@ const providerLabels: Record<string, string> = {
   chatgpt: "ChatGPT",
   gemini: "Gemini",
   grok: "Grok",
+  doubao: "豆包",
   yuanbao: "腾讯元宝",
   minimax_agent: "MiniMax Agent",
   deepseek: "DeepSeek",
@@ -64,7 +68,6 @@ const providerLabels: Record<string, string> = {
 const EFFECTIVE_CHANGE_DEBOUNCE_MS = 4_000;
 const STREAMING_RECHECK_MS = 2_000;
 const SESSION_POLL_MS = 3_000;
-const AUTO_CAPTURE_DEFERRED_MESSAGE = "检测到你正在操作页面，自动采集已暂缓";
 
 interface LocalConversationState extends LightweightConversationFingerprint {
   branchFingerprint: string;
@@ -74,6 +77,7 @@ interface LocalConversationState extends LightweightConversationFingerprint {
   lastFullScanAt?: string;
   lastChangeDetectedAt?: string;
   completeness?: "complete" | "partial";
+  baselineContentHash?: string;
   lastObservedSignature?: string;
 }
 
@@ -170,7 +174,8 @@ function createFloatingIndicator(actions: {
         <div class="status"><span class="status-text">待机</span></div>
         <div class="message">打开会话后自动检查变化。</div>
         <div class="meta">
-          <span>原因</span><span class="reason">-</span>
+          <span>采集触发</span><span class="reason">-</span>
+          <span class="incomplete-label" hidden>未完整原因</span><span class="incomplete-reason" hidden></span>
           <span>模式</span><span class="mode">-</span>
           <span>消息数</span><span class="count">-</span>
           <span>上次同步</span><span class="last">-</span>
@@ -187,6 +192,8 @@ function createFloatingIndicator(actions: {
   const provider = shadow.querySelector<HTMLElement>(".provider")!;
   const message = shadow.querySelector<HTMLElement>(".message")!;
   const reason = shadow.querySelector<HTMLElement>(".reason")!;
+  const incompleteLabel = shadow.querySelector<HTMLElement>(".incomplete-label")!;
+  const incompleteReason = shadow.querySelector<HTMLElement>(".incomplete-reason")!;
   const mode = shadow.querySelector<HTMLElement>(".mode")!;
   const count = shadow.querySelector<HTMLElement>(".count")!;
   const last = shadow.querySelector<HTMLElement>(".last")!;
@@ -211,6 +218,8 @@ function createFloatingIndicator(actions: {
       ? "恢复本站后继续自动检查会话变化。"
       : (lastState.message ?? "打开会话后自动检查变化。").slice(0, 180);
     reason.textContent = lastState.triggerReason ?? "-";
+    incompleteLabel.hidden = incompleteReason.hidden = lastState.status !== "partial";
+    incompleteReason.textContent = lastState.incompleteReason || "此次采集未记录具体原因，请重新完整采集以获取诊断。";
     mode.textContent =
       lastState.captureMode === "append"
         ? "增量"
@@ -229,7 +238,6 @@ function createFloatingIndicator(actions: {
     toggle.setAttribute("aria-expanded", String(!panel.hidden));
   });
   retry.addEventListener("click", () => {
-    panel.hidden = true;
     actions.onRetry();
   });
   pause.addEventListener("click", () => void actions.onPause());
@@ -272,14 +280,75 @@ export default defineContentScript({
     let pendingReason: CaptureTriggerReason | null = null;
     let pendingDelay: number | undefined;
     let pendingForceFull = false;
-    let lastUserActivityAt = 0;
-    let autoCaptureDeferred = false;
     let suppressObserverMutations = false;
     let invalidated = false;
     const nativeReader = createNativeConversationReader();
     let nativeRead: Promise<NativeConversation | null> | undefined;
+    let batchPage = /^#ai-archive-batch=[0-9a-f-]{36}$/i.test(location.hash);
+    let batchOperation: { operationId: string; itemId: string; running: boolean; result?: BatchCaptureResult } | undefined;
+    let batchAttention: BatchPageIssue | undefined;
+    const batchOwner = batchPage ? location.hash.slice("#ai-archive-batch=".length) : undefined;
+    const originalBatchUrl = batchPage ? new URL(location.href) : undefined;
+    function ownsOriginalBatchDocument(operationId = batchOwner) {
+      if (!originalBatchUrl || !operationId || operationId !== batchOwner) return false;
+      const current = new URL(location.href);
+      return current.origin === originalBatchUrl.origin && current.pathname === originalBatchUrl.pathname &&
+        current.search === originalBatchUrl.search &&
+        (current.hash === "" || current.hash === `#ai-archive-batch=${operationId}`);
+    }
+    let batchPageIssue: BatchPageIssue | undefined;
+    function currentBatchIssue() {
+      const issue = readBatchPageIssue(document);
+      if (issue && (issue.outcome === "attention" || !batchPageIssue)) batchPageIssue = issue;
+      if (!issue && batchPageIssue && !batchOperation?.running && ownsOriginalBatchDocument()) {
+        const adapter = adapterForLocation();
+        const mountedSession = adapter?.getConversationRoot()?.getAttribute("data-conversation-id");
+        if (adapter?.definition.provider === "chatgpt" &&
+            (!mountedSession || mountedSession === adapter.getSessionId()) &&
+            adapter.extractVisibleMessages().length > 0) {
+          // Clear only page-local stale evidence. A completed operation result,
+          // server pause and the durable safety cooldown remain unchanged.
+          batchPageIssue = undefined;
+        }
+      }
+      if (batchPageIssue?.outcome === "attention" && batchOperation?.running) {
+        batchAttention = batchPageIssue;
+        captureController?.abort();
+        scrollController?.abort();
+      }
+      return batchPageIssue;
+    }
+    const batchIssueObserver = batchPage ? new MutationObserver(() => { currentBatchIssue(); }) : undefined;
+    batchIssueObserver?.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
     let captureController: AbortController | undefined;
+    let scrollController: AbortController | undefined;
     let manualCaptureActive = false;
+
+    function contextWasInvalidated(error: unknown): boolean {
+      return /extension context invalidated/i.test(error instanceof Error ? error.message : String(error));
+    }
+
+    function contextActive(): boolean {
+      if (invalidated) return false;
+      try {
+        if (ctx.isInvalid) {
+          stop();
+          return false;
+        }
+      } catch (error) {
+        if (!contextWasInvalidated(error)) throw error;
+        stop();
+        return false;
+      }
+      return true;
+    }
+
+    function runDetached(task: () => Promise<unknown>): void {
+      void Promise.resolve().then(() => contextActive() ? task() : undefined).catch((error) => {
+        if (contextWasInvalidated(error)) stop();
+        else if (!invalidated) console.error("知言归藏后台任务失败", error);
+      });
+    }
 
     const reasonPriority: Record<CaptureTriggerReason, number> = {
       manual_retry: 100,
@@ -352,15 +421,19 @@ export default defineContentScript({
     }
 
     async function refreshFloatingIndicator(): Promise<void> {
-      if (await shouldShowFloatingIndicator()) {
+      if (invalidated) return;
+      const show = await shouldShowFloatingIndicator();
+      if (invalidated) return;
+      if (show) {
         if (!indicator) {
           indicator = createFloatingIndicator({
             onRetry: () => schedule("manual_retry", 0, { forceFull: true }),
-            onPause: togglePaused,
+            onPause: async () => { runDetached(togglePaused); },
           });
         }
         if (lastPublishedState) indicator.update(lastPublishedState);
-        indicator.setPaused(await isPaused());
+        const paused = await isPaused();
+        if (!invalidated) indicator?.setPaused(paused);
         return;
       }
       indicator?.destroy();
@@ -368,23 +441,25 @@ export default defineContentScript({
     }
 
     function recordUserActivity(): void {
-      lastUserActivityAt = Date.now();
-      autoCaptureDeferred = false;
-      if (manualCaptureActive) captureController?.abort();
-    }
-
-    function autoCaptureIdleDelay(): number {
-      return remainingIdleDelay(lastUserActivityAt);
+      if (manualCaptureActive) scrollController?.abort();
     }
 
     async function publishState(state: Omit<CaptureUiState, "updatedAt">): Promise<void> {
+      if (invalidated) return;
       const fields = ["status", "provider", "sessionId", "triggerReason", "captureMode", "messageCount", "outboxCount", "message"] as const;
       if (lastPublishedState && fields.every((field) => lastPublishedState?.[field] === state[field])) return;
       const fullState = { ...state, updatedAt: new Date().toISOString() };
       lastPublishedState = fullState;
+      if (state.triggerReason === "manual_retry" && ["complete", "partial", "failed", "queued"].includes(state.status)) {
+        await browser.storage.local.set({ lastManualCapture: fullState });
+      }
       indicator?.update(fullState);
       const message: ExtensionMessage = { type: "captureState", state: fullState };
-      await browser.runtime.sendMessage(message).catch(() => undefined);
+      try {
+        await browser.runtime.sendMessage(message);
+      } catch (error) {
+        if (contextWasInvalidated(error)) stop();
+      }
     }
 
     function detachObserver(): void {
@@ -425,7 +500,19 @@ export default defineContentScript({
       nextObserver.observe(root, { childList: true, subtree: true, characterData: true });
     }
 
-    const activityListener = () => {
+    const activityListener = (event: Event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("#ai-archive-floating-indicator")) return;
+      // ChatGPT restores composer focus while mounting history. Focus alone
+      // does not mean the user has taken control of a manual scan.
+      if (event.type === "focusin") return;
+      if (event instanceof KeyboardEvent && (
+        ["Shift", "Control", "Alt", "Meta", "CapsLock", "NumLock", "ScrollLock", "PrintScreen"].includes(event.key) ||
+        event.metaKey || (event.ctrlKey && ["c", "C"].includes(event.key))
+      )) return;
+      // History mounting can dispatch synthetic input events. They do not
+      // indicate that the person has taken over the page.
+      if (event.type === "input" && !event.isTrusted) return;
       recordUserActivity();
     };
     const activityEvents: Array<keyof WindowEventMap> = [
@@ -445,7 +532,7 @@ export default defineContentScript({
       delay = EFFECTIVE_CHANGE_DEBOUNCE_MS,
       options: { forceFull?: boolean } = {},
     ): void {
-      if (invalidated) return;
+      if (invalidated || batchPage) return;
       queuePending(reason, delay, Boolean(options.forceFull));
       // Do not start another timer while an asynchronous evaluation/scan is
       // active. Its finally block will schedule the coalesced pending reason.
@@ -458,6 +545,7 @@ export default defineContentScript({
       if (debounceTimer) clearTimeout(debounceTimer);
       scheduledDueAt = dueAt;
       debounceTimer = setTimeout(() => {
+        if (!contextActive()) return;
         debounceTimer = undefined;
         scheduledDueAt = 0;
         const next = consumePending();
@@ -489,17 +577,15 @@ export default defineContentScript({
     }
 
     async function enqueuePayload(payload: CapturePayloadV1) {
-      const message: ExtensionMessage = { type: "enqueueCapture", payload };
+      const message: ExtensionMessage = { type: "enqueueCapture", payload,
+        ...(batchOperation?.running ? { batch: { operationId: batchOperation.operationId, itemId: batchOperation.itemId } } : {}) };
       return browser.runtime.sendMessage(message) as Promise<
         | {
             sent?: number;
+            captureId?: string;
             remaining?: number;
             requiresFullCapture?: boolean;
-            lastResult?: {
-              revisionId?: string;
-              messageCount?: number;
-              completeness?: "complete" | "partial";
-            };
+            lastResult?: CaptureReceipt;
           }
         | undefined
       >;
@@ -508,7 +594,7 @@ export default defineContentScript({
     async function updateStateFromPayload(
       payload: CapturePayloadV1,
       light: LightweightConversationFingerprint,
-      result?: { revisionId?: string; messageCount?: number; completeness?: "complete" | "partial" },
+      result?: CaptureReceipt,
     ): Promise<void> {
       const payloadMessageCount = isDeltaPayload(payload)
         ? payload.baseMessageCount + payload.appendedMessages.length
@@ -523,7 +609,7 @@ export default defineContentScript({
       const observedSignature = lightSignature(light);
       if (completeness === "partial") {
         const previous = await loadConversationState(payload.provider, payload.sessionId);
-        if (previous?.completeness === "complete" && payload.triggerReason !== "incremental_base_mismatch") {
+        if (previous?.completeness === "complete" && previous.baselineContentHash && payload.triggerReason !== "incremental_base_mismatch") {
           // A viewport-only save is useful evidence, but must not replace the
           // trusted archive baseline used to append the next complete answer.
           await saveConversationState({ ...previous, lastObservedSignature: observedSignature });
@@ -540,6 +626,10 @@ export default defineContentScript({
         // ChatGPT window looks like a shortened branch on the next check.
         messageCount: result?.messageCount ?? payloadMessageCount,
         ...(result?.revisionId ? { revisionId: result.revisionId } : {}),
+        ...(result?.completeness === "complete" && result.baselineContentHash &&
+            (isDeltaPayload(payload) || payload.completeness.status === "complete") &&
+            (result.messageCount ?? payloadMessageCount) === payloadMessageCount
+          ? { baselineContentHash: result.baselineContentHash } : {}),
         ...(lastMessage?.externalMessageId ? { lastMessageId: lastMessage.externalMessageId } : {}),
         ...(lastMessage ? { lastMessageRole: lastMessage.role } : {}),
         ...(lastMessage ? { lastMessageTextHash: await messageTextFingerprint(lastMessage) } : {}),
@@ -571,7 +661,7 @@ export default defineContentScript({
       adapter: NonNullable<ReturnType<typeof adapterForLocation>>,
       light: LightweightConversationFingerprint,
       reason: CaptureTriggerReason,
-    ): Promise<void> {
+    ) {
       await publishState({
         status: "scanning",
         provider: light.provider,
@@ -580,28 +670,41 @@ export default defineContentScript({
         captureMode: "full",
         messageCount: light.messageCount,
         message: reason === "manual_retry"
-          ? "正在补全历史消息，必要时会滚动页面；操作页面可停止"
+          ? "正在补全历史消息；操作页面会停止自动滚动，已加载消息仍会保存"
           : "正在归档已加载消息，保持页面位置不变",
       });
-      const snapshot = await scanConversation(adapter, scanOptions(adapter, reason));
-      if (captureController?.signal.aborted || adapter.getSessionId() !== light.sessionId) {
+      const initialMessages = adapter.extractVisibleMessages();
+      let interrupted = false;
+      let snapshot;
+      try {
+        const options = scanOptions(adapter, reason);
+        const reportProgress = options.onProgress;
+        options.onProgress = async (progress) => {
+          // Preserve the history already read if scrolling is interrupted.
+          // The interrupted result remains partial, regardless of ordering.
+          mergeVisible(initialMessages, adapter.extractVisibleMessages());
+          await reportProgress?.(progress);
+        };
+        snapshot = await scanConversation(adapter, options);
+      } catch (error) {
+        if (!(error instanceof CaptureInterruptedError) || reason !== "manual_retry" ||
+            invalidated || captureController?.signal.aborted || adapter.getSessionId() !== light.sessionId) throw error;
+        interrupted = true;
+        snapshot = await interruptedConversationSnapshot(adapter, light.sessionId, initialMessages);
+      }
+      if ((!interrupted && captureController?.signal.aborted) || adapter.getSessionId() !== light.sessionId) {
         throw new CaptureInterruptedError();
       }
       const result = await enqueuePayload(snapshot);
       await updateStateFromPayload(snapshot, light, result?.lastResult);
       await publishState({
-        status: result?.lastResult ? snapshot.completeness.status : "queued",
+        ...fullCaptureResult(snapshot, result?.lastResult),
         provider: snapshot.provider,
         sessionId: snapshot.sessionId,
         triggerReason: reason,
         captureMode: "full",
-        messageCount: snapshot.messages.length,
-        message: !result?.lastResult
-          ? `${snapshot.messages.length} 条消息已保存到本地队列，等待上传`
-          : snapshot.completeness.status === "complete"
-          ? `${snapshot.messages.length} 条消息已完整归档`
-          : `已保存 ${snapshot.messages.length} 条消息；${snapshot.completeness.reason ?? "历史可能尚未加载完整"}`,
       });
+      return result?.captureId;
     }
 
     function scanOptions(
@@ -611,12 +714,37 @@ export default defineContentScript({
       return {
         triggerReason: reason,
         ...(captureController ? { signal: captureController.signal } : {}),
+        onProgress: async (progress) => {
+          await publishState({ status: "scanning", provider: adapter.definition.provider,
+            sessionId: adapter.getSessionId() ?? "", triggerReason: reason,
+            captureMode: "full", ...progress });
+        },
+        ...(scrollController ? { scrollSignal: scrollController.signal } : {}),
         readNative: (visible) => nativeRead ??= nativeReader(
           adapter.definition.provider,
           adapter.getSessionId() ?? "",
           visible.flatMap((message) => message.externalMessageId ? [message.externalMessageId] : []),
           captureController?.signal,
-        ),
+          {
+            manualRetry: reason === "manual_retry",
+            onDiagnostic: (diagnostic) => {
+              if (batchOperation?.running) {
+                const page = currentBatchIssue();
+                const request = batchDiagnosticIssue(diagnostic);
+                batchAttention = page?.outcome === "attention" ? page
+                  : request?.outcome === "attention" ? request : page ?? request ?? batchAttention;
+                if (batchAttention?.outcome === "attention") {
+                  captureController?.abort();
+                  scrollController?.abort();
+                }
+              }
+              // Bounded reason codes only: no login token, message text, or raw response.
+              runDetached(() => browser.storage.local.set({ nativeReadDiagnostic: {
+                ...diagnostic, updatedAt: new Date().toISOString(),
+              } }));
+            },
+          },
+        ).then(value => { if (batchAttention) throw new Error(batchAttention.message); return value; }),
       };
     }
 
@@ -626,6 +754,7 @@ export default defineContentScript({
       light: LightweightConversationFingerprint,
       reason: CaptureTriggerReason,
     ): Promise<boolean> {
+      if (state.completeness !== "complete" || !state.baselineContentHash) return false;
       await publishState({
         status: "checking",
         provider: light.provider,
@@ -637,6 +766,7 @@ export default defineContentScript({
       });
       const delta = await scanAppendedMessages(adapter, {
         revisionId: state.revisionId,
+        baselineContentHash: state.baselineContentHash,
         messageCount: state.messageCount,
         branchFingerprint: state.branchFingerprint,
         lastMessageId: state.lastMessageId,
@@ -662,15 +792,11 @@ export default defineContentScript({
       }
       await updateStateFromPayload(delta, light, result?.lastResult);
       await publishState({
-        status: result?.lastResult ? "complete" : "queued",
+        ...fullCaptureResult(delta, result?.lastResult),
         provider: delta.provider,
         sessionId: delta.sessionId,
         triggerReason: reason,
         captureMode: "append",
-        messageCount: delta.baseMessageCount + delta.appendedMessages.length,
-        message: result?.lastResult
-          ? `增量同步完成，新增 ${delta.appendedMessages.length} 条消息`
-          : `${delta.appendedMessages.length} 条新增消息已保存到本地队列，等待上传`,
       });
       return true;
     }
@@ -689,6 +815,7 @@ export default defineContentScript({
       evaluationInFlight = true;
       scanning = true;
       captureController = new AbortController();
+      scrollController = new AbortController();
       manualCaptureActive = reason === "manual_retry";
       nativeRead = undefined;
       let activeLight: LightweightConversationFingerprint | null = null;
@@ -698,17 +825,34 @@ export default defineContentScript({
       try {
         if (await isPaused()) {
           discardPending = true;
+          if (reason === "manual_retry") {
+            await publishState({ status: "idle", triggerReason: reason, message: "本站已暂停，请先点击“恢复本站”再采集。" });
+          }
           return;
         }
         const adapter = adapterForLocation();
         if (!adapter) {
           discardPending = true;
+          if (reason === "manual_retry") {
+            await publishState({ status: "failed", triggerReason: reason, message: "当前页面不在支持的 AI 网站中。" });
+          }
           return;
+        }
+        if (reason === "manual_retry") {
+          await publishState({ status: "checking", provider: adapter.definition.provider, triggerReason: reason, message: "正在检查当前对话…" });
         }
         attachObserver();
         const light = await lightweightConversationFingerprint(adapter);
         if (!light || light.messageCount === 0) {
           discardPending = true;
+          if (reason === "manual_retry") {
+            await publishState({
+              status: "failed", provider: adapter.definition.provider, triggerReason: reason,
+              message: adapter.getSessionId()
+                ? "没有识别到对话消息，请等待消息加载后重试；若页面已有消息，请反馈此提示。"
+                : "没有识别到会话编号，请先打开一条已有的对话再采集。",
+            });
+          }
           return;
         }
         activeLight = light;
@@ -716,37 +860,7 @@ export default defineContentScript({
         const state = await loadConversationState(light.provider, light.sessionId);
         previousStreaming = previousStreaming || Boolean(state?.streaming);
 
-        const idleDelay = autoCaptureIdleDelay();
-        if (
-          shouldDeferAutoCapture({
-            reason,
-            forceFull: options.forceFull,
-            lastUserActivityAt,
-          }) &&
-          idleDelay > 0
-        ) {
-          if (!autoCaptureDeferred) {
-            autoCaptureDeferred = true;
-            await publishState({
-              status: "idle",
-              provider: light.provider,
-              sessionId: light.sessionId,
-              triggerReason: reason,
-              captureMode: state?.completeness === "complete" ? "append" : "full",
-              messageCount: light.messageCount,
-              message: AUTO_CAPTURE_DEFERRED_MESSAGE,
-            });
-          }
-          schedule(
-            reason,
-            Math.max(idleDelay, 1_000),
-            options.forceFull ? { forceFull: true } : {},
-          );
-          return;
-        }
-        autoCaptureDeferred = false;
-
-      if (light.streaming) {
+      if (light.streaming && reason !== "manual_retry") {
         previousStreaming = true;
         preserveStreaming = true;
         await publishState({
@@ -757,7 +871,7 @@ export default defineContentScript({
           messageCount: light.messageCount,
           message: "等待 AI 生成完成",
         });
-        schedule(reason === "manual_retry" ? reason : "stream_finished", STREAMING_RECHECK_MS, options);
+        schedule("stream_finished", STREAMING_RECHECK_MS, options);
         return;
       }
 
@@ -809,6 +923,7 @@ export default defineContentScript({
       }
       publishSkipped(light);
       } catch (error) {
+        if (contextWasInvalidated(error)) stop();
         if (invalidated) return;
         await publishState({
           status: error instanceof CaptureInterruptedError ? "idle" : "failed",
@@ -827,6 +942,7 @@ export default defineContentScript({
         scanning = false;
         manualCaptureActive = false;
         captureController = undefined;
+        scrollController = undefined;
         nativeRead = undefined;
         evaluationInFlight = false;
         if (discardPending) {
@@ -847,14 +963,17 @@ export default defineContentScript({
       return [adapter.definition.provider, sessionId].join(":");
     }
 
-    void refreshFloatingIndicator();
+    runDetached(refreshFloatingIndicator);
     attachObserver();
     lastSessionKey = currentSessionKey();
     schedule("new_session", 2_000);
 
     const routeTimer = setInterval(() => {
+      if (!contextActive()) return;
       if (location.href !== lastUrl) {
-        captureController?.abort();
+        const retainedBatchDocument = ownsOriginalBatchDocument();
+        if (!retainedBatchDocument) captureController?.abort();
+        batchPage = retainedBatchDocument;
         lastUrl = location.href;
         lastSessionKey = currentSessionKey();
         attachObserver();
@@ -863,6 +982,7 @@ export default defineContentScript({
     }, SESSION_POLL_MS);
 
     const sessionTimer = setInterval(() => {
+      if (!contextActive()) return;
       const sessionKey = currentSessionKey();
       if (!sessionKey) {
         lastSessionKey = "";
@@ -883,16 +1003,65 @@ export default defineContentScript({
         areaName === "local" &&
         ("showFloatingIndicator" in changes || "pausedHosts" in changes)
       ) {
-        void refreshFloatingIndicator();
+        runDetached(refreshFloatingIndicator);
         if ("pausedHosts" in changes) {
-          void isPaused().then((paused) => { if (paused) captureController?.abort(); });
+          runDetached(async () => { if (await isPaused()) captureController?.abort(); });
         }
       }
     };
-    browser.storage.onChanged.addListener(storageListener);
-
-    browser.runtime.onMessage.addListener((raw: unknown) => {
+    const messageListener = (raw: unknown) => {
+      if (!contextActive()) return undefined;
       const message = raw as ExtensionMessage;
+      if (message.type === "getBatchCaptureState") {
+        return Promise.resolve({ ...(batchOperation?.operationId === message.operationId ? batchOperation : { running: false }),
+          batchOwner, pageIssue: currentBatchIssue() });
+      }
+      if (message.type === "cancelBatchCapture") {
+        if (batchOperation?.operationId === message.operationId) captureController?.abort();
+        return Promise.resolve({ ok: true });
+      }
+      if (message.type === "startBatchCapture") {
+        if (!ownsOriginalBatchDocument(message.operationId)) return Promise.resolve({ error: "不是专用补采标签页" });
+        if (batchOperation?.operationId === message.operationId) return Promise.resolve({ ok: true });
+        if (evaluationInFlight) return Promise.resolve({ busy: true });
+        const adapter = adapterForLocation();
+        if (!adapter || adapter.definition.provider !== "chatgpt" || adapter.getSessionId() !== message.sessionId) return Promise.resolve({ error: "当前会话与补采任务不匹配" });
+        batchOperation = { operationId: message.operationId, itemId: message.itemId, running: true };
+        evaluationInFlight = true;
+        scanning = true;
+        manualCaptureActive = true;
+        captureController = new AbortController();
+        scrollController = new AbortController();
+        nativeRead = undefined;
+        batchAttention = undefined;
+        runDetached(async () => {
+          try {
+            if (await isPaused()) {
+              batchAttention = { outcome: "attention", message: "本站采集已暂停，请恢复本站后继续补采队列" };
+              throw new Error(batchAttention.message);
+            }
+            const light = await lightweightConversationFingerprint(adapter);
+            if (!light?.messageCount) throw new Error("没有识别到会话内容，已跳过本条");
+            const captureId = await withObserverSuppressed(() => runFullCapture(adapter, light, "manual_retry"));
+            batchOperation!.result = captureId ? { captureId } : { outcome: "attention", message: "采集结果尚未加入上传队列，请重试" };
+          } catch (error) {
+            const pageIssue = currentBatchIssue();
+            batchOperation!.result = (batchAttention?.outcome === "attention" ? batchAttention : pageIssue ?? batchAttention) ?? {
+              outcome: "failed", message: (error instanceof Error ? error.message : "本条采集失败，继续下一条").slice(0,500) };
+          } finally {
+            batchOperation!.running = false;
+            evaluationInFlight = false;
+            scanning = false;
+            manualCaptureActive = false;
+            captureController = undefined;
+            scrollController = undefined;
+            nativeRead = undefined;
+            const next = consumePending();
+            if (!batchPage && next.reason && !invalidated) schedule(next.reason, next.delay, { forceFull: next.forceFull });
+          }
+        });
+        return Promise.resolve({ ok: true });
+      }
       if (message.type === "manualCapture") {
         schedule("manual_retry", 0, { forceFull: true });
         return Promise.resolve({ ok: true });
@@ -905,18 +1074,22 @@ export default defineContentScript({
         const adapter = adapterForLocation();
         return Promise.resolve({
           supported: Boolean(adapter),
+          adapterVersion: adapter?.definition.version,
           provider: adapter?.definition.provider,
           title: adapter?.getTitle(),
           sessionId: adapter?.getSessionId(),
           scanning,
+          messageCount: adapter?.extractVisibleMessages().length ?? 0,
         });
       }
       return undefined;
-    });
+    };
 
-    ctx.onInvalidated(() => {
+    function stop(): void {
+      if (invalidated) return;
       invalidated = true;
       captureController?.abort();
+      batchIssueObserver?.disconnect();
       detachObserver();
       for (const eventName of activityEvents) {
         window.removeEventListener(eventName, activityListener, { capture: true } as AddEventListenerOptions);
@@ -926,8 +1099,23 @@ export default defineContentScript({
       if (debounceTimer) clearTimeout(debounceTimer);
       scheduledDueAt = 0;
       consumePending();
-      browser.storage.onChanged.removeListener(storageListener);
+      try {
+        browser.storage.onChanged.removeListener(storageListener);
+        browser.runtime.onMessage.removeListener(messageListener);
+      } catch (error) {
+        if (!contextWasInvalidated(error)) console.error("知言归藏清理失败", error);
+      }
       indicator?.destroy();
-    });
+      indicator = undefined;
+    }
+    ctx.onInvalidated(stop);
+    try {
+      if (!contextActive()) return;
+      browser.storage.onChanged.addListener(storageListener);
+      browser.runtime.onMessage.addListener(messageListener);
+    } catch (error) {
+      stop();
+      if (!contextWasInvalidated(error)) throw error;
+    }
   },
 });

@@ -8,6 +8,7 @@ dist/
 *_Conflict.*
 *.tsbuildinfo
 coverage/
+__pycache__/
 data/
 .e2e-data/
 imports/inbox/*
@@ -23,3 +24,6 @@ release/*
 !release/ai-conversation-archive-macos-sync-*.tar.gz
 !release/SHA256SUMS-*.txt
 !release/release-qualification-*.json
+
+# Local verification/deployment evidence may contain private runtime data.
+.codex-tmp/

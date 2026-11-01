@@ -51,6 +51,8 @@ describe("UUID route parameter validation", () => {
     ["GET", "/api/v1/reports/not-a-uuid"],
     ["GET", "/api/v1/reports/not-a-uuid/download"],
     ["POST", "/api/v1/reports/not-a-uuid/email/retry"],
+    ["POST", "/api/v1/reports/not-a-uuid/regenerate"],
+    ["GET", "/api/v1/reports/not-a-uuid/generation"],
     ["DELETE", "/api/v1/auth/sessions/not-a-uuid"],
     ["GET", "/api/v1/backups/restores/not-a-uuid"],
     ["DELETE", "/api/v1/backups/restores/not-a-uuid"],

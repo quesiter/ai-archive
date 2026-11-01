@@ -179,7 +179,7 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/devices/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+      const { id } = z.object({ id: z.guid() }).parse(request.params);
       const input = z.object({ name: z.string().min(1).max(128) }).parse(request.body);
       const [device] = await db
         .update(devices)
@@ -210,30 +210,22 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/devices/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+      const { id } = z.object({ id: z.guid() }).parse(request.params);
       const [existing] = await db
         .select({ id: devices.id, revokedAt: devices.revokedAt })
         .from(devices)
         .where(eq(devices.id, id))
         .limit(1);
       if (!existing) return reply.code(404).send({ error: "Device not found" });
-      if (existing.revokedAt) {
-        await db.delete(devices).where(eq(devices.id, id));
-        await writeOperationLog({
-          scope: "device",
-          message: "已删除撤销设备",
-          status: "deleted",
-          entityType: "device",
-          entityId: existing.id,
-        });
-      } else {
+      // Revocation is idempotent; retain this row for historical source attribution.
+      if (!existing.revokedAt) {
         await db
           .update(devices)
           .set({ revokedAt: new Date() })
           .where(eq(devices.id, id));
         await writeOperationLog({
           scope: "device",
-          message: "设备已撤销",
+          message: "设备已解除配对，历史来源记录保留",
           status: "revoked",
           entityType: "device",
           entityId: existing.id,

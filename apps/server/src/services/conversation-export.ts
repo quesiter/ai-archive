@@ -1,7 +1,7 @@
 import ExcelJS from "exceljs";
 import { PassThrough, Readable, type Writable } from "node:stream";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
-import { stripInternalConversationMetadata } from "@ai-archive/contracts";
+import { stripInternalConversationMetadata, type CaptureMessage } from "@ai-archive/contracts";
 import { db } from "../db.js";
 import {
   conversationProjects,
@@ -9,7 +9,34 @@ import {
   conversations,
   projects,
 } from "../schema.js";
-import { loadHydratedRevisionMessages } from "./revision-storage.js";
+import { loadCurrentConversationArchive, type HydratedRevisionMessage } from "./revision-storage.js";
+import { projectSourceReview, sourceReviewBodyHash } from "./source-review.js";
+
+type CaptureBody = {
+  externalMessageId?: string | null | undefined;
+  role: string;
+  segments: ReadonlyArray<{ type: string; content: string; href?: string | null | undefined; language?: string | null | undefined }>;
+};
+
+function captureBodyKey(message: CaptureBody): string {
+  return JSON.stringify([message.externalMessageId ?? null, message.role, message.segments.map(segment => [
+    segment.type, segment.content.replace(/\r+\n/g, "\n"), segment.href ?? null, segment.language ?? null,
+  ])]);
+}
+
+/** Select distinct alternate bodies without modifying primary rows or evidence. */
+export function distinctCaptureBodyVariants(primary: readonly CaptureBody[], variants: readonly CaptureMessage[]): CaptureMessage[] {
+  const alternativesByBody = new Map<string, CaptureMessage>();
+  for (const alternative of variants) {
+    const key = captureBodyKey(alternative);
+    if (!alternativesByBody.has(key)) alternativesByBody.set(key, alternative);
+  }
+  for (const message of primary) {
+    if (!alternativesByBody.size) break;
+    alternativesByBody.delete(captureBodyKey(message));
+  }
+  return [...alternativesByBody.values()];
+}
 
 export type ConversationExportFormat = "csv" | "md" | "xlsx";
 
@@ -27,6 +54,25 @@ export interface ConversationExportRow {
   model: string;
   messageAt: string;
   content: string;
+  recordType?: "reviewed_edit" | "reviewed_observation" | "unreviewed_observation";
+}
+
+const exportRecordLabels = {
+  reviewed_edit: "编辑前消息（已核对）",
+  reviewed_observation: "已核对的展示/预览记录",
+  unreviewed_observation: "未核对差异",
+} as const;
+
+function captureMessageForReview(message: HydratedRevisionMessage): CaptureMessage {
+  return {
+    ordinal: message.ordinal, role: message.role,
+    ...(message.externalMessageId != null ? { externalMessageId: message.externalMessageId } : {}),
+    ...(message.model != null ? { model: message.model } : {}),
+    ...(message.sourceCreatedAt ? { createdAt: message.sourceCreatedAt.toISOString() } : {}),
+    segments: message.segments.map((segment) => ({ type: segment.type, content: segment.content,
+      ...(segment.href != null ? { href: segment.href } : {}),
+      ...(segment.language != null ? { language: segment.language } : {}) })),
+  };
 }
 
 export interface ConversationExportData {
@@ -70,8 +116,8 @@ export function exportableMessageContent(input: {
   segments: Array<{
     type: string;
     content: string;
-    href?: string | null;
-    language?: string | null;
+    href?: string | null | undefined;
+    language?: string | null | undefined;
   }>;
 }): string {
   if (input.role !== "user" && input.role !== "assistant") return "";
@@ -225,6 +271,7 @@ async function loadConversationExportSource(input: {
     .where(inArray(conversationRevisions.conversationId, conversationIds))
     .orderBy(
       asc(conversationRevisions.conversationId),
+      desc(conversationRevisions.isAccumulated),
       desc(sql`(${conversationRevisions.completeness} = 'complete')`),
       desc(conversationRevisions.capturedAt),
       desc(conversationRevisions.createdAt),
@@ -278,7 +325,77 @@ async function* iterateConversationExportRows(
 ): AsyncGenerator<ConversationExportRow> {
   for (const relation of source.relations) {
     // Loading one logical revision at a time bounds peak memory for large projects.
-    const revisionMessages = await loadHydratedRevisionMessages(relation.revision.id);
+    const archive = await loadCurrentConversationArchive(relation.conversation.id);
+    if (!archive) continue;
+    const revisionMessages = archive.messages;
+    const evidence = archive.revision.mergeEvidence;
+    const projection = evidence?.sourceReview ? projectSourceReview({
+      provider: relation.conversation.provider, sessionId: relation.conversation.externalSessionId,
+      sourceReview: evidence.sourceReview, primaryMessages: revisionMessages.map(captureMessageForReview),
+      variants: evidence.variants, warnings: evidence.warnings,
+    }) : undefined;
+    if (projection?.validation.valid) {
+      const rowFor = (message: CaptureMessage, content: string): ConversationExportRow => ({
+        projectName: relation.conversation.projectName ?? "", conversationId: relation.conversation.id,
+        conversationTitle: relation.conversation.title || relation.conversation.externalSessionId,
+        provider: relation.conversation.provider, externalSessionId: relation.conversation.externalSessionId,
+        canonicalUrl: safeExportUrl(relation.conversation.canonicalUrl), revisionId: archive.revision.id,
+        capturedAt: archive.revision.capturedAt.toISOString(), messageOrdinal: message.ordinal,
+        role: message.role as "user" | "assistant", model: message.model ?? "", messageAt: message.createdAt ?? "", content,
+      });
+      const represented = new Map<string, number>();
+      for (const message of projection.projectedMessages) {
+        const content = exportableMessageContent(message);
+        if (!content || (message.role !== "user" && message.role !== "assistant")) continue;
+        const hash = sourceReviewBodyHash(message);
+        represented.set(hash, (represented.get(hash) ?? 0) + 1);
+        yield rowFor(message, content);
+      }
+      const review = projection.validation.review;
+      const referenceKey = (messageId: string | undefined, hash: string) => JSON.stringify([messageId, hash]);
+      const reviewed = new Map(review.reviewedBodies.map((body) => [referenceKey(body.messageId, body.bodyHash), body.kind]));
+      const known = new Set([...review.selectedBodies, ...review.reviewedBodies].map((body) => referenceKey(body.messageId, body.bodyHash)));
+      const invalidated = new Set(projection.invalidatedMessageIds);
+      const inactive = new Set(projection.inactiveMessages.map((message) => message.externalMessageId));
+      const remainders = new Map(projection.remainderObservations.map((observation) => [`${observation.origin}:${observation.index}`, observation]));
+      const original = [
+        ...revisionMessages.map((message, index) => ({ message: captureMessageForReview(message), index, origin: "primary" as const })),
+        ...evidence!.variants.map((message, index) => ({ message, index, origin: "variant" as const })),
+      ];
+      const kindLabels = { map_rendering: "地图显示内容", partial_rendering: "部分渲染片段",
+        attachment_preview: "附件/表格预览", source_text: "源正文观察" } as const;
+      for (const observation of original) {
+        const { message, origin, index } = observation;
+        if (message.role !== "user" && message.role !== "assistant") continue;
+        const hash = sourceReviewBodyHash(message);
+        const shown = represented.get(hash) ?? 0;
+        if (shown > 0) { represented.set(hash, shown - 1); continue; }
+        // The projection omits exact visible bodies. Retain every additional
+        // model/source-time observation as a separate record too; unlike the
+        // legacy display deduplication, this is a provenance-preserving export.
+        const remainder = remainders.get(`${origin}:${index}`);
+        const key = referenceKey(message.externalMessageId, hash);
+        const resolved = remainder?.resolved ?? Boolean(message.externalMessageId &&
+          !invalidated.has(message.externalMessageId) && known.has(key));
+        const wasEdited = remainder?.inactive ?? inactive.has(message.externalMessageId);
+        const kind = remainder?.kind ?? reviewed.get(key);
+        const recordType = resolved ? wasEdited ? "reviewed_edit" : "reviewed_observation" : "unreviewed_observation";
+        const recordOrigin = origin === "primary" ? `原主正文 #${message.ordinal}` : `原差异观察 #${index + 1}`;
+        const originalId = origin === "primary" ? revisionMessages[index]?.id : undefined;
+        const firstObservedAt = origin === "primary" ? revisionMessages[index]?.createdAt?.toISOString() : undefined;
+        const details = [exportRecordLabels[recordType], "非连续问答记录", kind ? kindLabels[kind] : "",
+          recordOrigin, message.externalMessageId ? `消息 ${message.externalMessageId}` : "匿名消息",
+          originalId ? `原记录 ${originalId}` : "", firstObservedAt ? `首次归档 ${firstObservedAt}` : "", `正文哈希 ${hash}`,
+          archive.revision.contentIntegrityHash ? `原归档哈希 ${archive.revision.contentIntegrityHash}` : "",
+        ].filter(Boolean).join("；");
+        const rawContent = message.segments.map((segment) => {
+          const href = safeExportUrl(segment.href);
+          return href ? `${segment.content} (${href})` : segment.content;
+        }).join("\n");
+        yield { ...rowFor(message, `[${details}]\n${rawContent}`), recordType };
+      }
+      continue;
+    }
     for (const message of revisionMessages) {
       const content = exportableMessageContent(message);
       if (!content || (message.role !== "user" && message.role !== "assistant")) continue;
@@ -290,13 +407,36 @@ async function* iterateConversationExportRows(
         provider: relation.conversation.provider,
         externalSessionId: relation.conversation.externalSessionId,
         canonicalUrl: safeExportUrl(relation.conversation.canonicalUrl),
-        revisionId: relation.revision.id,
-        capturedAt: relation.revision.capturedAt.toISOString(),
+        revisionId: archive.revision.id,
+        capturedAt: archive.revision.capturedAt.toISOString(),
         messageOrdinal: message.ordinal,
         role: message.role,
         model: message.model ?? "",
         messageAt: message.sourceCreatedAt?.toISOString() ?? "",
         content,
+      };
+    }
+    // Keep source-time/model observations in storage, but export each distinct
+    // alternate body once. Primary rows (including real repeated turns) above
+    // are emitted unchanged; this map applies only to evidence.
+    for (const alternative of distinctCaptureBodyVariants(revisionMessages, archive.revision.mergeEvidence?.variants ?? [])) {
+      if (alternative.role !== "user" && alternative.role !== "assistant") continue;
+      const content = alternative.segments.map(segment => segment.href ? `${segment.content} (${segment.href})` : segment.content).join("\n");
+      if (!content.trim()) continue;
+      yield {
+        projectName: relation.conversation.projectName ?? "",
+        conversationId: relation.conversation.id,
+        conversationTitle: relation.conversation.title || relation.conversation.externalSessionId,
+        provider: relation.conversation.provider,
+        externalSessionId: relation.conversation.externalSessionId,
+        canonicalUrl: safeExportUrl(relation.conversation.canonicalUrl),
+        revisionId: archive.revision.id,
+        capturedAt: archive.revision.capturedAt.toISOString(),
+        messageOrdinal: alternative.ordinal,
+        role: alternative.role,
+        model: alternative.model ?? "",
+        messageAt: alternative.createdAt ?? "",
+        content: `[其他采集内容，非新增问答${alternative.externalMessageId ? `；消息 ${alternative.externalMessageId}` : ""}]\n${content}`,
       };
     }
   }
@@ -370,9 +510,11 @@ export function renderConversationMarkdown(data: ConversationExportData): Buffer
     "",
   ];
   let activeConversationId = "";
+  let originalRecordsStarted = false;
   for (const row of data.rows) {
     if (row.conversationId !== activeConversationId) {
       activeConversationId = row.conversationId;
+      originalRecordsStarted = false;
       lines.push(`## ${row.conversationTitle}`, "");
       lines.push(
         `- 来源：${row.provider}`,
@@ -382,8 +524,13 @@ export function renderConversationMarkdown(data: ConversationExportData): Buffer
         "",
       );
     }
+    if (row.recordType && !originalRecordsStarted) {
+      lines.push("### 原始采集观察（非连续问答）", "");
+      originalRecordsStarted = true;
+    }
     lines.push(
-      `### ${row.role === "user" ? "用户" : row.model || "AI"} · #${row.messageOrdinal}`,
+      row.recordType ? `#### ${exportRecordLabels[row.recordType]} · #${row.messageOrdinal}`
+        : `### ${row.role === "user" ? "用户" : row.model || "AI"} · #${row.messageOrdinal}`,
       "",
       row.content,
       "",
@@ -438,12 +585,14 @@ async function* iterateConversationMarkdownChunks(
     "",
   ].join("\n"), "utf8");
   let activeConversationId = "";
+  let originalRecordsStarted = false;
   let rowCount = 0;
   for await (const row of iterateConversationExportRows(source)) {
     const lines: string[] = [""];
     rowCount += 1;
     if (row.conversationId !== activeConversationId) {
       activeConversationId = row.conversationId;
+      originalRecordsStarted = false;
       lines.push(
         `## ${row.conversationTitle}`,
         "",
@@ -454,8 +603,13 @@ async function* iterateConversationMarkdownChunks(
         "",
       );
     }
+    if (row.recordType && !originalRecordsStarted) {
+      lines.push("### 原始采集观察（非连续问答）", "");
+      originalRecordsStarted = true;
+    }
     lines.push(
-      `### ${row.role === "user" ? "用户" : row.model || "AI"} · #${row.messageOrdinal}`,
+      row.recordType ? `#### ${exportRecordLabels[row.recordType]} · #${row.messageOrdinal}`
+        : `### ${row.role === "user" ? "用户" : row.model || "AI"} · #${row.messageOrdinal}`,
       "",
       row.content,
       "",

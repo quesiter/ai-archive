@@ -1,5 +1,4 @@
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
-import type { CaptureMessage } from "@ai-archive/contracts";
 import { z } from "zod";
 import { db } from "../db.js";
 import { config } from "../config.js";
@@ -13,7 +12,7 @@ import {
 } from "../schema.js";
 import { completeStructured } from "./llm.js";
 import { redactForCloud } from "./redaction.js";
-import { loadCaptureRevisionMessagesBatch } from "./revision-storage.js";
+import { loadCurrentConversationArchive } from "./revision-storage.js";
 import { selectLatestTimelineRevisions } from "./timeline.js";
 
 const ContextResponseSchema = z.object({
@@ -32,7 +31,7 @@ function batches<T>(values: readonly T[], size: number): T[][] {
 }
 
 function revisionPreview(
-  messages: readonly CaptureMessage[],
+  messages: readonly { role: string; segments: readonly { type: string; content: string }[] }[],
   limit = 6_000,
 ): string {
   let result = "";
@@ -58,9 +57,9 @@ function markdownLabel(value: string): string {
   return value.replace(/[\r\n]+/g, " ").replace(/([\\[\]])/g, "\\$1").trim();
 }
 
-function conversationHref(conversationId: string, revisionId: string): string {
+function conversationHref(conversationId: string): string {
   return new URL(
-    `/conversations/${conversationId}?revisionId=${revisionId}`,
+    `/conversations/${conversationId}`,
     config.APP_ORIGIN,
   ).toString();
 }
@@ -110,11 +109,17 @@ export async function generateProjectContext(
         capturedAt: conversationRevisions.capturedAt,
         createdAt: conversationRevisions.createdAt,
         completeness: conversationRevisions.completeness,
+        isAccumulated: conversationRevisions.isAccumulated,
+        capturedTitle: conversationRevisions.capturedTitle,
+        metadataCaptured: conversationRevisions.metadataCaptured,
       })
       .from(conversationRevisions)
       .where(inArray(conversationRevisions.conversationId, conversationIds))
     : [];
-  const latestRevisions = selectLatestTimelineRevisions(revisionRows);
+  const accumulatedIds = new Set(revisionRows.filter((revision) => revision.isAccumulated).map((revision) => revision.conversationId));
+  const latestRevisions = selectLatestTimelineRevisions(revisionRows.filter((revision) =>
+    revision.isAccumulated || !accumulatedIds.has(revision.conversationId),
+  ));
   const tagRows = conversationIds.length
     ? await db
       .select({
@@ -136,21 +141,21 @@ export async function generateProjectContext(
     const revision = latestRevisions.get(row.id);
     return revision ? [{ row, revision }] : [];
   });
-  const contentByRevision = new Map<string, string>();
+  const contentByConversation = new Map<string, string>();
+  const unavailable = new Set<string>();
   if (options.ai) {
-    const previewRevisionIds = selectedRows
-      .slice(0, AI_CONTEXT_CONVERSATION_LIMIT)
-      .map(({ revision }) => revision.id);
-    for (const revisionBatch of batches(
-      previewRevisionIds,
+    for (const batch of batches(
+      selectedRows.slice(0, AI_CONTEXT_CONVERSATION_LIMIT),
       AI_CONTEXT_REVISION_BATCH_SIZE,
     )) {
-      const messagesByRevision = await loadCaptureRevisionMessagesBatch(revisionBatch);
-      for (const revisionId of revisionBatch) {
-        contentByRevision.set(
-          revisionId,
-          revisionPreview(messagesByRevision.get(revisionId) ?? []),
-        );
+      const archives = await Promise.all(batch.map(({ row }) => loadCurrentConversationArchive(row.id)));
+      for (const [index, selected] of batch.entries()) {
+        const archive = archives[index];
+        if (!archive) { unavailable.add(selected.row.id); continue; }
+        // The selected ID is mutable: its capture metadata must come from the
+        // same snapshot as the body supplied to the model.
+        selected.revision = archive.revision;
+        contentByConversation.set(selected.row.id, revisionPreview(archive.messages));
       }
     }
   }
@@ -163,14 +168,14 @@ export async function generateProjectContext(
     capturedAt: Date;
     tags: string[];
     content?: string;
-  }> = selectedRows.map(({ row, revision }) => ({
+  }> = selectedRows.filter(({ row }) => !unavailable.has(row.id)).map(({ row, revision }) => ({
     conversationId: row.id,
     revisionId: revision.id,
     provider: row.provider,
-    title: row.title ?? "未命名会话",
+    title: (revision.metadataCaptured ? revision.capturedTitle : row.title) ?? "未命名会话",
     capturedAt: revision.capturedAt ?? row.updatedAt,
     tags: tagsByConversation.get(row.id) ?? [],
-    ...(options.ai ? { content: contentByRevision.get(revision.id) ?? "" } : {}),
+    ...(options.ai ? { content: contentByConversation.get(row.id) ?? "" } : {}),
   }));
   const tagCounts = new Map<string, number>();
   for (const item of timeline) {
@@ -222,14 +227,14 @@ export async function generateProjectContext(
       `### ${date}`,
       ...items.map(
         (item) =>
-          `- ${markdownLabel(item.provider)} · [${markdownLabel(item.title)}](${conversationHref(item.conversationId, item.revisionId)})${item.tags.length ? ` · ${item.tags.map(markdownLabel).join(" / ")}` : ""}`,
+          `- ${markdownLabel(item.provider)} · [${markdownLabel(item.title)}](${conversationHref(item.conversationId)})${item.tags.length ? ` · ${item.tags.map(markdownLabel).join(" / ")}` : ""}`,
       ),
     ].join("\n"))
     .join("\n\n");
   const sources = timeline
     .map(
       (item) =>
-        `- [${markdownLabel(item.title)}](${conversationHref(item.conversationId, item.revisionId)}) · ${markdownLabel(item.provider)} · ${dateKey(item.capturedAt)}`,
+        `- [${markdownLabel(item.title)}](${conversationHref(item.conversationId)}) · ${markdownLabel(item.provider)} · ${dateKey(item.capturedAt)}`,
     )
     .join("\n");
   const markdown = [

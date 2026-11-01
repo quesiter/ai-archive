@@ -7,6 +7,8 @@ import { reports } from "../schema.js";
 import { getSetting } from "./settings.js";
 import { resolveSafeNetworkHost } from "./network-target.js";
 import { safeStoredError } from "./operation-log.js";
+import { escapeEmailHtml as escapeHtml, renderReportEmailHtml } from "./report-email.js";
+import { withReportTitlePrefix } from "./report-title.js";
 
 type ReportRow = typeof reports.$inferSelect;
 
@@ -28,15 +30,6 @@ interface SmtpConfig {
   password: string;
   from: string;
   to: string;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
 }
 
 async function loadSmtpConfig(input: SmtpConfigInput = {}): Promise<SmtpConfig> {
@@ -100,13 +93,14 @@ export async function sendReportEmail(report: ReportRow): Promise<boolean> {
   const transporter = await createSmtpTransport(smtp);
   const reportUrl = `${config.APP_ORIGIN}/reports/${report.id}`;
   const reportBody = report.bodyMarkdown;
+  const reportTitle = withReportTitlePrefix(report.title);
   try {
     await transporter.sendMail({
       from: smtp.from,
       to: smtp.to,
-      subject: report.title,
+      subject: reportTitle,
       text: `${reportBody}\n\n在线查看报告：${reportUrl}`,
-      html: `<div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(reportBody)}</div><p><a href="${escapeHtml(reportUrl)}">在线查看报告</a></p>`,
+      html: renderReportEmailHtml({ title: reportTitle, bodyMarkdown: reportBody, reportUrl }),
       disableFileAccess: true,
       disableUrlAccess: true,
     });

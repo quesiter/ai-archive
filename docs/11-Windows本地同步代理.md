@@ -1,6 +1,6 @@
 # 知言归藏 Windows 本地同步代理
 
-> 同步日期：2026-09-07。当前代理版本 `V2.3.1`。代理只读扫描本地 OpenClaw、Codex、Claude Code 会话并通过设备 Token 上传；不会读取模型密钥、Cookie 或 credential 文件。
+> Windows 启动器更新日期：2026-10-07，发布包和同步内核 `V2.4.2`。本次将没有用户文本的 Codex 压缩/辅助日志记为跳过，避免正常同步被标为失败；文件新增用户文本后会重新检查。保留重新配对、前台同步、计划任务权限提示和 PowerShell 5.1 编码修复。代理只读扫描本地 OpenClaw、Codex、Claude Code 会话并通过设备 Token 上传；不会读取模型密钥、Cookie 或 credential 文件。
 
 | 文档属性 | 内容 |
 | --- | --- |
@@ -11,7 +11,7 @@
 ## 1. 首次使用
 
 1. 安装 Node.js 22 或 24 LTS，确认 `node` 在 `PATH` 中。
-2. 解压 `ai-conversation-archive-windows-sync-V2.3.1.zip` 到固定目录，例如 `C:\AIArchiveSync`。
+2. 解压 `ai-conversation-archive-windows-sync-V2.4.2.zip` 到固定目录，例如 `C:\AIArchiveSync`。
 3. 在 Web“设备”页创建“OpenClaw/Codex 同步代理”配对码。
 4. 双击 `sync-local-windows.bat`，输入配对码。
 5. 默认先执行近期安全重建，再安装并启动当前用户的隐藏计划任务。
@@ -38,6 +38,8 @@
 ```bat
 sync-local-windows.bat install
 sync-local-windows.bat uninstall
+sync-local-windows.bat run
+sync-local-windows.bat pair
 sync-local-windows.bat rebuild-only
 sync-local-windows.bat watch-only
 sync-local-windows.bat full-rebuild
@@ -45,11 +47,15 @@ sync-local-windows.bat full-rebuild
 
 - `install`：安装/更新隐藏后台任务。
 - `uninstall`：移除后台任务，不删除配对配置和状态。
+- `run`：在当前终端扫描近期记录并持续监听；无需创建计划任务，关闭终端后停止。别名为 `foreground`。
+- `pair`：使用新的 OpenClaw/Codex 同步代理配对码重新配对；保留原有采集目录、自定义配置和同步进度，并启动已有后台任务。Chrome 扩展配对码不能用于本代理。别名为 `re-pair`。
 - `rebuild-only`：按安全窗口扫描一次后退出；`once` 是同义命令。
 - `watch-only`：跳过启动扫描，只监听后续变化。
 - `full-rebuild`：显式包含全部历史和大文件，可能产生较高 CPU、磁盘、网络和模型归类负载。
 
 移动目录时必须复制整个解压文件夹。源码入口和便携包入口均只负责调用同一个 `sync-local-windows-core.ps1`，配对、安全窗口、危险操作确认和安装逻辑不会维护两份；打包 agent/后台脚本仍需与入口同目录，单独复制 `.bat` 不能工作。
+
+若安装时报 `Register-ScheduledTask: Access is denied` / `0x80070005`，表示当前账户无法创建或更新后台任务。原因可能是同名任务属于其他账户或公司策略限制，需由管理员核实。当前账户可以使用 `sync-local-windows.bat run` 手动前台同步；这不会建立登录自启动，也不会修改系统权限。公司明确禁止运行同步软件时应先联系 IT。
 
 ## 3. 默认安全限制
 
@@ -66,6 +72,12 @@ Windows 包装脚本默认：
 底层 CLI 自身默认最多 500 文件，但 Windows 包装器始终显式传 60，因此便携包实际以 60 为准。单个解压后的 transcript 还有 200 MiB 内部上限。文件必须是普通文件，符号链接会拒绝。
 
 同步按 mtime/size/state 识别增量；JSONL 追加优先上传 append，改写或基线不一致时转完整快照。扫描期间的新变化会合并到下一轮，不会丢失已排队扫描。
+
+Codex 子代理依据原始 `session_meta` 中的子代理来源及父会话 ID 归组，各自的消息、Revision 和独立 ID 完整保留。V2.3.3 统一主列表、项目时间线、首页/项目会话数与待归类入口；普通任务和用户主动 fork 不会因为标题、目录相同而被合并。
+
+升级服务端和代理到 V2.3.3 或以后版本后，运行一次 `sync-local-windows.bat rebuild-only`，或等待后台下一次扫描。代理会额外只读扫描 Codex `sessions`、`archived_sessions` 下全部 JSONL 的初始 `session_meta` 头部，通过设备认证接口为已有归档补齐关系。这一步不受上表的正文年龄、文件数量和大小窗口限制，不需要扩大窗口、执行 full-rebuild 或删除配置/状态。它不会上传历史正文、创建未归档会话或复活已删除记录；正文归档继续使用原安全限制。
+
+成功日志包含 `Codex history lineage: checked ... files without age/size/count limits` 和 updated/unchanged/not archived 计数。全历史扫描与上传成功后才记录完成标记；遇到冲突、无有效初始头部或上传失败时保留未完成状态，检查日志后在后续扫描重试。只升级服务端不能读取客户端磁盘上的历史父 ID，所有保存 Codex 历史的设备均需升级代理。
 
 ## 4. 默认路径
 
@@ -127,6 +139,18 @@ Remove-Item -LiteralPath "$env:USERPROFILE\.config\ai-archive\openclaw-sync.json
 - 401：设备撤销或 Token/服务器不匹配，重新配对。
 - 409 incremental base mismatch：代理应自动回退完整快照；持续出现时检查状态文件和服务日志。
 - 网络/5xx：代理从5秒指数退避，最高15分钟、最多6次；429遵循`Retry-After`；其他验证类4xx不无限重试。
-- Web设备状态长期不更新：检查heartbeat请求；正常时会回传V2.3.1、Windows、最近扫描/成功同步/错误和跟踪/跳过文件数。
+- Web设备状态长期不更新：检查heartbeat请求；正常时会回传V2.4.2、Windows、最近扫描/成功同步/错误和跟踪/跳过文件数。
 
-发布包由仓库根目录 `pnpm package:windows-sync` 生成，默认输出 `release/ai-conversation-archive-windows-sync-V2.3.1.zip`，并复用同一core脚本。
+发布包由仓库根目录 `pnpm package:windows-sync` 生成，默认输出 `release/ai-conversation-archive-windows-sync-V2.4.2.zip`，并复用同一core脚本。
+
+## Grok Build CLI 与 Desktop 采集
+
+新版启动器会在启动时探测 `~/.grok`（Windows 为 `%USERPROFILE%\.grok`），也支持 `GROK_HOME` 或 `AI_ARCHIVE_GROK_BUILD_ROOT` 指定 Grok 根目录；重启后台同步即可让现有配对配置生效，无需重新配对。Windows 前台和计划任务、macOS 前台和 LaunchAgent 均支持该目录。
+
+直接使用底层 CLI 时，在配置文件添加 `grokBuildRoots` 数组，元素为 Grok 根目录（包含 `sessions` 子目录），或在首次配对时附加 `--with-grok-build` / `--grok-build-root 路径`。多个目录可以配置在同一数组中。
+
+采集源为 `sessions/<编码项目目录>/<会话ID>/updates.jsonl`。CLI 与使用相同 Grok runtime 的 Grok Build Desktop 共用 `grok_build` 来源和会话ID，同一会话不会因界面不同重复归档。支持文本流拼接、思考文本、工具状态及显示日志中的回退标记；流式尾部变化会重组快照，避免把单个 token chunk 当成独立消息。损坏或不支持的事件会标记为部分采集。
+
+代理不读取 `auth.json`，不采集 `chat_history.jsonl` 中的系统上下文或加密思考内容，不把上下文大小当成实际 Token 用量。工具只保存简短状态及最多 600 字符可读输出；原始工具输入不入库。仅写入私有格式而没有 Grok ACP 日志的第三方桌面客户端不在此适配范围内。
+
+格式依据：[Grok 官方会话管理](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md)；Desktop 采用相同 ACP runtime 的示例：[Grok Build Desktop](https://github.com/phuryn/grok-build-vscode/blob/main/docs/desktop.md)。

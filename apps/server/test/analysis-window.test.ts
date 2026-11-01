@@ -55,7 +55,7 @@ describe("analysisWindow", () => {
       windowEnd,
     );
 
-    expect(report.title).toBe("周报（2026年8月10日—2026年8月16日）");
+    expect(report.title).toBe("【知言归藏】周报（2026年8月10日—2026年8月16日）");
     expect(report.summary).toBe("2026年8月10日—2026年8月16日完成了采集修复。");
     expect(report.bodyMarkdown).toContain(
       "> 报告周期：2026年8月10日—2026年8月16日",

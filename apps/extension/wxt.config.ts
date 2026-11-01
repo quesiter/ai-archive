@@ -1,7 +1,10 @@
 import { defineConfig } from "wxt";
+import { readFileSync } from "node:fs";
+
+const { version } = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
 
 const archiveServerOrigin = new URL(
-  process.env.ARCHIVE_SERVER_ORIGIN ?? "https://ai-archive.gyee.tech:18443",
+  process.env.ARCHIVE_SERVER_ORIGIN ?? "https://ai-archive.cuizhaoyang.cn",
 ).origin;
 const archiveServerUrl = new URL(archiveServerOrigin);
 if (
@@ -27,6 +30,8 @@ const aiOrigins = [
   "https://chat.openai.com/*",
   "https://gemini.google.com/*",
   "https://grok.com/*",
+  "https://www.doubao.com/*",
+  "https://doubao.com/*",
   "https://yuanbao.tencent.com/*",
   "https://agent.minimax.io/*",
   "https://agent.minimaxi.com/*",
@@ -52,8 +57,8 @@ export default defineConfig({
     key: "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqVzNtkfScpEbGTjXMN5K/kttoKDDckV2iTBHhrCw3MvL7bmghrmlsblIJGZTV/mV6+K9DBXE6KL0zXrwjTXcmaYKQ7oD/yzfSxpjD7ZApQpMU8KdvdNfE0DFrUjXC5KvfYQFfKdz0RcEbotzKtY4yYvcs9umkDddpOlm3xpTvr638oSFWQ/SNTWSyesEtSYeOF74CUD3+LLWk+42C8Um31GF+e8tImlW5c5efdAKEkwaE6PcXvLmy7DBtUSswtkvjWXVRdiQekWst6ORbxll06lDBb4n3eRsNx/dbZdrGoESwHxEl6VtUSJo8QXYmkhijq4wxdlbFtMRe8UclbXghwIDAQAB",
     name: "知言归藏",
     description: "归档、检索并按项目与标签整理当前打开的 AI 会话。",
-    version: "2.3.1",
-    version_name: "V2.3.1",
+    version,
+    version_name: `V${version}`,
     incognito: "split",
     permissions: ["storage", "alarms", "tabs"],
     optional_host_permissions: [

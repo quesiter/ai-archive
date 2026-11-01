@@ -3,13 +3,17 @@ packages:
   - packages/*
 
 overrides:
-  'brace-expansion@<1.1.18': 1.1.18
-  'brace-expansion@>=4.0.0 <5.0.9': 5.0.9
+  'glob@>=9.0.0 <14.0.2': 14.0.2
+  'minimatch@>=9.0.0 <11.0.1': 11.0.1
+  'brace-expansion@<1.1.21': 1.1.21
+  'brace-expansion@>=2.0.0 <2.1.7': 2.1.7
+  'brace-expansion@>=4.0.0 <5.0.12': 5.0.12
   'adm-zip@<0.6.0': 0.6.0
   '@esbuild-kit/core-utils@3.3.2>esbuild': 0.25.12
   'esbuild@0.27.7': 0.28.1
-  'fast-uri@>=3.0.0 <4': 3.1.5
-  'fast-uri@>=4.0.0 <5': 4.1.2
+  'fast-uri@>=3.0.0 <4': 3.1.9
+  'fast-uri@>=4.0.0 <5': 4.2.3
+  '@fastify/busboy@<3.2.2': 3.2.2
   'find-my-way@<=9.6.0': 9.8.0
   'nanoid@<3.3.18': 3.3.18
   'postcss@<=8.5.22': 8.5.26
@@ -21,3 +25,13 @@ allowBuilds:
   '@node-rs/argon2': true
   esbuild: true
   spawn-sync: true
+
+# GHSA-g3hv-75wg-m249 describes firstPhasePreProcess at optimizationLevel >= 2.
+# Legacy minimatch 3/5 (ExcelJS) do not implement that code. Modern consumers
+# are overridden to patched 11.x above; do not override legacy CommonJS APIs.
+auditConfig:
+  ignoreGhsas:
+    - GHSA-g3hv-75wg-m249
+
+minimumReleaseAgeExclude:
+  - '@electric-sql/pglite@0.5.14'

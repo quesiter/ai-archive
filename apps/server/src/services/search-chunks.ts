@@ -2,6 +2,8 @@ import { sql } from "drizzle-orm";
 import { db } from "../db.js";
 import { conversationSearchChunks } from "../schema.js";
 
+import { rebuildConversationSearchDocuments } from "./search-documents.js";
+
 export const SEARCH_CHUNK_SIZE = 4_000;
 
 export function chunkSearchContent(content: string, size = SEARCH_CHUNK_SIZE): string[] {
@@ -30,10 +32,23 @@ export async function rebuildConversationSearchChunks(): Promise<number> {
           select
             messages.revision_id,
             messages.id as message_id,
-            string_agg(message_segments.content, E'\\n' order by message_segments.ordinal) as content
+            string_agg(message_segments.content, E'\\n' order by message_segments.ordinal) ||
+            coalesce((
+              select E'\\n' || string_agg(variant_segment.value->>'content', E'\\n' order by variant.ordinality, variant_segment.ordinality)
+              from jsonb_array_elements(coalesce(revision.merge_evidence->'variants', '[]'::jsonb)) with ordinality as variant(value, ordinality)
+              cross join lateral jsonb_array_elements(variant.value->'segments') with ordinality as variant_segment(value, ordinality)
+              where variant.value->>'externalMessageId' = messages.external_message_id
+                or (messages.ordinal = 0 and (
+                  variant.value->>'externalMessageId' is null or not exists (
+                    select 1 from messages variant_target where variant_target.revision_id = messages.revision_id
+                      and variant_target.external_message_id = variant.value->>'externalMessageId'
+                  )
+                ))
+            ), '') as content
           from messages
           inner join message_segments on message_segments.message_id = messages.id
-          group by messages.revision_id, messages.id
+          inner join conversation_revisions revision on revision.id = messages.revision_id
+          group by messages.revision_id, messages.id, revision.merge_evidence
         ) as message_text
         cross join lateral generate_series(
           0,
@@ -43,6 +58,7 @@ export async function rebuildConversationSearchChunks(): Promise<number> {
       )
       select count(*)::int as count from inserted
     `);
+    await rebuildConversationSearchDocuments(tx);
     return Number(result[0]?.count ?? 0);
   });
 }

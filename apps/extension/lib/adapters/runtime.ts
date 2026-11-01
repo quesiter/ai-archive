@@ -12,7 +12,13 @@ import type {
 function visible(element: HTMLElement): boolean {
   const style = getComputedStyle(element);
   const rect = element.getBoundingClientRect();
-  return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0;
+  if (style.display === "none" || style.visibility === "hidden") return false;
+  if (rect.width > 0) return true;
+  // A display:contents message wrapper has no box of its own, even when its
+  // text children are rendered. Do not discard the whole conversation for it.
+  return style.display === "contents" && Array.from(element.children).some(
+    (child) => child instanceof HTMLElement && visible(child),
+  );
 }
 
 function uniqueTopLevel(elements: HTMLElement[]): HTMLElement[] {
@@ -74,6 +80,32 @@ function structuralRole(
 ): MessageRole | null {
   const explicit = roleFromAttributes(element);
   if (explicit) return explicit;
+  if (definition.provider === "doubao") {
+    // Production Doubao puts the stable content ID two levels below the
+    // speaker wrapper. The assistant content itself has no role/class hint.
+    const wrapper = element.closest("[data-testid='send_message'], [data-testid='receive_message']");
+    if (wrapper) return wrapper.getAttribute("data-testid") === "send_message" ? "user" : "assistant";
+  }
+  if (definition.provider === "chatgpt") {
+    const unit = element.closest("[data-chatgpt-search-unit-key], [data-content-search-unit-key]");
+    const key = unit?.getAttribute("data-chatgpt-search-unit-key") ?? unit?.getAttribute("data-content-search-unit-key");
+    const speaker = key?.split(":").at(-1);
+    if (speaker === "user" || speaker === "assistant" || speaker === "tool" || speaker === "system") return speaker;
+  }
+  if (definition.provider === "chatgpt" &&
+      (element.dataset.turn === "user" || element.dataset.turn === "assistant")) {
+    return element.dataset.turn;
+  }
+  if (definition.provider === "chatgpt" &&
+      /^conversation-turn-\d+$/.test(element.getAttribute("data-testid") ?? element.id)) {
+    // Newer turn wrappers may expose the speaker only in an accessibility
+    // heading. Read that heading rather than guessing from viewport position.
+    for (const heading of element.querySelectorAll("h5.sr-only, h6.sr-only, [data-testid='speaker-label']")) {
+      const label = cleanText(heading.textContent ?? "").replace(/[：:]$/, "").toLowerCase();
+      if (userSpeakerLabels.has(label)) return "user";
+      if (assistantSpeakerLabels.has(label)) return "assistant";
+    }
+  }
   const classes = element.className.toString().toLowerCase();
   const userScore = roleHintScore(element, definition.userHints);
   const assistantScore = roleHintScore(element, definition.assistantHints);
@@ -121,6 +153,7 @@ const genericConversationTitles = [
   /^deepseek$/i,
   /^kimi$/i,
   /^腾讯元宝$/i,
+  /^豆包(?:\s*[-|·].*)?$/i,
   /^(通义)?千问$/i,
   /^minimax( agent)?$/i,
   /^minimax agent\s*[:：-]/i,
@@ -144,7 +177,7 @@ function normalizedConversationTitle(value: string): string | undefined {
   let title = lines[0] ?? "";
   title = title
     .replace(
-      /\s*(?:[-|·])\s*(?:Google\s+Gemini|Gemini|ChatGPT|Grok|DeepSeek|Kimi|腾讯元宝|(?:通义)?千问|MiniMax(?:\s+Agent)?)\s*$/i,
+      /\s*(?:[-|·])\s*(?:Google\s+Gemini|Gemini|ChatGPT|Grok|DeepSeek|Kimi|腾讯元宝|豆包|(?:通义)?千问|MiniMax(?:\s+Agent)?)\s*$/i,
       "",
     )
     .trim();
@@ -222,6 +255,7 @@ const assistantSpeakerLabels = new Set([
   "千问",
   "通义千问",
   "腾讯元宝",
+  "豆包",
   "元宝",
   "minimax",
   "minimax agent",
@@ -309,16 +343,47 @@ function roleFromAttributes(element: HTMLElement): MessageRole | null {
   return null;
 }
 
+function chatGptNonMessageWidgets(element: HTMLElement): Element[] {
+  const gridSelector = 'canvas[data-testid="data-grid-canvas"]';
+  const roots = Array.from(element.querySelectorAll(
+    `[data-testid="businesses-map-widget"][data-w-component="map"][data-d-component="map"],${gridSelector}`,
+  ));
+  const cardSelector = "div.border-token-border-default.relative.overflow-hidden.rounded-2xl.border";
+  for (const canvas of element.querySelectorAll(gridSelector)) {
+    const card = canvas.closest(cardSelector);
+    if (!card || card === element || !element.contains(card)) continue;
+    for (const header of card.querySelectorAll(":scope > div.flex.items-center.justify-between")) {
+      if (!header.querySelector(":scope > span.grow.truncate.font-semibold.capitalize")) continue;
+      for (const badge of header.querySelectorAll(
+        ":scope > div.flex.items-center.gap-3 > div.absolute.end-3.top-3 > div.flex.text-blue-400",
+      )) {
+        // Only the observed preview-status label, within this grid attachment
+        // header. The same words in a message or another card remain content.
+        if (badge.childElementCount === 0 && badge.textContent?.trim() === "现已交互！") roots.push(badge);
+      }
+    }
+  }
+  return roots;
+}
+
 function extractSegments(
   element: HTMLElement,
   definition: AdapterDefinition,
 ): MessageSegment[] {
   const segments: MessageSegment[] = [];
   const consumed = new Set<Element>();
+  // These ChatGPT widgets expose changing map labels or a partial accessible
+  // spreadsheet preview; neither is the authored message body.
+  // The elapsed section also owns a collapsible bodySlot with real historical
+  // reasoning. Remove its header/timer only, preserving the bodySlot transcript.
+  const doubaoChromeSelector = "[data-testid='preamble-elapsed'] > button, [data-testid='preamble-elapsed-timer']";
+  const excludedRoots = definition.provider === "chatgpt" ? chatGptNonMessageWidgets(element)
+    : definition.provider === "doubao" ? Array.from(element.querySelectorAll(doubaoChromeSelector)) : [];
+  const excluded = (node: Element) => excludedRoots.some((root) => root.contains(node));
   const addScopedText = (selectors: string[] | undefined, type: MessageSegment["type"]) => {
     for (const selector of selectors ?? []) {
       for (const node of Array.from(element.querySelectorAll<HTMLElement>(selector))) {
-        if (consumed.has(node)) continue;
+        if ([...consumed].some((parent) => parent.contains(node)) || excluded(node)) continue;
         const content = cleanText(node.innerText);
         if (!content) continue;
         consumed.add(node);
@@ -330,6 +395,7 @@ function extractSegments(
   addScopedText(definition.toolSelectors, "tool_status");
 
   for (const node of Array.from(element.querySelectorAll<HTMLElement>("pre"))) {
+    if (excluded(node)) continue;
     if ([...consumed].some((parent) => parent.contains(node))) continue;
     const content = cleanText(node.innerText);
     if (!content) continue;
@@ -341,6 +407,7 @@ function extractSegments(
   }
 
   for (const node of Array.from(element.querySelectorAll<HTMLAnchorElement>("a[href]"))) {
+    if (excluded(node)) continue;
     if ([...consumed].some((parent) => parent.contains(node))) continue;
     const content = cleanText(node.innerText || node.href);
     if (!content || !/^https?:/i.test(node.href)) continue;
@@ -349,6 +416,13 @@ function extractSegments(
   }
 
   const clone = element.cloneNode(true) as HTMLElement;
+  if (definition.provider === "chatgpt") chatGptNonMessageWidgets(clone).forEach((node) => node.remove());
+  if (definition.provider === "doubao") clone.querySelectorAll(doubaoChromeSelector).forEach((node) => node.remove());
+  if (definition.provider === "chatgpt" &&
+      /^conversation-turn-\d+$/.test(element.getAttribute("data-testid") ?? element.id)) {
+    clone.querySelectorAll("h5.sr-only, h6.sr-only, [data-testid='speaker-label']")
+      .forEach((node) => node.remove());
+  }
   for (const selector of [
     ...(definition.reasoningSelectors ?? []),
     ...(definition.toolSelectors ?? []),
@@ -366,7 +440,13 @@ function extractSegments(
       // A provider selector becoming invalid should not destroy the remaining text.
     }
   }
-  const mainText = cleanText(clone.innerText || clone.textContent || "");
+  // Doubao wrappers also contain timestamps and elapsed-generation chrome.
+  // Read its authored text blocks when present; legacy bubbles use the clone.
+  const doubaoBodies = definition.provider === "doubao"
+    ? Array.from(clone.querySelectorAll<HTMLElement>("[data-testid='message_text_content']")) : [];
+  const mainText = cleanText(doubaoBodies.length
+    ? doubaoBodies.map((node) => node.innerText || node.textContent || "").join("\n\n")
+    : clone.innerText || clone.textContent || "");
   if (mainText) segments.unshift({ type: "text", content: mainText });
 
   const deduped: MessageSegment[] = [];
@@ -433,7 +513,9 @@ export function createAdapterRuntime(
     },
     getConversationRoot() {
       for (const selector of [
-        definition.conversationRootSelector,
+        ...(definition.provider === "doubao"
+          ? (definition.conversationRootSelector ?? "").split(",").map((part) => part.trim())
+          : [definition.conversationRootSelector]),
         "main",
         "[role='main']",
       ].filter(Boolean) as string[]) {
@@ -457,6 +539,10 @@ export function createAdapterRuntime(
             Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(
               (element) =>
                 !element.closest("#ai-archive-floating-indicator") &&
+                !element.closest('textarea, [contenteditable="true"], [role="textbox"], [data-composer-body]') &&
+                !(definition.provider === "chatgpt" &&
+                  /^conversation-turn-\d+$/.test(element.getAttribute("data-testid") ?? element.id) &&
+                  element.dataset.turn && !["user", "assistant"].includes(element.dataset.turn)) &&
                 visible(element) &&
                 cleanText(element.innerText).length > 0,
             ),
@@ -480,11 +566,28 @@ export function createAdapterRuntime(
       return index % 2 === 0 ? "user" : "assistant";
     },
     getExternalMessageId(element) {
+      if (definition.provider === "doubao") {
+        const ownId = element.dataset.messageId;
+        if (ownId) return ownId;
+        const childIds = [...new Set(Array.from(element.querySelectorAll<HTMLElement>("[data-message-id]"))
+          .map((node) => node.dataset.messageId).filter((value): value is string => Boolean(value)))];
+        if (childIds.length === 1) return childIds[0];
+      }
+      const positionalChatGptId = (value: string) => definition.provider === "chatgpt" &&
+        /^conversation-turn-\d+$/i.test(value);
       const directId =
         element.dataset.messageId ??
+        (definition.provider === "chatgpt" ? firstAttributeValue(element, ["data-chatgpt-selection-message-id"]) : undefined) ??
         element.dataset.id ??
         (element.id || undefined);
-      if (directId) return directId;
+      if (directId && !positionalChatGptId(directId)) return directId;
+      if (definition.provider === "chatgpt") {
+        const searchUnit = element.closest("[data-chatgpt-search-message-ids]");
+        const ids = [...new Set((searchUnit?.getAttribute("data-chatgpt-search-message-ids") ?? "").split(/\s+/).filter(Boolean))];
+        // A search unit may repeat its ID for multiple rendered parts. An
+        // ambiguous multi-message unit cannot identify a single message.
+        if (ids.length === 1) return ids[0];
+      }
 
       const minimaxMessageId =
         element.getAttribute("data-msg-id") ??
@@ -505,6 +608,8 @@ export function createAdapterRuntime(
       const testId = element.getAttribute("data-testid") ?? undefined;
       if (
         testId &&
+        !positionalChatGptId(testId) &&
+        !(definition.provider === "doubao" && /^(?:send|receive)_message$/.test(testId)) &&
         !/^(user|assistant|model|conversation)-(message|turn)$/i.test(testId)
       ) {
         return testId;

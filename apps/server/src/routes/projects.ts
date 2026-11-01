@@ -1,8 +1,9 @@
-import { and, asc, count, desc, eq, inArray, isNotNull, isNull, like, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, like, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db } from "../db.js";
 import { requireWebUser } from "../http.js";
+import { projectMergeSuggestionRoutes } from "./project-merge-suggestions.js";
 import {
   conversationProjects,
   conversationRevisions,
@@ -30,7 +31,12 @@ import {
 } from "../services/conversation-export.js";
 import { mergeProjectIntoProject, mergeProjectsIntoProject } from "../services/project-merge.js";
 import { generateProjectContext } from "../services/project-context.js";
-import { selectLatestTimelineRevisions } from "../services/timeline.js";
+import { conversationChildCount } from "../services/conversation-lineage.js";
+import {
+  projectConversationFilter,
+  projectConversationMembershipQuery,
+  unclassifiedConversationFilter,
+} from "../services/project-lineage.js";
 import { safeStoredError, writeOperationLog } from "../services/operation-log.js";
 import {
   isUniqueViolation,
@@ -38,6 +44,7 @@ import {
   projectConflictError,
 } from "../services/projects.js";
 
+const ProjectDescriptionSchema = z.string().max(5_000);
 const ProjectInputSchema = z.object({
   name: z.string().transform((value, context) => {
     const normalized = normalizeProjectName(value);
@@ -50,7 +57,7 @@ const ProjectInputSchema = z.object({
     }
     return normalized.name;
   }),
-  description: z.string().max(5_000).default(""),
+  description: ProjectDescriptionSchema.default(""),
 });
 
 const ProjectExportQuerySchema = z.object({
@@ -85,30 +92,20 @@ async function enqueueAutoReclassification(
 function liveProjectStatistics() {
   return db
     .select({
-      projectId: conversationProjects.projectId,
+      projectId: sql<string>`project_memberships.project_id`.as("project_id"),
       conversationCount: sql<number>`count(*)::int`.as("conversation_count"),
-      latestActivityAt: sql<Date | null>`max(${conversations.updatedAt})`.as(
+      latestActivityAt: sql<Date | null>`max(project_memberships.conversation_updated_at)`.as(
         "latest_activity_at",
       ),
       growth7d: sql<number>`count(*) filter (
-        where ${conversations.updatedAt} >= now() - interval '7 days'
+        where project_memberships.conversation_updated_at >= now() - interval '7 days'
       )::int`.as("growth_7d"),
       growth30d: sql<number>`count(*) filter (
-        where ${conversations.updatedAt} >= now() - interval '30 days'
+        where project_memberships.conversation_updated_at >= now() - interval '30 days'
       )::int`.as("growth_30d"),
     })
-    .from(conversationProjects)
-    .innerJoin(
-      conversations,
-      eq(conversations.id, conversationProjects.conversationId),
-    )
-    .where(
-      and(
-        isNotNull(conversationProjects.projectId),
-        isNull(conversations.deletedAt),
-      ),
-    )
-    .groupBy(conversationProjects.projectId)
+    .from(sql`(${projectConversationMembershipQuery()}) project_memberships`)
+    .groupBy(sql`project_memberships.project_id`)
     .as("project_conversation_stats");
 }
 
@@ -145,7 +142,7 @@ export function buildProjectListQuery(input: {
       growth30d: sql<number>`coalesce(${statistics.growth30d}, 0)::int`,
     })
     .from(projects)
-    .leftJoin(statistics, eq(statistics.projectId, projects.id))
+    .leftJoin(statistics, sql`"project_conversation_stats"."project_id" = ${projects.id}`)
     .where(where)
     .orderBy(desc(conversationCount), asc(projects.name))
     .limit(input.limit)
@@ -159,11 +156,37 @@ export function buildProjectTotalsQuery() {
       projectCount: sql<number>`count(*) filter (where not ${projects.archived})::int`,
       archivedProjectCount: sql<number>`count(*) filter (where ${projects.archived})::int`,
       activeProjectCount: sql<number>`count(*) filter (
-        where not ${projects.archived} and ${statistics.projectId} is not null
+        where not ${projects.archived} and "project_conversation_stats"."project_id" is not null
       )::int`,
     })
     .from(projects)
-    .leftJoin(statistics, eq(statistics.projectId, projects.id));
+    .leftJoin(statistics, sql`"project_conversation_stats"."project_id" = ${projects.id}`);
+}
+
+export function buildProjectTimelineConversationQuery(
+  projectId: string,
+  input: { limit: number; offset: number } = { limit: 100, offset: 0 },
+  executor: Pick<typeof db, "select"> = db,
+) {
+  const revision = executor.select({
+    id: conversationRevisions.id,
+    capturedAt: conversationRevisions.capturedAt,
+  }).from(conversationRevisions)
+    .where(eq(conversationRevisions.conversationId, conversations.id))
+    .orderBy(desc(conversationRevisions.isAccumulated),
+      desc(sql`(${conversationRevisions.completeness} = 'complete')`),
+      desc(conversationRevisions.capturedAt), desc(conversationRevisions.createdAt), desc(conversationRevisions.id))
+    .limit(1).as("current_revision");
+  return executor.select({
+    id: conversations.id,
+    provider: conversations.provider,
+    title: conversations.title,
+    revisionId: revision.id,
+    capturedAt: revision.capturedAt,
+  }).from(conversations).innerJoinLateral(revision, sql`true`).where(and(
+    projectConversationFilter(projectId), isNull(conversations.deletedAt),
+  )).orderBy(desc(revision.capturedAt), desc(revision.id), desc(conversations.id))
+    .limit(input.limit).offset(input.offset);
 }
 
 async function loadProjectsOverview() {
@@ -281,6 +304,7 @@ async function loadProjectsOverview() {
 }
 
 export async function projectRoutes(app: FastifyInstance): Promise<void> {
+  await projectMergeSuggestionRoutes(app);
   app.get("/api/v1/projects", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
     const query = z.object({
@@ -317,12 +341,11 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     if (!(await requireWebUser(request, reply))) return;
     const [[projectTotals], [categorized], [unclassified], [tagTotal]] = await Promise.all([
       buildProjectTotalsQuery(),
-      db.select({ value: count() }).from(conversationProjects)
-        .innerJoin(conversations, eq(conversations.id, conversationProjects.conversationId))
-        .where(and(isNull(conversations.deletedAt), sql`${conversationProjects.projectId} is not null`)),
+      db.select({ value: sql<number>`count(distinct project_memberships.conversation_id)::int` })
+        .from(sql`(${projectConversationMembershipQuery()}) project_memberships`),
       db.select({ value: count() }).from(conversations)
         .leftJoin(conversationProjects, eq(conversationProjects.conversationId, conversations.id))
-        .where(and(isNull(conversations.deletedAt), isNull(conversationProjects.projectId))),
+        .where(unclassifiedConversationFilter()),
       db.select({ value: count() }).from(tags),
     ]);
     return {
@@ -359,9 +382,13 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/projects/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const input = ProjectInputSchema.partial()
-        .extend({ archived: z.boolean().optional() })
+        .extend({
+          // PATCH omissions must not apply the create-time default in Zod 4.
+          description: ProjectDescriptionSchema.optional(),
+          archived: z.boolean().optional(),
+        })
         .parse(request.body);
       const values = input.name
         ? {
@@ -391,7 +418,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/projects/:id/export",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const { format } = ProjectExportQuerySchema.parse(request.query);
       if (format === "xlsx") {
         const xlsx = await createConversationXlsxExport({ projectId: params.id });
@@ -424,7 +451,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/projects/:id/context",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const input = z.object({ ai: z.boolean().default(true) }).parse(request.body ?? {});
       const context = await generateProjectContext(params.id, input);
       if (!context) return reply.code(404).send({ error: "Project not found" });
@@ -440,7 +467,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/projects/:id/timeline",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const query = z.object({
         limit: z.coerce.number().int().min(1).max(200).default(100),
         offset: z.coerce.number().int().min(0).default(0),
@@ -451,88 +478,43 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         .where(eq(projects.id, params.id))
         .limit(1);
       if (!project) return reply.code(404).send({ error: "Project not found" });
-      const conversationRows = await db
-        .select({
-          id: conversations.id,
-          provider: conversations.provider,
-          title: conversations.title,
-          updatedAt: conversations.updatedAt,
-        })
-        .from(conversationProjects)
-        .innerJoin(conversations, eq(conversations.id, conversationProjects.conversationId))
-        .where(
-          and(
-            eq(conversationProjects.projectId, params.id),
-            isNull(conversations.deletedAt),
-          ),
-        );
-      if (!conversationRows.length) return {
-        project,
-        items: [],
-        pagination: { total: 0, limit: query.limit, offset: query.offset, hasMore: false },
-      };
-      const ids = conversationRows.map((row) => row.id);
-      const revisions = await db
-        .select({
-          id: conversationRevisions.id,
-          conversationId: conversationRevisions.conversationId,
-          capturedAt: conversationRevisions.capturedAt,
-          createdAt: conversationRevisions.createdAt,
-          completeness: conversationRevisions.completeness,
-        })
-        .from(conversationRevisions)
-        .where(inArray(conversationRevisions.conversationId, ids))
-        .orderBy(
-          asc(conversationRevisions.conversationId),
-          desc(sql`${conversationRevisions.completeness} = 'complete'`),
-          desc(conversationRevisions.capturedAt),
-          desc(conversationRevisions.createdAt),
-        );
-      const newestRevision = selectLatestTimelineRevisions(revisions);
-      const tagLinks = await db
-        .select({
-          conversationId: conversationTags.conversationId,
-          id: tags.id,
-          name: tags.name,
-        })
-        .from(conversationTags)
-        .innerJoin(tags, eq(tags.id, conversationTags.tagId))
-        .where(inArray(conversationTags.conversationId, ids));
+      const { conversationRows, total, tagLinks, childCounts } = await db.transaction(async tx => {
+        const [totalRow] = await tx.select({ total: count() }).from(conversations)
+          .where(and(projectConversationFilter(params.id), isNull(conversations.deletedAt), sql`exists (
+            select 1 from conversation_revisions revision where revision.conversation_id = ${conversations.id}
+          )`));
+        const conversationRows = await buildProjectTimelineConversationQuery(params.id, query, tx);
+        const ids = conversationRows.map(row => row.id);
+        const tagLinks = ids.length ? await tx.select({
+          conversationId: conversationTags.conversationId, id: tags.id, name: tags.name,
+        }).from(conversationTags).innerJoin(tags, eq(tags.id, conversationTags.tagId))
+          .where(inArray(conversationTags.conversationId, ids)).orderBy(tags.name) : [];
+        const childCounts = ids.length ? await tx.execute<{ id: string; childCount: number }>(sql`
+          select parent.id, count(child.id)::int as "childCount" from conversations parent
+          join conversations child on child.provider = parent.provider
+            and child.parent_external_session_id = parent.external_session_id
+            and child.id <> parent.id and child.deleted_at is null
+          where ${inArray(sql`parent.id`, ids)} group by parent.id
+        `) : [];
+        return { conversationRows, total: Number(totalRow?.total ?? 0), tagLinks, childCounts };
+      }, { isolationLevel: "repeatable read", accessMode: "read only" });
       const tagsByConversation = new Map<string, Array<{ id: string; name: string }>>();
       for (const link of tagLinks) {
         const values = tagsByConversation.get(link.conversationId) ?? [];
         values.push({ id: link.id, name: link.name });
         tagsByConversation.set(link.conversationId, values);
       }
-      const items = conversationRows
-        .flatMap((conversation) => {
-          const revision = newestRevision.get(conversation.id);
-          if (!revision) return [];
-          return [{
-            conversationId: conversation.id,
-            revisionId: revision.id,
-            capturedAt: revision.capturedAt,
-            provider: conversation.provider,
-            title: conversation.title,
-            tags: tagsByConversation.get(conversation.id) ?? [],
-            href: `/conversations/${conversation.id}?revisionId=${revision.id}`,
-          }];
-        })
-        .sort(
-          (left, right) =>
-            right.capturedAt.getTime() - left.capturedAt.getTime() ||
-            right.revisionId.localeCompare(left.revisionId),
-        );
-      const pageItems = items.slice(query.offset, query.offset + query.limit);
+      const childCountById = new Map(childCounts.map(row => [row.id, Number(row.childCount)]));
+      const items = conversationRows.map(conversation => ({
+        conversationId: conversation.id, revisionId: conversation.revisionId,
+        capturedAt: conversation.capturedAt, provider: conversation.provider, title: conversation.title,
+        childCount: childCountById.get(conversation.id) ?? 0,
+        tags: tagsByConversation.get(conversation.id) ?? [], href: `/conversations/${conversation.id}`,
+      }));
       return {
-        project,
-        items: pageItems,
-        pagination: {
-          total: items.length,
-          limit: query.limit,
-          offset: query.offset,
-          hasMore: query.offset + pageItems.length < items.length,
-        },
+        project, items,
+        pagination: { total, limit: query.limit, offset: query.offset,
+          hasMore: query.offset + items.length < total },
       };
     },
   );
@@ -541,8 +523,8 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireWebUser(request, reply);
     if (!user) return;
     const input = z.object({
-      sourceProjectIds: z.array(z.string().uuid()).min(1),
-      targetProjectId: z.string().uuid(),
+      sourceProjectIds: z.array(z.guid()).min(1),
+      targetProjectId: z.guid(),
       targetName: ProjectInputSchema.shape.name.optional(),
     }).parse(request.body);
     const result = await mergeProjectsIntoProject({
@@ -567,9 +549,9 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       const user = await requireWebUser(request, reply);
       if (!user) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const input = z.object({
-        targetProjectId: z.string().uuid(),
+        targetProjectId: z.guid(),
         targetName: ProjectInputSchema.shape.name.optional(),
       }).parse(request.body);
       if (input.targetProjectId === params.id) {
@@ -599,9 +581,9 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/conversations/:id/project",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const input = z.object({
-        projectId: z.string().uuid().nullable(),
+        projectId: z.guid().nullable(),
         mode: z.enum(["lock", "auto"]).default("lock"),
       }).parse(request.body);
       const [conversation] = await db
@@ -695,7 +677,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/classification/tasks/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       await failStaleBackgroundTasks("classification_rebuild");
       const task = await getBackgroundTask(params.id);
       if (!task) return reply.code(404).send({ error: "Task not found" });
@@ -709,7 +691,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       limit: z.coerce.number().int().min(1).max(200).default(50),
       offset: z.coerce.number().int().min(0).default(0),
     }).parse(request.query);
-    const where = and(isNull(conversationProjects.projectId), isNull(conversations.deletedAt));
+    const where = unclassifiedConversationFilter();
     const [[totalRow], items] = await Promise.all([
       db.select({ total: count() }).from(conversations)
         .leftJoin(conversationProjects, eq(conversationProjects.conversationId, conversations.id))
@@ -720,6 +702,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         provider: conversations.provider,
         title: conversations.title,
         updatedAt: conversations.updatedAt,
+        childCount: conversationChildCount(),
         suggestedName: conversationProjects.suggestedName,
         confidence: conversationProjects.confidence,
       })

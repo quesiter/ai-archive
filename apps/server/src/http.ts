@@ -1,8 +1,14 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { config } from "./config.js";
-import { authenticateDevice, authenticateWebSession } from "./services/auth.js";
+import { authenticateDevice, authenticateWebSession, WEB_SESSION_MAX_AGE } from "./services/auth.js";
 
 export const SESSION_COOKIE = "archive_session";
+export function setWebSessionCookie(reply: FastifyReply, token: string, expiresAt: Date): void {
+  reply.setCookie(SESSION_COOKIE, token, {
+    path: "/", httpOnly: true, secure: config.cookieSecure,
+    sameSite: "lax", expires: expiresAt, maxAge: WEB_SESSION_MAX_AGE,
+  });
+}
 const SAFE_WEB_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 export function bearerToken(request: FastifyRequest): string | undefined {
@@ -60,7 +66,10 @@ export async function requireWebUser(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<{ id: string; username: string } | null> {
-  const user = await authenticateWebSession(request.cookies[SESSION_COOKIE]);
+  const token = request.cookies[SESSION_COOKIE];
+  const user = await authenticateWebSession(token, (expiresAt) => {
+    if (token) setWebSessionCookie(reply, token, expiresAt);
+  });
   if (!user) {
     await reply.code(401).send({ error: "Authentication required" });
     return null;

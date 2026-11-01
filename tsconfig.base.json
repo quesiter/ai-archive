@@ -5,7 +5,8 @@
     "moduleResolution": "Bundler",
     "baseUrl": ".",
     "paths": {
-      "@ai-archive/contracts": ["packages/contracts/src/index.ts"]
+      "@ai-archive/contracts": ["packages/contracts/src/index.ts"],
+      "@ai-archive/contracts/presentation": ["packages/contracts/src/presentation.ts"]
     },
     "strict": true,
     "noUncheckedIndexedAccess": true,

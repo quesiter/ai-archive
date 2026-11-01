@@ -47,6 +47,8 @@ try {
   }
 
   $env:NODE_OPTIONS = "--max-old-space-size=4096 $($env:NODE_OPTIONS)".Trim()
+  $grokBuildRoot = Get-DefaultValue "AI_ARCHIVE_GROK_BUILD_ROOT" (Get-DefaultValue "GROK_HOME" (Join-Path $env:USERPROFILE ".grok"))
+  if (Test-Path -LiteralPath $grokBuildRoot -PathType Container) { $env:AI_ARCHIVE_GROK_BUILD_ROOT = $grokBuildRoot }
   $recentDays = Get-DefaultValue "AI_ARCHIVE_SAFE_RECENT_DAYS" "14"
   $maxFiles = Get-DefaultValue "AI_ARCHIVE_SAFE_MAX_FILES" "60"
   $maxFileMb = Get-DefaultValue "AI_ARCHIVE_SAFE_MAX_FILE_MB" "50"

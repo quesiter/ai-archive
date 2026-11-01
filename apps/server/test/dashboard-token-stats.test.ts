@@ -1,8 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 vi.mock("../src/db.js", () => ({ db: {} }));
 
 describe("dashboard token stats", () => {
+  it("aggregates latest revision counts and messages in the token query", async () => {
+    const { dashboardTextStatsQuery } = await import(
+      "../src/routes/dashboard.js"
+    );
+    const query = new PgDialect().sqlToQuery(dashboardTextStatsQuery());
+    expect(query.sql).toContain("count(*) AS latest_revision_count");
+    expect(query.sql).toContain("COALESCE(sum(message_count), 0) AS latest_message_count");
+    expect(query.sql).toContain("FROM conversation_stats");
+  });
+
   it("combines provider usage with process-aware fallback estimates", async () => {
     const { dashboardTokenStatsFromRow } = await import(
       "../src/routes/dashboard.js"

@@ -43,7 +43,7 @@ export async function logRoutes(app: FastifyInstance): Promise<void> {
         scope: LogScopeSchema.optional(),
         level: LogLevelSchema.optional(),
         provider: ProviderSchema.optional(),
-        deviceId: z.string().uuid().optional(),
+        deviceId: z.guid().optional(),
         status: z.string().min(1).max(80).optional(),
         q: z.string().min(1).max(200).optional(),
         from: z.string().refine((value) => /^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isNaN(Date.parse(value))).optional(),

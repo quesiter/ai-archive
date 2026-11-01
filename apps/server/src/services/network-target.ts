@@ -119,7 +119,7 @@ export function pinnedLookup(resolved: ResolvedNetworkHost) {
 export async function createPinnedNetworkDispatcher(value: string): Promise<Agent> {
   const url = validateNetworkUrl(value);
   const resolved = await resolveSafeNetworkHost(url.hostname);
-  return new Agent({ connect: { lookup: pinnedLookup(resolved) } });
+  return new Agent({ connect: { lookup: pinnedLookup(resolved) }, headersTimeout: 10 * 60_000, bodyTimeout: 10 * 60_000 });
 }
 
 export async function withPinnedNetworkDispatcher<T>(

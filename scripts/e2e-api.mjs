@@ -1,4 +1,6 @@
+import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 import { strToU8, zipSync } from "../apps/server/node_modules/fflate/esm/index.mjs";
 
@@ -26,6 +28,15 @@ async function expectOk(response) {
     throw new Error(`${response.status} ${response.url}: ${JSON.stringify(value)}`);
   }
   return value;
+}
+
+async function expectPage(response) {
+  const page = await expectOk(response);
+  assert.ok(Array.isArray(page.items), "A paginated endpoint must return items");
+  assert.ok(Number.isInteger(page.pagination?.total), "A paginated endpoint must return its total");
+  assert.equal(page.pagination.hasMore, false, "The synthetic fixture must fit in the requested page");
+  assert.equal(page.pagination.total, page.items.length);
+  return page.items;
 }
 
 function currentTotp(secret) {
@@ -62,7 +73,8 @@ for (let attempt = 0; attempt < 30; attempt += 1) {
 }
 
 const health = await expectOk(await fetch(`${base}/healthz`));
-const expectedVersion = process.env.E2E_EXPECTED_VERSION ?? "V2.3.1";
+const expectedVersion = process.env.E2E_EXPECTED_VERSION ??
+  `V${JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version}`;
 if (health.version !== expectedVersion) {
   throw new Error(`Expected server ${expectedVersion}, received ${String(health.version)}`);
 }
@@ -172,13 +184,16 @@ const first = await expectOk(firstResponse);
 const repeatResponse = await capture(snapshot, "capture:e2e-001");
 const repeat = await expectOk(repeatResponse);
 
-// A provider title may appear after the original message capture. Replaying
-// the same content and idempotency key must repair metadata without creating a
-// new revision or being discarded as a no-op.
+// Only the exact accepted payload may reuse an idempotency key. Later title
+// metadata is a new observation, while the accumulated revision stays stable.
 const replayMetadata = structuredClone(snapshot);
 replayMetadata.title = "Title repaired through idempotent replay";
 replayMetadata.capturedAt = new Date(Date.now() + 500).toISOString();
-const replayMetadataResponse = await capture(replayMetadata, "capture:e2e-001");
+const metadataConflictResponse = await capture(replayMetadata, "capture:e2e-001");
+const metadataConflict = await responseBody(metadataConflictResponse);
+assert.equal(metadataConflictResponse.status, 400);
+assert.match(metadataConflict.error, /Idempotency-Key/);
+const replayMetadataResponse = await capture(replayMetadata, "capture:e2e-metadata-title");
 const replayMetadataResult = await expectOk(replayMetadataResponse);
 const replayMetadataDetail = await expectOk(
   await fetch(`${base}/api/v1/conversations/${first.conversationId}`, {
@@ -190,7 +205,7 @@ const changed = structuredClone(snapshot);
 changed.branchFingerprint = "branch-e2e-002";
 changed.capturedAt = new Date(Date.now() + 1_000).toISOString();
 changed.messages[1].segments[2].content =
-  "Changed branch answer retained as a second revision.";
+  "Changed branch answer retained in the accumulated conversation.";
 const conflictResponse = await capture(changed, "capture:e2e-001");
 const conflict = await responseBody(conflictResponse);
 const changedResponse = await capture(changed, "capture:e2e-002");
@@ -233,10 +248,10 @@ const invalid = {
 const invalidResponse = await capture(invalid, "capture:invalid-001");
 const invalidBody = await responseBody(invalidResponse);
 
-const titleSearch = await expectOk(
+const titleSearch = await expectPage(
   await fetch(`${base}/api/v1/conversations?q=TitleOnlyNeedle`, { headers: { cookie } }),
 );
-const bodySearch = await expectOk(
+const bodySearch = await expectPage(
   await fetch(
     `${base}/api/v1/conversations?q=${encodeURIComponent("external session ID")}`,
     { headers: { cookie } },
@@ -252,6 +267,16 @@ const detailBefore = await expectOk(
     headers: { cookie },
   }),
 );
+const bodySearchHit = bodySearch.find((conversation) => conversation.id === first.conversationId)?.searchHit;
+const locatedBodyMessage = detailBefore.messages.find((message) => message.ordinal === bodySearchHit?.messageOrdinal);
+assert.equal(bodySearchHit?.reason, "正文命中");
+assert.ok(locatedBodyMessage?.segments.some((segment) => segment.content.includes("external session ID")),
+  "Search must locate the retained original message inside the accumulated body");
+const accumulatedText = detailBefore.messages.flatMap((message) => message.segments.map((segment) => segment.content)).join("\n");
+assert.ok(accumulatedText.includes(snapshot.messages[1].segments[2].content), "The original answer must remain readable");
+assert.ok(accumulatedText.includes(changed.messages[1].segments[2].content), "The changed answer must remain readable");
+assert.equal(detailBefore.messages.filter((message) => message.role === "user").length, 1,
+  "Repeated snapshots must not duplicate the original user question");
 
 const project = await expectOk(
   await fetch(`${base}/api/v1/projects`, {
@@ -294,7 +319,7 @@ const normalizedNasTag = await expectOk(
     body: JSON.stringify({ name: "nas" }),
   }),
 );
-const projectAndTagFilter = await expectOk(
+const projectAndTagFilter = await expectPage(
   await fetch(
     `${base}/api/v1/conversations?projectId=${project.id}&tagIds=${nasTag.tagId},${ddnsTag.tagId}`,
     { headers: { cookie } },
@@ -378,7 +403,7 @@ const archivedProject = await expectOk(
     body: JSON.stringify({ archived: true }),
   }),
 );
-const projectsWhileArchived = await expectOk(
+const projectsWhileArchived = await expectPage(
   await fetch(`${base}/api/v1/projects`, { headers: { cookie } }),
 );
 const overviewWhileArchived = await expectOk(
@@ -423,6 +448,23 @@ const deletedConversationResponse = await fetch(
   { headers: { cookie } },
 );
 await responseBody(deletedConversationResponse);
+
+const restoredConversationResponse = await fetch(`${base}/api/v1/conversations/${first.conversationId}/restore`, {
+  method: "POST", headers: webHeaders, body: JSON.stringify({}),
+});
+await expectOk(restoredConversationResponse);
+const restoredDetail = await expectOk(await fetch(`${base}/api/v1/conversations/${first.conversationId}`, { headers: { cookie } }));
+assert.equal(restoredDetail.conversation.id, first.conversationId);
+assert.equal(restoredDetail.revisions.length, 1);
+assert.equal(restoredDetail.messages.length, detailBefore.messages.length);
+await expectOk(await fetch(`${base}/api/v1/conversations/${first.conversationId}`, {
+  method: "DELETE", headers: { cookie, origin: base },
+}));
+const permanentDeleteResponse = await fetch(`${base}/api/v1/conversations/${first.conversationId}/permanent`, {
+  method: "DELETE", headers: webHeaders, body: JSON.stringify({ confirmation: "DELETE" }),
+});
+await expectOk(permanentDeleteResponse);
+assert.equal(permanentDeleteResponse.status, 204);
 
 // Reuse the original deterministic idempotency key. A permanent deletion must
 // clear the old run and create a fresh conversation with only this snapshot.
@@ -501,7 +543,7 @@ const importResponse = await uploadZip();
 const importAccepted = await expectOk(importResponse);
 let completedImport = null;
 for (let attempt = 0; attempt < 40; attempt += 1) {
-  const jobs = await expectOk(
+  const jobs = await expectPage(
     await fetch(`${base}/api/v1/imports`, { headers: { cookie } }),
   );
   completedImport = jobs.find((job) => job.id === importAccepted.job.id);
@@ -512,7 +554,7 @@ for (let attempt = 0; attempt < 40; attempt += 1) {
   await new Promise((resolve) => setTimeout(resolve, 500));
 }
 const duplicateImport = await expectOk(await uploadZip());
-const allConversations = await expectOk(
+const allConversations = await expectPage(
   await fetch(`${base}/api/v1/conversations`, { headers: { cookie } }),
 );
 const dashboard = await expectOk(
@@ -538,6 +580,7 @@ const summary = {
   firstUnchanged: first.unchanged,
   repeatStatus: repeatResponse.status,
   repeatUnchanged: repeat.unchanged,
+  metadataConflictStatus: metadataConflictResponse.status,
   replayMetadataStatus: replayMetadataResponse.status,
   replayMetadataUnchanged: replayMetadataResult.unchanged,
   replayMetadataUpdated:
@@ -554,10 +597,14 @@ const summary = {
   titleSearch: titleSearch.length,
   bodySearch: bodySearch.length,
   titleSearchReason: titleSearch[0]?.searchHit?.reason,
-  bodySearchReason: bodySearch[0]?.searchHit?.reason,
-  bodySearchMessageOrdinal: bodySearch[0]?.searchHit?.messageOrdinal,
+  bodySearchReason: bodySearchHit?.reason,
+  bodySearchMessageOrdinal: bodySearchHit?.messageOrdinal,
   invalidProviderStatus: invalidProviderResponse.status,
   revisions: detailBefore.revisions.length,
+  stableRevisionId: detailBefore.revisions[0]?.id === first.revisionId &&
+    changedResult.revisionId === first.revisionId && replayMetadataResult.revisionId === first.revisionId,
+  retainedBothAnswers: accumulatedText.includes(snapshot.messages[1].segments[2].content) &&
+    accumulatedText.includes(changed.messages[1].segments[2].content),
   titleUpdatedWithoutRevision: detailBefore.conversation.title === metadataOnly.title,
   projectLocked: detailAfter.projectAssignment?.lockedByUser,
   normalizedTagReused: normalizedNasTag.id === nasTag.tagId,
@@ -570,7 +617,7 @@ const summary = {
   timelineProvider: timeline.items?.[0]?.provider,
   timelineLinkExact:
     timeline.items?.[0]?.href ===
-    `/conversations/${first.conversationId}?revisionId=${timeline.items?.[0]?.revisionId}`,
+    `/conversations/${first.conversationId}`,
   contextDownloaded:
     contextResponse.status === 200 &&
     contextResponse.headers.get("content-disposition")?.includes("PROJECT-CONTEXT.md") &&
@@ -582,15 +629,16 @@ const summary = {
   archivedProjectVisible:
     projectsWhileArchived.find((item) => item.id === mergeTargetProject.id)
       ?.conversationCount === 1 &&
-    overviewWhileArchived.projects?.some(
-      (item) => item.id === mergeTargetProject.id && item.archived === true,
-    ),
+    projectsWhileArchived.find((item) => item.id === mergeTargetProject.id)?.archived === true &&
+    overviewWhileArchived.totals?.archivedProjectCount === 1,
   archivedProjectRejectedForAssignment: archivedAssignmentResponse.status === 400,
   tagDeleteKeptConversation:
     detailAfterTagDelete.conversation.id === first.conversationId &&
     !detailAfterTagDelete.tags.some((tag) => tag.id === nasTag.tagId),
   deleteStatus: deleteConversationResponse.status,
   deletedDetailStatus: deletedConversationResponse.status,
+  restoreStatus: restoredConversationResponse.status,
+  permanentDeleteStatus: permanentDeleteResponse.status,
   recapturedStatus: recapturedResponse.status,
   recapturedConversationIsNew: recaptured.conversationId !== first.conversationId,
   recapturedRevisions: recapturedDetail.revisions.length,
@@ -616,35 +664,39 @@ if (
   first.unchanged ||
   repeatResponse.status !== 200 ||
   !repeat.unchanged ||
-  replayMetadataResponse.status !== 200 ||
-  !replayMetadataResult.unchanged ||
+  repeat.revisionId !== first.revisionId ||
+  metadataConflictResponse.status !== 400 ||
+  replayMetadataResponse.status !== 201 ||
+  replayMetadataResult.unchanged ||
   replayMetadataDetail.conversation.title !== replayMetadata.title ||
   replayMetadataDetail.revisions.length !== 1 ||
   conflictResponse.status !== 400 ||
   changedResponse.status !== 201 ||
   changedResult.unchanged ||
-  metadataOnlyResponse.status !== 200 ||
-  !metadataOnlyResult.unchanged ||
+  metadataOnlyResponse.status !== 201 ||
+  metadataOnlyResult.unchanged ||
   invalidResponse.status !== 400 ||
   titleSearch.length !== 1 ||
   bodySearch.length < 1 ||
   titleSearch[0]?.searchHit?.reason !== "标题命中" ||
-  bodySearch[0]?.searchHit?.reason !== "正文命中" ||
-  bodySearch[0]?.searchHit?.messageOrdinal !== 1 ||
+  bodySearchHit?.reason !== "正文命中" ||
+  !Number.isInteger(bodySearchHit?.messageOrdinal) ||
   invalidProviderResponse.status !== 400 ||
-  detailBefore.revisions.length !== 2 ||
+  detailBefore.revisions.length !== 1 ||
+  !summary.stableRevisionId ||
+  !summary.retainedBothAnswers ||
   detailBefore.conversation.title !== metadataOnly.title ||
   !detailAfter.projectAssignment?.lockedByUser ||
   normalizedNasTag.id !== nasTag.tagId ||
   projectAndTagFilter.length !== 1 ||
   unlockedTag.lockedByUser !== false ||
-  renamedNasTag.name !== "NAS 存储" ||
+  renamedNasTag.name !== "NAS存储" ||
   mergedTag.targetTagId !== networkTag.id ||
   !detailAfterTagMerge.tags.some((tag) => tag.id === networkTag.id) ||
   timeline.items?.length !== 1 ||
   timeline.items?.[0]?.provider !== "deepseek" ||
   timeline.items?.[0]?.href !==
-    `/conversations/${first.conversationId}?revisionId=${timeline.items?.[0]?.revisionId}` ||
+    `/conversations/${first.conversationId}` ||
   contextResponse.status !== 200 ||
   !contextResponse.headers.get("content-disposition")?.includes("PROJECT-CONTEXT.md") ||
   !contextMarkdown.includes("## 原始来源") ||
@@ -654,14 +706,15 @@ if (
   archivedProject.archived !== true ||
   projectsWhileArchived.find((item) => item.id === mergeTargetProject.id)
     ?.conversationCount !== 1 ||
-  !overviewWhileArchived.projects?.some(
-    (item) => item.id === mergeTargetProject.id && item.archived === true,
-  ) ||
+  projectsWhileArchived.find((item) => item.id === mergeTargetProject.id)?.archived !== true ||
+  overviewWhileArchived.totals?.archivedProjectCount !== 1 ||
   archivedAssignmentResponse.status !== 400 ||
   detailAfterTagDelete.conversation.id !== first.conversationId ||
   detailAfterTagDelete.tags.some((tag) => tag.id === nasTag.tagId) ||
   deleteConversationResponse.status !== 204 ||
   deletedConversationResponse.status !== 404 ||
+  restoredConversationResponse.status !== 200 ||
+  permanentDeleteResponse.status !== 204 ||
   recapturedResponse.status !== 201 ||
   recaptured.unchanged ||
   recaptured.conversationId === first.conversationId ||

@@ -3,6 +3,7 @@ import { ZodError } from "zod";
 import { errorMessage, requireDevice } from "../http.js";
 import {
   IncrementalBaseMismatchError,
+  BatchCaptureExpiredError,
   ingestCapture,
   recordCaptureFailure,
 } from "../services/capture.js";
@@ -10,8 +11,23 @@ import { CaptureTriggerReasonSchema, ProviderSchema } from "@ai-archive/contract
 import { writeOperationLog } from "../services/operation-log.js";
 import { enqueueConversationClassification } from "../services/queue.js";
 import { getBooleanSetting } from "../services/settings.js";
+import { backfillCodexHistoryLineage } from "../services/codex-history-lineage.js";
 
 export async function captureRoutes(app: FastifyInstance): Promise<void> {
+  app.post("/api/v1/captures/codex-lineage", async (request, reply) => {
+    const device = await requireDevice(request, reply);
+    if (!device) return;
+    const result = await backfillCodexHistoryLineage(request.body);
+    if (result.updated) {
+      await writeOperationLog({
+        scope: "capture", message: `Codex 历史父子关系已补齐：${result.updated} 条`,
+        status: "complete", entityType: "device", entityId: device.id,
+        metadata: result,
+      });
+    }
+    return result;
+  });
+
   app.post("/api/v1/captures", async (request, reply) => {
     const device = await requireDevice(request, reply);
     if (!device) return;
@@ -71,6 +87,7 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
       }
       return reply.code(result.unchanged ? 200 : 201).send(result);
     } catch (error) {
+      if (error instanceof BatchCaptureExpiredError) return reply.code(409).send({ error: error.message, batchExpired: true });
       const candidate = request.body as Record<string, unknown> | null;
       if (error instanceof IncrementalBaseMismatchError) {
         await writeOperationLog({

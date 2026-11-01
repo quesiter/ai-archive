@@ -1,4 +1,4 @@
-import { asc, eq, inArray } from "drizzle-orm";
+import { asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { CaptureMessage } from "@ai-archive/contracts";
 import { db } from "../db.js";
 import {
@@ -104,6 +104,11 @@ export async function loadHydratedRevisionMessagesBatch(
   revisionIds: readonly string[],
   executor: QueryExecutor = db,
 ): Promise<Map<string, HydratedRevisionMessage[]>> {
+  if (executor === db) {
+    return db.transaction((tx) => loadHydratedRevisionMessagesBatch(revisionIds, tx), {
+      isolationLevel: "repeatable read", accessMode: "read only",
+    });
+  }
   const uniqueRevisionIds = [...new Set(revisionIds)];
   if (!uniqueRevisionIds.length) return new Map();
 
@@ -180,6 +185,23 @@ export async function loadHydratedRevisionMessagesBatch(
   return result;
 }
 
+/** Read mutable metadata and its body from the same database snapshot. */
+export async function loadCurrentConversationArchive(conversationId: string): Promise<{
+  revision: RevisionRow;
+  messages: HydratedRevisionMessage[];
+} | null> {
+  return db.transaction(async (tx) => {
+    const [revision] = await tx.select().from(conversationRevisions)
+      .where(eq(conversationRevisions.conversationId, conversationId))
+      .orderBy(desc(conversationRevisions.isAccumulated),
+        desc(sql`(${conversationRevisions.completeness} = 'complete')`),
+        desc(conversationRevisions.capturedAt), desc(conversationRevisions.createdAt))
+      .limit(1);
+    if (!revision) return null;
+    return { revision, messages: await loadHydratedRevisionMessages(revision.id, tx) };
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
+}
+
 export async function loadHydratedRevisionMessages(
   revisionId: string,
   executor: QueryExecutor = db,
@@ -218,10 +240,18 @@ export async function loadCaptureRevisionMessagesBatch(
   executor: QueryExecutor = db,
 ): Promise<Map<string, CaptureMessage[]>> {
   const hydrated = await loadHydratedRevisionMessagesBatch(revisionIds, executor);
+  const converted = new Map<string, CaptureMessage>();
   return new Map(
     [...hydrated].map(([revisionId, revisionMessages]) => [
       revisionId,
-      revisionMessages.map(toCaptureMessage),
+      revisionMessages.map((message) => {
+        let value = converted.get(message.id);
+        if (!value) {
+          value = toCaptureMessage(message);
+          converted.set(message.id, value);
+        }
+        return value;
+      }),
     ]),
   );
 }

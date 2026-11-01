@@ -38,6 +38,49 @@ afterAll(async () => {
 });
 
 describe("backup archive parsing", () => {
+  it("restores batch queues paused and invalidates in-flight browser leases", () => {
+    const restored = prepareRestoredBackupTables({ recaptureJobs: [{ id: "j", status: "running" }, { id: "done", status: "completed" }],
+      recaptureItems: [{ jobId: "j", status: "running", leaseToken: "old", leaseExpiresAt: "later" }, { jobId: "done", status: "complete" }] });
+    expect(restored.tables.recaptureJobs?.map(row => row.status)).toEqual(["paused", "completed"]);
+    expect(restored.tables.recaptureItems?.[0]).toMatchObject({ status: "pending", leaseToken: null, leaseExpiresAt: null, startedAt: null });
+    expect(restored.tables.recaptureItems?.[1]?.status).toBe("complete");
+  });
+  it("preserves accumulated evidence and immutable receipts while defaulting legacy fields", () => {
+    const evidence = { variants: [{ ordinal: 1, role: "assistant", segments: [{ type: "text", content: "Earlier answer" }] }], warnings: [{ type: "content", messageIds: ["answer"] }] };
+    const receipt = { conversationId: "conversation", revisionId: "canonical", messageCount: 2, archiveMessageCount: 4 };
+    const prepared = prepareRestoredBackupTables({
+      conversationRevisions: [{ id: "canonical", isAccumulated: true, mergeEvidence: evidence }, { id: "legacy" }],
+      captureRuns: [{ id: "new", requestHash: "a".repeat(64), receipt }, { id: "legacy" }],
+    });
+    expect(prepared.tables.conversationRevisions?.[0]).toMatchObject({ isAccumulated: true, mergeEvidence: evidence });
+    expect(prepared.tables.conversationRevisions?.[1]).toMatchObject({ isAccumulated: false, mergeEvidence: { variants: [], warnings: [] } });
+    expect(prepared.tables.captureRuns?.[0]).toMatchObject({ requestHash: "a".repeat(64), receipt });
+    expect(prepared.tables.captureRuns?.[1]).toMatchObject({ requestHash: null, receipt: null });
+  });
+
+  it("redacts retained alternate observations and invalidates their content integrity proof", () => {
+    const result = sanitizeRestoredBackupTables({
+      conversationRevisions: [{ id: "canonical", isAccumulated: true, contentIntegrityHash: "old-proof",
+        mergeEvidence: { variants: [{ ordinal: 0, role: "assistant", segments: [{ type: "text", content: "password=DemoOnly_123" }] }], warnings: [] } }],
+    });
+    expect(JSON.stringify(result.conversationRevisions?.[0]?.mergeEvidence)).not.toContain("DemoOnly_123");
+    expect(result.conversationRevisions?.[0]?.contentIntegrityHash).toBeNull();
+  });
+  it("preserves parent session links through backup parsing and restore preparation", async () => {
+    const envelope = {
+      ...backupEnvelope(),
+      tables: { conversations: [
+        { id: "root", provider: "codex", externalSessionId: "root-session" },
+        { id: "child", provider: "codex", externalSessionId: "child-session", parentExternalSessionId: "root-session" },
+      ] },
+    };
+    const parsed = await parseBackupArchive("backup.json", Buffer.from(JSON.stringify(envelope)));
+    const prepared = prepareRestoredBackupTables(parsed.tables);
+    const restored = sanitizeRestoredBackupTables(prepared.tables);
+    expect(restored.conversations?.[1]?.parentExternalSessionId).toBe("root-session");
+    expect(restored.conversations?.[0]?.parentExternalSessionId).toBeUndefined();
+  });
+
   it("accepts gzip-compressed backup JSON", async () => {
     const envelope = backupEnvelope();
     const parsed = await parseBackupArchive(

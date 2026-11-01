@@ -9,6 +9,7 @@
       <string>__NODE__</string>
       <string>__SCRIPT__</string>
       <string>run</string>
+      <string>--auth-revoked-exit-success</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -18,7 +19,10 @@
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+    </dict>
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardOutPath</key>

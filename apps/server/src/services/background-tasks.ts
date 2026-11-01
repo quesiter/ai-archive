@@ -28,8 +28,14 @@ interface BackgroundTaskUpdateOptions {
 }
 
 function operationScope(kind: BackgroundTaskKind) {
-  if (kind === "storage_redaction") return "system";
+  if (kind === "storage_redaction" || kind === "archive_integrity") return "system";
   return "classification";
+}
+
+function staleTaskLogMessage(kind: BackgroundTaskKind) {
+  if (kind === "archive_integrity") return "超时归档完整性检查已自动标记失败";
+  if (kind === "storage_redaction") return "超时存储脱敏任务已自动标记失败";
+  return "超时智能归类任务已自动标记失败";
 }
 
 export async function createBackgroundTask(
@@ -191,7 +197,7 @@ export async function failStaleBackgroundTasks(
     await writeOperationLog({
       scope: operationScope(task.kind),
       level: "error",
-      message: "超时智能归类任务已自动标记失败",
+      message: staleTaskLogMessage(task.kind),
       status: task.status,
       entityType: "background_task",
       entityId: task.id,

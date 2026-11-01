@@ -1,4 +1,5 @@
 import { Cron } from "croner";
+import { z } from "zod";
 import { config } from "./config.js";
 import { closeDatabase } from "./db.js";
 import {
@@ -60,10 +61,11 @@ async function aiRetrySchedule(error: unknown) {
   return deferredAiRetrySchedule(error) ?? await resolveAiRetrySchedule(error);
 }
 
-async function runAnalysisJob(kind: "weekly" | "monthly") {
-  const result = await runAnalysis(kind);
+async function runAnalysisJob(kind: "weekly" | "monthly", data: unknown) {
+  const request = z.object({ runId: z.guid().optional(), generationId: z.guid().optional() }).parse(data ?? {});
+  const result = await runAnalysis(kind, new Date(), request);
   if ("deferred" in result) {
-    await enqueueAnalysis(kind, { startAfter: result.retryAt });
+    await enqueueAnalysis(kind, { startAfter: result.retryAt }, { runId: result.runId, generationId: result.generationId });
   }
   return result;
 }
@@ -81,8 +83,8 @@ await failStaleRestoreJobs().catch((error) => {
   console.warn("Failed to mark stale restore jobs", safeStoredError(error));
 });
 
-await boss.work(queueNames.weekly, async () => runAnalysisJob("weekly"));
-await boss.work(queueNames.monthly, async () => runAnalysisJob("monthly"));
+await boss.work(queueNames.weekly, async (jobs) => runAnalysisJob("weekly", jobs[0]?.data));
+await boss.work(queueNames.monthly, async (jobs) => runAnalysisJob("monthly", jobs[0]?.data));
 await boss.work(
   queueNames.classifyConversation,
   { includeMetadata: true },

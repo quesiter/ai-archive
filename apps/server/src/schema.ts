@@ -12,14 +12,75 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import type {
   CaptureMode,
+  CaptureMessage,
   CaptureTriggerReason,
   DeviceKind,
   MessageRole,
   Provider,
   SegmentType,
 } from "@ai-archive/contracts";
+
+export type SourceReviewBodyKind = "map_rendering" | "partial_rendering" | "attachment_preview" | "source_text";
+
+export interface SourceReview {
+  version: 1;
+  source: "chatgpt_source_ui" | "chatgpt_current_branch";
+  contentComplete?: boolean | undefined;
+  captureComplete?: boolean | undefined;
+  sessionId: string;
+  verifiedAt: string;
+  sourceUrl: string;
+  currentMessageIds: string[];
+  inactiveMessages: Array<{ messageId: string; replacedByMessageId?: string | undefined }>;
+  inactiveAnonymousBodies?: string[] | undefined;
+  selectedBodies: Array<{ messageId: string; bodyHash: string }>;
+  reviewedBodies: Array<{ messageId: string; bodyHash: string; kind: SourceReviewBodyKind }>;
+  invalidatedByCapture?: { capturedAt: string; reason: "order_changed" | "new_branch" };
+}
+
+export interface MergeEvidence {
+  variants: CaptureMessage[];
+  warnings: Array<{ type: string; messageIds: string[] }>;
+  sourceReview?: SourceReview;
+  manualCompletion?: {
+    version: 1;
+    source: "user_acceptance";
+    sourceVerified: false;
+    reason: "source_unavailable_user_accepted";
+    confirmedAt: string;
+    previousCompleteness: string;
+    sourceJobId: string;
+    sourceItemId: string;
+  };
+  localSourceRepair?: {
+    version: 1;
+    source: "codex_local_jsonl" | "openclaw_local_jsonl";
+    sessionId: string;
+    verifiedAt: string;
+    sourceMessageHash: string;
+    files: Array<{ name: string; sha256: string; bytes: number }>;
+    previousMessageCount: number;
+    historicalObservationCount: number;
+    resolvedWarnings: Array<{ type: string; messageIds: string[] }>;
+  };
+}
+
+/** Small display metadata; historical bodies are fetched separately. */
+export interface ArchiveReviewSummary {
+  verifiedAt: string;
+  fullyApplicable: boolean;
+  reviewedOrderApplicable: boolean;
+  contentComplete?: boolean;
+  captureComplete?: boolean;
+  storedMessageCount: number;
+  inactiveMessageCount: number;
+  resolvedObservationCount: number;
+  unresolvedVariantCount: number;
+  unresolvedWarnings: MergeEvidence["warnings"];
+}
 
 const createdAt = timestamp("created_at", { withTimezone: true })
   .notNull()
@@ -84,6 +145,7 @@ export const conversations = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     provider: text("provider").$type<Provider>().notNull(),
     externalSessionId: text("external_session_id").notNull(),
+    parentExternalSessionId: text("parent_external_session_id"),
     title: text("title"),
     canonicalUrl: text("canonical_url"),
     updatedAt: timestamp("updated_at", { withTimezone: true })
@@ -98,6 +160,9 @@ export const conversations = pgTable(
       table.externalSessionId,
     ),
     index("conversations_updated_idx").on(table.updatedAt),
+    index("conversations_active_updated_idx").on(table.updatedAt.desc(), table.id.desc()).where(sql`${table.deletedAt} IS NULL`),
+    index("conversations_title_trgm_idx").using("gin", table.title.op("gin_trgm_ops")),
+    index("conversations_parent_session_idx").on(table.provider, table.parentExternalSessionId),
   ],
 );
 
@@ -112,6 +177,8 @@ export const conversationRevisions = pgTable(
     snapshotHash: text("snapshot_hash").notNull(),
     revisionIdentityHash: text("revision_identity_hash"),
     contentIntegrityHash: text("content_integrity_hash"),
+    isAccumulated: boolean("is_accumulated").notNull().default(false),
+    mergeEvidence: jsonb("merge_evidence").$type<MergeEvidence>().notNull().default({ variants: [], warnings: [] }),
     completeness: text("completeness").$type<"complete" | "partial">().notNull(),
     topReached: boolean("top_reached").notNull(),
     bottomReached: boolean("bottom_reached").notNull(),
@@ -134,7 +201,12 @@ export const conversationRevisions = pgTable(
     }),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
     messageCount: integer("message_count").notNull(),
-    searchText: text("search_text").notNull(),
+    // Retained as an empty compatibility field for v1 backups.
+    searchText: text("search_text").notNull().default(""),
+    presentationMessageCount: integer("presentation_message_count"),
+    storedMessageCount: integer("stored_message_count"),
+    sourceContentPending: boolean("source_content_pending"),
+    archiveReview: jsonb("archive_review").$type<ArchiveReviewSummary>(),
     archivedTextUnits: bigint("archived_text_units", { mode: "number" })
       .notNull()
       .default(0),
@@ -165,12 +237,45 @@ export const conversationRevisions = pgTable(
       table.conversationId,
       table.revisionIdentityHash,
     ),
+    uniqueIndex("conversation_accumulated_revision_uidx").on(table.conversationId).where(sql`${table.isAccumulated}`),
     index("conversation_revision_snapshot_idx").on(table.conversationId, table.snapshotHash),
     index("conversation_revision_conversation_idx").on(table.conversationId),
     index("conversation_revision_base_idx").on(table.baseRevisionId),
     index("conversation_revision_captured_idx").on(table.capturedAt),
+    index("conversation_revision_current_idx").on(table.conversationId, table.isAccumulated.desc(),
+      sql`(${table.completeness} = 'complete') DESC`, table.capturedAt.desc(), table.createdAt.desc(), table.id.desc()),
+    index("conversation_revision_read_model_pending_idx").on(table.id).where(sql`${table.presentationMessageCount} IS NULL`),
   ],
 );
+
+/** References only: a source review may change order or select an observed variant. */
+export const conversationRevisionPresentation = pgTable("conversation_revision_presentation", {
+  revisionId: uuid("revision_id").notNull().references(() => conversationRevisions.id, { onDelete: "cascade" }),
+  ordinal: integer("ordinal").notNull(),
+  storedOrdinal: integer("stored_ordinal"),
+  variantIndex: integer("variant_index"),
+}, (table) => [primaryKey({ columns: [table.revisionId, table.ordinal] })]);
+
+export const conversationRevisionObservations = pgTable("conversation_revision_observations", {
+  revisionId: uuid("revision_id").notNull().references(() => conversationRevisions.id, { onDelete: "cascade" }),
+  category: text("category").$type<"inactive" | "resolved" | "unresolved">().notNull(),
+  ordinal: integer("ordinal").notNull(),
+  storedOrdinal: integer("stored_ordinal"),
+  variantIndex: integer("variant_index"),
+  observationKind: text("observation_kind").$type<SourceReviewBodyKind>(),
+}, (table) => [primaryKey({ columns: [table.revisionId, table.category, table.ordinal] })]);
+
+export const conversationSummaries = pgTable("conversation_summaries", {
+  conversationId: uuid("conversation_id").primaryKey().references(() => conversations.id, { onDelete: "cascade" }),
+  revisionId: uuid("revision_id").notNull(),
+  messageCount: integer("message_count").notNull(),
+  archivedTextUnits: bigint("archived_text_units", { mode: "number" }).notNull(),
+  reasoningTextUnits: bigint("reasoning_text_units", { mode: "number" }).notNull(),
+  toolTextUnits: bigint("tool_text_units", { mode: "number" }).notNull(),
+  reportedTotalTokens: bigint("reported_total_tokens", { mode: "number" }),
+  reportedReasoningOutputTokens: bigint("reported_reasoning_output_tokens", { mode: "number" }),
+  latestActivityAt: timestamp("latest_activity_at", { withTimezone: true }).notNull(),
+}, (table) => [index("conversation_summaries_activity_idx").on(table.latestActivityAt.desc())]);
 
 export const messages = pgTable(
   "messages",
@@ -216,6 +321,26 @@ export const messageSegments = pgTable(
   ],
 );
 
+export const conversationSearchDocuments = pgTable("conversation_search_documents", {
+  conversationId: uuid("conversation_id").primaryKey().references(() => conversations.id, { onDelete: "cascade" }),
+  termsReady: boolean("terms_ready").notNull().default(false),
+}, table => [index("conversation_search_documents_pending_idx").on(table.conversationId).where(sql`NOT ${table.termsReady}`)]);
+
+export const conversationSearchTerms = pgTable("conversation_search_terms", {
+  term: text("term").notNull(),
+  conversationId: uuid("conversation_id").notNull().references(() => conversationSearchDocuments.conversationId, { onDelete: "cascade" }),
+}, table => [primaryKey({ columns: [table.term, table.conversationId] }),
+  index("conversation_search_terms_conversation_idx").on(table.conversationId)]);
+
+export const projectConversationRollups = pgTable("project_conversation_rollups", {
+  sourceConversationId: uuid("source_conversation_id").notNull().references(() => conversations.id, { onDelete: "cascade" }),
+  conversationId: uuid("conversation_id").notNull().references(() => conversations.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  activityAt: timestamp("activity_at", { withTimezone: true }).notNull(),
+}, table => [primaryKey({ columns: [table.sourceConversationId, table.conversationId] }),
+  index("project_rollups_project_idx").on(table.projectId, table.conversationId),
+  index("project_rollups_root_idx").on(table.conversationId)]);
+
 export const conversationSearchChunks = pgTable(
   "conversation_search_chunks",
   {
@@ -235,8 +360,9 @@ export const conversationSearchChunks = pgTable(
       table.messageId,
       table.chunkIndex,
     ),
-    index("conversation_search_chunks_revision_idx").on(table.revisionId),
+    index("conversation_search_chunks_revision_idx").on(table.revisionId, table.id),
     index("conversation_search_chunks_message_idx").on(table.messageId),
+    index("conversation_search_chunks_content_trgm_idx").using("gin", table.content.op("gin_trgm_ops")),
   ],
 );
 
@@ -252,6 +378,19 @@ export const captureRuns = pgTable(
     idempotencyKey: text("idempotency_key"),
     snapshotHash: text("snapshot_hash"),
     payloadIdentityHash: text("payload_identity_hash"),
+    requestHash: text("request_hash"),
+    receipt: jsonb("receipt").$type<{
+      conversationId: string;
+      revisionId: string;
+      unchanged: boolean;
+      completeness: "complete" | "partial";
+      messageCount: number;
+      archiveMessageCount: number;
+      archiveCompleteness: "complete" | "partial";
+      baselineContentHash?: string;
+      captureMode: CaptureMode;
+      triggerReason: CaptureTriggerReason | null;
+    }>(),
     adapterVersion: text("adapter_version"),
     messageCount: integer("message_count"),
     captureMode: text("capture_mode").$type<CaptureMode>().notNull().default("full"),
@@ -271,6 +410,34 @@ export const captureRuns = pgTable(
     index("capture_runs_created_idx").on(table.createdAt),
   ],
 );
+
+export const recaptureJobs = pgTable("recapture_jobs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  deviceId: uuid("device_id").notNull().references(() => devices.id, { onDelete: "cascade" }),
+  status: text("status").notNull().default("running"),
+  message: text("message"),
+  lastRunnerSeenAt: timestamp("last_runner_seen_at", { withTimezone: true }),
+  createdAt,
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [uniqueIndex("recapture_jobs_active_device").on(table.deviceId).where(sql`${table.status} in ('running', 'paused')`)]);
+
+export const recaptureItems = pgTable("recapture_items", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  jobId: uuid("job_id").notNull().references(() => recaptureJobs.id, { onDelete: "cascade" }),
+  conversationId: uuid("conversation_id").references(() => conversations.id, { onDelete: "set null" }),
+  externalSessionId: text("external_session_id").notNull(),
+  title: text("title").notNull(),
+  ordinal: integer("ordinal").notNull(),
+  status: text("status").notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  leaseToken: uuid("lease_token"),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  captureId: text("capture_id"),
+  message: text("message"),
+  messageCount: integer("message_count"),
+}, (table) => [uniqueIndex("recapture_items_job_ordinal").on(table.jobId, table.ordinal), index("recapture_items_job_status").on(table.jobId, table.status)]);
 
 export const projects = pgTable(
   "projects",

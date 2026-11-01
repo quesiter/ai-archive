@@ -28,6 +28,8 @@ import {
 } from "./redaction.js";
 import { normalizeProjectName } from "./projects.js";
 import { normalizeTagName } from "./tags.js";
+import { backfillArchiveReadModels } from "./archive-read-models.js";
+import { rebuildConversationSearchChunks } from "./search-chunks.js";
 
 const BATCH_SIZE = 200;
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -147,7 +149,7 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
             .where(eq(messageSegments.id, row.id));
           await db
             .update(conversationRevisions)
-            .set({ contentIntegrityHash: null })
+            .set({ contentIntegrityHash: null, presentationMessageCount: null })
             .where(eq(conversationRevisions.id, row.revisionId));
         }
         progress.processed += 1;
@@ -209,7 +211,7 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
         if (message) {
           await db
             .update(conversationRevisions)
-            .set({ contentIntegrityHash: null })
+            .set({ contentIntegrityHash: null, presentationMessageCount: null })
             .where(eq(conversationRevisions.id, message.revisionId));
         }
       }
@@ -223,7 +225,7 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
       const rows = await db
         .select({
           id: conversationRevisions.id,
-          searchText: conversationRevisions.searchText,
+          mergeEvidence: conversationRevisions.mergeEvidence,
           completenessReason: conversationRevisions.completenessReason,
           capturedTitle: conversationRevisions.capturedTitle,
           capturedCanonicalUrl: conversationRevisions.capturedCanonicalUrl,
@@ -234,23 +236,24 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
         .limit(BATCH_SIZE);
       if (!rows.length) break;
       for (const row of rows) {
-        const searchText = redactSensitiveTextForStorage(row.searchText, rules);
+        const mergeEvidence = redactJsonValue(row.mergeEvidence, rules);
         const reason = redactOptionalText(row.completenessReason, rules);
         const capturedTitle = redactOptionalText(row.capturedTitle, rules);
         const capturedUrl = row.capturedCanonicalUrl
           ? redactSensitiveUrlForStorage(row.capturedCanonicalUrl, rules)
           : { text: null, replacements: 0 };
-        const replacements = searchText.replacements + reason.replacements + capturedTitle.replacements + capturedUrl.replacements;
+        const replacements = mergeEvidence.replacements + reason.replacements + capturedTitle.replacements + capturedUrl.replacements;
         if (replacements > 0) {
           await db
             .update(conversationRevisions)
             .set({
-              searchText: searchText.text,
+              presentationMessageCount: null,
+              mergeEvidence: mergeEvidence.value as typeof row.mergeEvidence,
               completenessReason: reason.value,
               capturedTitle: capturedTitle.value,
               capturedCanonicalUrl: capturedUrl.text,
               ...(
-                reason.replacements + capturedTitle.replacements + capturedUrl.replacements > 0
+                mergeEvidence.replacements + reason.replacements + capturedTitle.replacements + capturedUrl.replacements > 0
                   ? { contentIntegrityHash: null }
                   : {}
               ),
@@ -465,6 +468,8 @@ export async function redactStoredArchive(taskId: string): Promise<CleanupProgre
       await updateProgress(taskId, "操作日志", progress, total);
     }
 
+    await backfillArchiveReadModels();
+    await rebuildConversationSearchChunks();
     await completeBackgroundTask(taskId, {
       processedCount: progress.processed,
       succeededCount: progress.redactedRows,

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export type LocalTranscriptProvider = "openclaw" | "codex" | "claude_code";
+export type LocalTranscriptProvider = "openclaw" | "codex" | "claude_code" | "grok_build";
 
 export function captureIdempotencyKey(input: {
   provider: string;

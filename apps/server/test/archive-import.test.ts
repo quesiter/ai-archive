@@ -126,4 +126,13 @@ AI: [2026-03-19 23:16:35]
     });
     await expect(parseArchive(path)).rejects.toThrow(/too large|allowed size/i);
   }, 20_000);
+
+  it.each(["Grok Build", "grok_build", "Grok CLI", "Grok Build CLI", "Grok Build Desktop"])("imports %s under the shared local Grok Build provider", async (platform) => {
+    const path = await archive("grok-build.zip", {
+      "grok-build.txt": `Title: Local coding session\nPlatform: ${platform}\nCreated: 2026-10-30 12:00:00\nMessages: 2\n\nUser: [2026-10-30 12:00:00]\nQuestion\n\nAI: [2026-10-30 12:00:01]\nAnswer`,
+    });
+    const parsed = await parseArchive(path);
+    expect(parsed.provider).toBe("grok_build");
+    expect(parsed.snapshots[0]).toMatchObject({ provider: "grok_build", title: "Local coding session", completeness: { status: "complete" } });
+  });
 });

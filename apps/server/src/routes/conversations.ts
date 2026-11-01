@@ -31,13 +31,9 @@ import {
 } from "../schema.js";
 import {
   hardDeleteConversation,
-  latestRevisionId,
   restoreConversation,
   softDeleteConversation,
 } from "../services/capture.js";
-import {
-  loadHydratedRevisionMessages,
-} from "../services/revision-storage.js";
 import {
   createConversationTextExport,
   createConversationXlsxExport,
@@ -46,20 +42,28 @@ import {
 import { loadConversationTags } from "../services/tags.js";
 import {
   buildConversationSearchHit,
-  conversationIdsMatchingAllTags,
 } from "../services/conversation-search.js";
 import { literalContainsPattern } from "../services/search-pattern.js";
-import { loadRevisionDiff } from "../services/revision-diff.js";
 import { rebuildConversationSearchChunks } from "../services/search-chunks.js";
 import { parseInstanceDateBoundary } from "../services/timezone.js";
+import {
+  loadConversationLineage,
+  mainConversationFilter,
+} from "../services/conversation-lineage.js";
+
+import { buildSourceDeviceOptionsQuery } from "../services/source-devices.js";
+import { conversationPageSnippetsQuery, conversationSearchPageQuery, conversationSearchFilter, conversationTagsFilter, currentConversationRevisionFilter } from "../services/conversation-list-query.js";
+import { projectConversationFilter } from "../services/project-lineage.js";
+import { loadConversationEvidencePage, loadCurrentConversationPage } from "../services/conversation-page.js";
 
 const ListQuerySchema = z.object({
   q: z.string().max(500).optional(),
   provider: ProviderSchema.optional(),
-  source: z.enum(["web", "openclaw", "codex", "claude_code", "historical_import"]).optional(),
+  source: z.enum(["web", "openclaw", "codex", "claude_code", "grok_build", "historical_import"]).optional(),
+  sourceDevice: z.string().max(512).refine(value => value === "unrecorded" || value === "historical_import" || (value.startsWith("name:") && value.slice(5).trim().length > 0)).optional(),
   completeness: z.enum(["complete", "partial"]).optional(),
   captureMode: z.enum(["full", "append", "import"]).optional(),
-  projectId: z.string().uuid().optional(),
+  projectId: z.guid().optional(),
   tagIds: z
     .preprocess(
       (value) =>
@@ -68,7 +72,7 @@ const ListQuerySchema = z.object({
           : typeof value === "string" && value
             ? value.split(",")
             : [],
-      z.array(z.string().uuid()).max(20),
+      z.array(z.guid()).max(20),
     )
     .default([]),
   from: z.string().refine(
@@ -97,7 +101,7 @@ const ExportQuerySchema = z.object({
   format: z.enum(["csv", "md", "xlsx"]),
 });
 
-const BatchConversationIdsSchema = z.array(z.string().uuid()).min(1).max(500);
+const BatchConversationIdsSchema = z.array(z.guid()).min(1).max(500);
 
 function safeExportFilename(value: string): string {
   const normalized = value
@@ -118,18 +122,26 @@ function exportMimeType(format: ConversationExportFormat): string {
 export async function conversationRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/v1/conversations/provider-counts", async (request, reply) => {
     if (!(await requireWebUser(request, reply))) return;
-    const rows = await db
+    return db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL jit = off`);
+    const rows = await tx
       .select({
         provider: conversations.provider,
         count: count(),
       })
       .from(conversations)
-      .where(isNull(conversations.deletedAt))
+      .where(and(isNull(conversations.deletedAt), mainConversationFilter()))
       .groupBy(conversations.provider);
     return rows.map((row) => ({
       provider: row.provider,
       count: Number(row.count ?? 0),
     }));
+    }, { accessMode: "read only" });
+  });
+
+  app.get("/api/v1/conversations/source-devices", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    return db.execute<{ key: string; name: string; count: number }>(buildSourceDeviceOptionsQuery());
   });
 
   app.get("/api/v1/conversations", async (request, reply) => {
@@ -144,181 +156,125 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         ...(Array.isArray(issues) ? { issues } : {}),
       });
     }
-    let matchingIds: string[] | undefined;
     const searchPattern = query.q ? literalContainsPattern(query.q) : null;
-    if (query.q) {
-      const revisionMatches = await db
-        .selectDistinct({ id: conversationRevisions.conversationId })
-        .from(conversationSearchChunks)
-        .innerJoin(
-          conversationRevisions,
-          eq(conversationRevisions.id, conversationSearchChunks.revisionId),
-        )
-        .where(
-          or(
-            ilike(conversationSearchChunks.content, searchPattern!),
-            sql`conversation_search_chunks.search_vector @@ websearch_to_tsquery('simple', ${query.q})`,
-          ),
-        );
-      matchingIds = revisionMatches.map((row) => row.id);
-    }
-    let revisionScopedIds: string[] | undefined;
-    const currentRevisionFilters = [sql`ranked.revision_rank = 1`];
-    if (query.completeness) {
-      currentRevisionFilters.push(sql`ranked.completeness = ${query.completeness}`);
-    }
-    if (query.captureMode) {
-      currentRevisionFilters.push(sql`ranked.capture_mode = ${query.captureMode}`);
-    }
-    if (query.source === "historical_import") {
-      currentRevisionFilters.push(sql`ranked.capture_mode = 'import'`);
-    }
-    if (currentRevisionFilters.length > 1) {
-      const rows = await db.execute<{ id: string }>(sql`
-        select ranked.id
-        from (
-          select
-            ${conversationRevisions.conversationId} as id,
-            ${conversationRevisions.completeness} as completeness,
-            ${conversationRevisions.captureMode} as capture_mode,
-            row_number() over (
-              partition by ${conversationRevisions.conversationId}
-              order by
-                (${conversationRevisions.completeness} = 'complete') desc,
-                ${conversationRevisions.capturedAt} desc,
-                ${conversationRevisions.createdAt} desc
-            ) as revision_rank
-          from ${conversationRevisions}
-        ) ranked
-        where ${sql.join(currentRevisionFilters, sql` and `)}
-      `);
-      revisionScopedIds = rows.map((row) => row.id);
-      if (!revisionScopedIds.length) return {
-        items: [],
-        pagination: { total: 0, limit: query.limit, offset: query.offset, hasMore: false },
-      };
-    }
-    let tagScopedIds: string[] | undefined;
-    if (query.tagIds.length) {
-      const tagLinks = await db
-        .select({
-          conversationId: conversationTags.conversationId,
-          tagId: conversationTags.tagId,
-        })
-        .from(conversationTags)
-        .where(inArray(conversationTags.tagId, query.tagIds));
-      tagScopedIds = conversationIdsMatchingAllTags(tagLinks, query.tagIds);
-      if (!tagScopedIds.length) return {
-        items: [],
-        pagination: { total: 0, limit: query.limit, offset: query.offset, hasMore: false },
-      };
-    }
-    const filters = [isNull(conversations.deletedAt)];
+    const filters = [isNull(conversations.deletedAt), mainConversationFilter()];
     if (query.provider) filters.push(eq(conversations.provider, query.provider));
     if (query.source === "web") filters.push(inArray(conversations.provider, webProviders));
     if (query.source === "openclaw") filters.push(eq(conversations.provider, "openclaw"));
     if (query.source === "codex") filters.push(eq(conversations.provider, "codex"));
     if (query.source === "claude_code") filters.push(eq(conversations.provider, "claude_code"));
-    if (query.projectId) filters.push(eq(conversationProjects.projectId, query.projectId));
+    if (query.source === "grok_build") filters.push(eq(conversations.provider, "grok_build"));
+    if (query.projectId) filters.push(projectConversationFilter(query.projectId));
     if (query.from) filters.push(gte(conversations.updatedAt, parseInstanceDateBoundary(query.from)));
     if (query.to) filters.push(lt(conversations.updatedAt, parseInstanceDateBoundary(query.to, true)));
-    if (revisionScopedIds) filters.push(inArray(conversations.id, revisionScopedIds));
-    if (tagScopedIds) filters.push(inArray(conversations.id, tagScopedIds));
-    if (query.q) {
-      filters.push(
-        matchingIds?.length
-          ? or(
-              ilike(conversations.title, searchPattern!),
-              inArray(conversations.id, matchingIds),
-            )!
-          : ilike(conversations.title, searchPattern!),
-      );
-    }
-    const [totalRow] = await db
-      .select({ total: count() })
-      .from(conversations)
-      .leftJoin(
-        conversationProjects,
-        eq(conversationProjects.conversationId, conversations.id),
-      )
-      .leftJoin(projects, eq(projects.id, conversationProjects.projectId))
-      .where(and(...filters));
-    const rows = await db
-      .select({
-        id: conversations.id,
-        provider: conversations.provider,
-        externalSessionId: conversations.externalSessionId,
-        title: conversations.title,
-        canonicalUrl: conversations.canonicalUrl,
-        updatedAt: conversations.updatedAt,
-        projectId: conversationProjects.projectId,
-        projectName: projects.name,
-        projectLocked: conversationProjects.lockedByUser,
-        projectConfidence: conversationProjects.confidence,
-        suggestedProjectName: conversationProjects.suggestedName,
-      })
-      .from(conversations)
-      .leftJoin(
-        conversationProjects,
-        eq(conversationProjects.conversationId, conversations.id),
-      )
-      .leftJoin(projects, eq(projects.id, conversationProjects.projectId))
-      .where(and(...filters))
-      .orderBy(desc(conversations.updatedAt))
-      .limit(query.limit)
-      .offset(query.offset);
+    const revisionFilter = currentConversationRevisionFilter(query);
+    if (revisionFilter) filters.push(revisionFilter);
+    if (query.tagIds.length) filters.push(conversationTagsFilter(query.tagIds));
+    if (query.q) filters.push(conversationSearchFilter(query.q));
+    const { totalRow, rows, revisionRows, pageTags, pageHits, childCounts } = await db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL jit = off`);
+      const totalQuery = tx
+        .select({ total: count() })
+        .from(conversations)
+        .where(and(...filters));
+      const pageQuery = tx
+        .select({
+          id: conversations.id,
+          provider: conversations.provider,
+          externalSessionId: conversations.externalSessionId,
+          title: conversations.title,
+          canonicalUrl: conversations.canonicalUrl,
+          updatedAt: conversations.updatedAt,
+          projectId: conversationProjects.projectId,
+          projectName: projects.name,
+          projectLocked: conversationProjects.lockedByUser,
+          projectConfidence: conversationProjects.confidence,
+          suggestedProjectName: conversationProjects.suggestedName,
+        })
+        .from(conversations)
+        .leftJoin(
+          conversationProjects,
+          eq(conversationProjects.conversationId, conversations.id),
+        )
+        .leftJoin(projects, eq(projects.id, conversationProjects.projectId))
+        .where(and(...filters))
+        .orderBy(desc(conversations.updatedAt), desc(conversations.id))
+        .limit(query.limit)
+        .offset(query.offset);
+      let totalRow: { total: number } | undefined;
+      let rows: Awaited<typeof pageQuery>;
+      if (query.q) {
+        const [result] = await tx.execute<{total:number;rows:Awaited<typeof pageQuery>}>(
+          conversationSearchPageQuery(filters, query.limit, query.offset));
+        totalRow = {total: Number(result?.total ?? 0)}; rows = result?.rows ?? [];
+      } else {
+        [totalRow] = await totalQuery; rows = await pageQuery;
+      }
 
-    const items = await Promise.all(
-      rows.map(async (row) => {
-        const revisionId = await latestRevisionId(row.id);
-        const [revision] = revisionId
-          ? await db
-              .select({
-                id: conversationRevisions.id,
-                completeness: conversationRevisions.completeness,
-                messageCount: conversationRevisions.messageCount,
-                capturedAt: conversationRevisions.capturedAt,
-                captureMode: conversationRevisions.captureMode,
-                triggerReason: conversationRevisions.triggerReason,
-                adapterVersion: conversationRevisions.adapterVersion,
-                sourceDeviceId: conversationRevisions.sourceDeviceId,
-                sourceDeviceName: devices.name,
-                sourceDeviceKind: devices.kind,
-              })
-              .from(conversationRevisions)
-              .leftJoin(devices, eq(devices.id, conversationRevisions.sourceDeviceId))
-              .where(eq(conversationRevisions.id, revisionId))
-              .limit(1)
-          : [];
+      const pageIds = rows.map(row => row.id);
+      const revisionRows = pageIds.length ? await tx.selectDistinctOn([conversationRevisions.conversationId], {
+        conversationId: conversationRevisions.conversationId,
+                  id: conversationRevisions.id,
+                  completeness: conversationRevisions.completeness,
+                  messageCount: sql<number>`coalesce(${conversationRevisions.presentationMessageCount}, ${conversationRevisions.messageCount})`,
+                  storedMessageCount: sql<number>`coalesce(${conversationRevisions.storedMessageCount}, ${conversationRevisions.messageCount})`,
+                  sourceContentPending: sql<boolean>`coalesce(${conversationRevisions.sourceContentPending}, false)`,
+                  capturedAt: conversationRevisions.capturedAt,
+                  captureMode: conversationRevisions.captureMode,
+                  triggerReason: conversationRevisions.triggerReason,
+                  adapterVersion: conversationRevisions.adapterVersion,
+                  sourceDeviceId: conversationRevisions.sourceDeviceId,
+                  sourceDeviceName: devices.name,
+                  sourceDeviceKind: devices.kind,
+      }).from(conversationRevisions)
+        .leftJoin(devices, eq(devices.id, conversationRevisions.sourceDeviceId))
+        .where(inArray(conversationRevisions.conversationId, pageIds))
+        .orderBy(conversationRevisions.conversationId,
+          desc(conversationRevisions.isAccumulated), desc(sql`(${conversationRevisions.completeness} = 'complete')`),
+          desc(conversationRevisions.capturedAt), desc(conversationRevisions.createdAt), desc(conversationRevisions.id)) : [];
+      const pageTags = pageIds.length ? await tx.select({
+        conversationId: conversationTags.conversationId,
+        id: tags.id, name: tags.name, normalizedName: tags.normalizedName,
+        confidence: conversationTags.confidence, source: conversationTags.source,
+        lockedByUser: conversationTags.lockedByUser,
+        createdAt: conversationTags.createdAt, updatedAt: conversationTags.updatedAt,
+      }).from(conversationTags).innerJoin(tags, eq(tags.id, conversationTags.tagId))
+        .where(inArray(conversationTags.conversationId, pageIds))
+        .orderBy(desc(conversationTags.lockedByUser), desc(conversationTags.confidence), tags.name) : [];
+      const bodySearchIds = query.q ? rows.filter(row =>
+        !row.title?.toLocaleLowerCase().includes(query.q!.toLocaleLowerCase())).map(row => row.id) : [];
+      const hitRevisions = revisionRows.filter(revision => bodySearchIds.includes(revision.conversationId));
+      const pageHits = hitRevisions.length ? await tx.execute<{
+        conversationId: string; revisionId: string; ordinal: number; content: string;
+      }>(conversationPageSnippetsQuery(hitRevisions.map(revision => revision.id), query.q!)) : [];
+      const childCounts = pageIds.length ? await tx.execute<{ id: string; childCount: number }>(sql`
+        select parent.id, count(child.id)::int as "childCount"
+        from conversations parent join conversations child on child.provider = parent.provider
+          and child.parent_external_session_id = parent.external_session_id
+          and child.id <> parent.id and child.deleted_at is null
+        where ${inArray(sql`parent.id`, pageIds)} group by parent.id
+      `) : [];
+      return { totalRow, rows, revisionRows, pageTags, pageHits, childCounts };
+    }, { accessMode: "read only" });
+    const revisionsByConversation = new Map(revisionRows.map(({ conversationId, ...revision }) => [conversationId, revision]));
+    const hitsByConversation = new Map(pageHits.map(({ conversationId, ...hit }) => [conversationId, hit]));
+    const tagsByConversation = new Map<string, Array<Omit<typeof pageTags[number], "conversationId">>>();
+    for (const { conversationId, ...tag } of pageTags) {
+      const associated = tagsByConversation.get(conversationId) ?? [];
+      associated.push(tag);
+      tagsByConversation.set(conversationId, associated);
+    }
+    const childCountById = new Map(childCounts.map(row => [row.id, Number(row.childCount)]));
+    const items = rows.map((row) => {
+        const revision = revisionsByConversation.get(row.id);
         const titleMatched = Boolean(
           query.q && row.title?.toLocaleLowerCase().includes(query.q.toLocaleLowerCase()),
         );
-        const [hit] = query.q && !titleMatched
-          ? await db
-              .select({
-                revisionId: conversationRevisions.id,
-                ordinal: messages.ordinal,
-                content: conversationSearchChunks.content,
-              })
-              .from(conversationSearchChunks)
-              .innerJoin(messages, eq(messages.id, conversationSearchChunks.messageId))
-              .innerJoin(conversationRevisions, eq(conversationRevisions.id, conversationSearchChunks.revisionId))
-              .where(
-                and(
-                  eq(conversationRevisions.conversationId, row.id),
-                  ilike(conversationSearchChunks.content, searchPattern!),
-                ),
-              )
-              .orderBy(
-                desc(conversationRevisions.capturedAt),
-                desc(conversationRevisions.createdAt),
-                asc(messages.ordinal),
-              )
-              .limit(1)
-          : [];
-        const tagRows = await loadConversationTags(row.id);
+        const hit = hitsByConversation.get(row.id);
+        const tagRows = tagsByConversation.get(row.id) ?? [];
         return {
           ...row,
+          childCount: childCountById.get(row.id) ?? 0,
           tags: tagRows,
           latestRevision: revision ?? null,
           searchHit: query.q
@@ -328,11 +284,15 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
                 titleMatched,
                 latestRevisionId: revision?.id ?? null,
                 bodyHit: hit ?? null,
-              })
+              }) ?? {
+                reason: "子代理命中",
+                revisionId: null,
+                messageOrdinal: null,
+                excerpt: "匹配内容位于此会话的子代理中，可在详情中查看。",
+              }
             : null,
         };
-      }),
-    );
+      });
     const total = Number(totalRow?.total ?? 0);
     return {
       items,
@@ -374,7 +334,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     if (!(await requireWebUser(request, reply))) return;
     const input = z.object({
       conversationIds: BatchConversationIdsSchema,
-      projectId: z.string().uuid().nullable(),
+      projectId: z.guid().nullable(),
     }).parse(request.body);
     if (input.projectId) {
       const [project] = await db.select({ id: projects.id }).from(projects).where(
@@ -413,7 +373,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     if (!(await requireWebUser(request, reply))) return;
     const input = z.object({
       conversationIds: BatchConversationIdsSchema,
-      tagIds: z.array(z.string().uuid()).min(1).max(50),
+      tagIds: z.array(z.guid()).min(1).max(50),
       operation: z.enum(["add", "remove"]),
     }).parse(request.body);
     const [activeRows, tagRows] = await Promise.all([
@@ -486,14 +446,32 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(textExport.stream);
   });
 
-  app.get<{ Params: { id: string }; Querystring: { revisionId?: string } }>(
+  app.get<{ Params: { id: string } }>("/api/v1/conversations/:id/evidence", async (request, reply) => {
+    if (!(await requireWebUser(request, reply))) return;
+    const params = z.object({ id: z.guid() }).parse(request.params);
+    const query = z.object({
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+      offset: z.coerce.number().int().min(0).default(0),
+      messageOrdinal: z.coerce.number().int().min(0).optional(),
+      q: z.string().max(500).optional(),
+    }).parse(request.query);
+    const [conversation] = await db.select({ id: conversations.id }).from(conversations)
+      .where(and(eq(conversations.id, params.id), isNull(conversations.deletedAt))).limit(1);
+    if (!conversation) return reply.code(404).send({ error: "Conversation not found" });
+    return loadConversationEvidencePage(conversation.id, query);
+  });
+
+  app.get<{ Params: { id: string } }>(
     "/api/v1/conversations/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
-      const query = z
-        .object({ revisionId: z.string().uuid().optional() })
-        .parse(request.query);
+      const params = z.object({ id: z.guid() }).parse(request.params);
+      const query = z.object({
+        revisionId: z.guid().optional(),
+        messageLimit: z.coerce.number().int().min(1).max(200).default(50),
+        messageOffset: z.coerce.number().int().min(0).default(0),
+        messageOrdinal: z.coerce.number().int().min(0).optional(),
+      }).parse(request.query);
       const [conversation] = await db
         .select()
         .from(conversations)
@@ -507,19 +485,15 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       if (!conversation) {
         return reply.code(404).send({ error: "Conversation not found" });
       }
-      const revisions = await db
-        .select()
-        .from(conversationRevisions)
-        .where(eq(conversationRevisions.conversationId, conversation.id))
-        .orderBy(
-          desc(conversationRevisions.capturedAt),
-          desc(conversationRevisions.createdAt),
-        );
+      const lineage = await loadConversationLineage(conversation);
+      const archive = await loadCurrentConversationPage(conversation.id, query);
+      const revisions = archive ? [archive.revision] : [];
       const sourceDeviceIds = Array.from(
         new Set(revisions.flatMap((revision) => revision.sourceDeviceId ? [revision.sourceDeviceId] : [])),
       );
       const sourceDevices = sourceDeviceIds.length
-        ? await db.select().from(devices).where(inArray(devices.id, sourceDeviceIds))
+        ? await db.select({ id: devices.id, name: devices.name, kind: devices.kind })
+          .from(devices).where(inArray(devices.id, sourceDeviceIds))
         : [];
       const sourceDeviceById = new Map(sourceDevices.map((device) => [device.id, device]));
       const revisionPayload = revisions.map((revision) => ({
@@ -540,8 +514,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         .leftJoin(projects, eq(projects.id, conversationProjects.projectId))
         .where(eq(conversationProjects.conversationId, conversation.id))
         .limit(1);
-      const selectedRevisionId =
-        query.revisionId ?? (await latestRevisionId(conversation.id));
+      const selectedRevisionId = archive?.revision.id;
       const selectedRevision = revisions.find(
         (revision) => revision.id === selectedRevisionId,
       );
@@ -551,21 +524,26 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       if (!selectedRevision) {
         return {
           conversation,
+          ...lineage,
           projectAssignment: projectAssignment ?? null,
           tags: await loadConversationTags(conversation.id),
           revisions: revisionPayload,
           selectedRevision: null,
           messages: [],
+          messagePagination: { total: 0, limit: query.messageLimit, offset: query.messageOffset, hasMore: false },
         };
       }
-      const hydratedMessages = await loadHydratedRevisionMessages(selectedRevision.id);
+
       return {
         conversation,
+        ...lineage,
         projectAssignment: projectAssignment ?? null,
         tags: await loadConversationTags(conversation.id),
         revisions: revisionPayload,
         selectedRevision: selectedRevisionPayload ?? selectedRevision,
-        messages: hydratedMessages,
+        messages: archive!.messages,
+        messagePagination: archive!.messagePagination,
+        ...(archive!.archiveReview ? { archiveReview: archive!.archiveReview } : {}),
       };
     },
   );
@@ -575,17 +553,13 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
       const params = z.object({
-        id: z.string().uuid(),
-        revisionId: z.string().uuid(),
+        id: z.guid(),
+        revisionId: z.guid(),
       }).parse(request.params);
-      const query = z.object({ baseRevisionId: z.string().uuid().optional() }).parse(request.query);
-      const diff = await loadRevisionDiff({
-        conversationId: params.id,
-        revisionId: params.revisionId,
-        ...(query.baseRevisionId ? { baseRevisionId: query.baseRevisionId } : {}),
+      return reply.code(410).send({
+        error: "会话现维护一份持续更新的正文，不再提供历史版本比较",
+        conversationUrl: `/conversations/${params.id}`,
       });
-      if (!diff) return reply.code(404).send({ error: "Revision not found" });
-      return diff;
     },
   );
 
@@ -593,7 +567,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/conversations/:id/export",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const { format } = ExportQuerySchema.parse(request.query);
       if (format === "xlsx") {
         const xlsx = await createConversationXlsxExport({
@@ -631,7 +605,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/conversations/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       if (!(await softDeleteConversation(params.id))) {
         return reply.code(404).send({ error: "Conversation not found" });
       }
@@ -643,7 +617,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/conversations/:id/restore",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       if (!(await restoreConversation(params.id))) {
         return reply.code(404).send({ error: "Deleted conversation not found" });
       }
@@ -655,7 +629,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/conversations/:id/permanent",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const input = z.object({ confirmation: z.literal("DELETE") }).parse(request.body);
       const [deleted] = await db.select({ id: conversations.id }).from(conversations).where(
         and(eq(conversations.id, params.id), isNotNull(conversations.deletedAt)),

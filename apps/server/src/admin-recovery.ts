@@ -14,7 +14,7 @@ function usage(): never {
   node dist/admin-recovery.js reset-totp
   node dist/admin-recovery.js revoke-sessions
 
-reset-password 从 AI_ARCHIVE_RECOVERY_PASSWORD 读取新密码（至少 12 个字符）。`);
+reset-password 从 AI_ARCHIVE_RECOVERY_PASSWORD 读取新密码（至少 11 个字符）。`);
   process.exitCode = 2;
   throw new Error("Invalid recovery command");
 }
@@ -23,8 +23,8 @@ async function main(): Promise<void> {
   const command = process.argv[2];
   if (command === "reset-password") {
     const password = process.env.AI_ARCHIVE_RECOVERY_PASSWORD ?? "";
-    if (password.length < 12 || password.length > 256) {
-      throw new Error("AI_ARCHIVE_RECOVERY_PASSWORD must contain 12 to 256 characters");
+    if (password.length < 11 || password.length > 256) {
+      throw new Error("AI_ARCHIVE_RECOVERY_PASSWORD must contain 11 to 256 characters");
     }
     const username = await recoverAdminPassword(password);
     console.log(`Password reset for ${username}; all web sessions were revoked.`);

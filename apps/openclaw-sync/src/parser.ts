@@ -18,8 +18,8 @@ const TOOL_JSON_ARRAY_LIMIT = 40;
 const TOOL_JSON_OBJECT_KEY_LIMIT = 80;
 const TOOL_JSON_STRING_LIMIT = 2_000;
 const OPENCLAW_ADAPTER_VERSION = "openclaw-jsonl-v3";
-const CODEX_ADAPTER_VERSION = "codex-jsonl-v5";
-const CLAUDE_CODE_ADAPTER_VERSION = "claude-code-jsonl-v2";
+const CODEX_ADAPTER_VERSION = "codex-jsonl-v6";
+export const CLAUDE_CODE_ADAPTER_VERSION = "claude-code-jsonl-v3";
 const ANSI_ESCAPE_PATTERN = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 const UNSUPPORTED_CONTROL_PATTERN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 
@@ -31,6 +31,32 @@ export class EmptyOpenClawTranscriptError extends Error {
     this.name = "EmptyOpenClawTranscriptError";
     this.sessionId = sessionId;
   }
+}
+
+export class MissingCodexUserMessagesError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super("Codex transcript contains no textual user messages");
+    this.name = "MissingCodexUserMessagesError";
+    this.sessionId = sessionId;
+  }
+}
+
+export class IncompleteClaudeCodeDeltaError extends Error {
+  readonly malformedLineNumbers: number[];
+
+  constructor(malformedLineNumbers: number[]) {
+    super(`${malformedJsonlReason(malformedLineNumbers)}; a full transcript import is required`);
+    this.name = "IncompleteClaudeCodeDeltaError";
+    this.malformedLineNumbers = [...malformedLineNumbers];
+  }
+}
+
+function malformedJsonlReason(lineNumbers: number[]): string {
+  const sample = lineNumbers.slice(0, 10).join(", ");
+  const remaining = lineNumbers.length > 10 ? `, and ${lineNumbers.length - 10} more` : "";
+  return `Transcript contains ${lineNumbers.length} malformed JSONL record${lineNumbers.length === 1 ? "" : "s"} at line${lineNumbers.length === 1 ? "" : "s"} ${sample}${remaining}`;
 }
 
 function omitted(label: string, detail?: string): string {
@@ -508,8 +534,10 @@ function jsonlRecords(content: string): {
 function tolerantJsonlRecords(content: string): {
   records: Array<Record<string, unknown>>;
   trailingPartial: boolean;
+  malformedLineNumbers: number[];
 } {
   const records: Array<Record<string, unknown>> = [];
+  const malformedLineNumbers: number[] = [];
   const lines = content.split(/\r?\n/);
   const lastNonEmptyLine = lines.reduce(
     (last, line, index) => (line.trim() ? index : last),
@@ -523,9 +551,10 @@ function tolerantJsonlRecords(content: string): {
       if (parsed && typeof parsed === "object") records.push(parsed as Record<string, unknown>);
     } catch {
       if (index === lastNonEmptyLine) trailingPartial = true;
+      else malformedLineNumbers.push(index + 1);
     }
   }
-  return { records, trailingPartial };
+  return { records, trailingPartial, malformedLineNumbers };
 }
 
 function contentItemsText(value: unknown): string {
@@ -710,6 +739,33 @@ function codexMessageFromPayload(
   return null;
 }
 
+export function codexParentSessionId(meta: unknown): string | undefined {
+  if (!meta || typeof meta !== "object") return undefined;
+  const record = meta as Record<string, unknown>;
+  const source = record.source;
+  if (!source || typeof source !== "object" || !("subagent" in source)) {
+    return undefined;
+  }
+  const subagent = (source as Record<string, unknown>).subagent;
+  if (!subagent || (typeof subagent !== "object" && typeof subagent !== "string")) {
+    return undefined;
+  }
+  const subagentRecord = subagent && typeof subagent === "object"
+    ? subagent as Record<string, unknown>
+    : undefined;
+  const spawn = subagentRecord?.thread_spawn;
+  const spawnRecord = spawn && typeof spawn === "object"
+    ? spawn as Record<string, unknown>
+    : undefined;
+  const parent = spawnRecord?.parent_thread_id ??
+    subagentRecord?.parent_thread_id ?? record.parent_thread_id;
+  if (
+    typeof parent !== "string" || !parent.trim() || parent.length > 1_024 ||
+    parent === record.id
+  ) return undefined;
+  return parent;
+}
+
 export function parseCodexRecords(input: {
   path: string;
   records: Array<Record<string, unknown>>;
@@ -725,6 +781,7 @@ export function parseCodexRecords(input: {
   const sessionId = String(
     meta?.id ?? basename(input.path).replace(/\.jsonl(?:\..+)?$/i, ""),
   );
+  const parentSessionId = codexParentSessionId(meta);
   const cwd = typeof meta?.cwd === "string" ? meta.cwd : "";
   const title =
     input.titleBySessionId?.[sessionId] ??
@@ -742,7 +799,7 @@ export function parseCodexRecords(input: {
     .map((message, ordinal) => ({ ...message, ordinal })));
   const roleSet = new Set(messages.map((message) => message.role));
   if (!messages.length || !roleSet.has("user")) {
-    throw new Error("Codex transcript contains no textual user messages");
+    throw new MissingCodexUserMessagesError(sessionId);
   }
   const fingerprint = createHash("sha256")
     .update(
@@ -756,6 +813,7 @@ export function parseCodexRecords(input: {
     schemaVersion: 1,
     provider: "codex",
     sessionId,
+    ...(parentSessionId ? { parentSessionId } : {}),
     branchFingerprint: fingerprint,
     title,
     adapterVersion: CODEX_ADAPTER_VERSION,
@@ -789,7 +847,12 @@ export function parseClaudeCodeJsonl(input: {
   content: string;
   capturedAt?: Date;
 }): CaptureSnapshotV1 {
-  const { records, trailingPartial } = tolerantJsonlRecords(input.content);
+  const { records, trailingPartial, malformedLineNumbers } = tolerantJsonlRecords(input.content);
+  const incomplete = trailingPartial || malformedLineNumbers.length > 0;
+  const reason = [
+    ...(malformedLineNumbers.length ? [malformedJsonlReason(malformedLineNumbers)] : []),
+    ...(trailingPartial ? ["Transcript ended with a partial JSONL record"] : []),
+  ].join("; ");
   const header = records.find((record) =>
     record.sessionId || record.session_id || record.conversationId || record.uuid || record.id,
   ) ?? {};
@@ -831,11 +894,11 @@ export function parseClaudeCodeJsonl(input: {
     captureMode: "import",
     triggerReason: "local_file_rewritten",
     completeness: {
-      status: trailingPartial ? "partial" : "complete",
+      status: incomplete ? "partial" : "complete",
       topReached: true,
       bottomReached: true,
-      stable: !trailingPartial,
-      ...(trailingPartial ? { reason: "Transcript ended with a partial JSONL record" } : {}),
+      stable: !incomplete,
+      ...(reason ? { reason } : {}),
     },
     messages,
   };
@@ -847,18 +910,27 @@ export function parseLocalJsonlDelta(input: {
   content: string;
   capturedAt?: Date;
   triggerReason?: CaptureTriggerReason;
+  includeSessionMetadata?: boolean;
   base: {
     revisionId?: string | undefined;
+    baselineContentHash?: string | undefined;
     sessionId: string;
+    parentSessionId?: string | undefined;
     branchFingerprint: string;
     messageCount: number;
     lastMessageId?: string | undefined;
     lastMessageTextHash?: string | undefined;
   };
 }): CaptureDeltaV1 | null {
-  const parsed = input.provider === "claude_code"
+  if (!input.base.baselineContentHash) return null;
+  const parsed: ReturnType<typeof jsonlRecords> & { malformedLineNumbers?: number[] } = input.provider === "claude_code"
     ? tolerantJsonlRecords(input.content)
     : jsonlRecords(input.content);
+  // Append captures cannot express partial completeness. Reimport the full file
+  // so valid records are preserved and the server receives the missing-line evidence.
+  if (parsed.malformedLineNumbers?.length) {
+    throw new IncompleteClaudeCodeDeltaError(parsed.malformedLineNumbers);
+  }
   if (parsed.trailingPartial) return null;
 
   const messages = parsed.records
@@ -884,12 +956,17 @@ export function parseLocalJsonlDelta(input: {
     input.provider === "codex"
       ? codexTokenUsage(parsed.records)
       : openClawTokenUsage(parsed.records, "incremental");
-  if (!messages.length && !tokenUsage) return null;
+  const includeSessionMetadata = input.includeSessionMetadata &&
+    input.provider === "codex" && Boolean(input.base.parentSessionId);
+  if (!messages.length && !tokenUsage && !includeSessionMetadata) return null;
   return {
     schemaVersion: 1,
     captureMode: "append",
     provider: input.provider,
     sessionId: input.base.sessionId,
+    ...(input.provider === "codex" && input.base.parentSessionId
+      ? { parentSessionId: input.base.parentSessionId }
+      : {}),
     branchFingerprint: input.base.branchFingerprint,
     adapterVersion:
       input.provider === "codex"
@@ -901,6 +978,7 @@ export function parseLocalJsonlDelta(input: {
     triggerReason: input.triggerReason ?? "local_file_appended",
     ...(tokenUsage ? { tokenUsage } : {}),
     ...(input.base.revisionId ? { baseRevisionId: input.base.revisionId } : {}),
+    baseContentHash: input.base.baselineContentHash,
     baseMessageCount: input.base.messageCount,
     ...(input.base.lastMessageId ? { baseLastMessageId: input.base.lastMessageId } : {}),
     ...(input.base.lastMessageTextHash

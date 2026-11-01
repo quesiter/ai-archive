@@ -14,6 +14,7 @@ import { activityRoutes } from "./routes/activity.js";
 import { authRoutes } from "./routes/auth.js";
 import { backupRoutes } from "./routes/backups.js";
 import { captureRoutes } from "./routes/captures.js";
+import { recaptureRoutes } from "./routes/recapture.js";
 import { conversationRoutes } from "./routes/conversations.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
 import { deviceRoutes } from "./routes/devices.js";
@@ -114,7 +115,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     const params = request.params as Record<string, unknown> | null;
     if (
       typeof params?.id === "string" &&
-      !z.string().uuid().safeParse(params.id).success
+      !z.guid().safeParse(params.id).success
     ) {
       return reply.code(400).send({
         error: "Request validation failed",
@@ -200,6 +201,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await authRoutes(app);
   await deviceRoutes(app);
   await captureRoutes(app);
+  await recaptureRoutes(app);
   await conversationRoutes(app);
   await projectRoutes(app);
   await tagRoutes(app);
@@ -220,6 +222,13 @@ export async function buildApp(): Promise<FastifyInstance> {
       root: webRoot,
       prefix: "/",
       wildcard: false,
+      setHeaders: (response, filePath) => {
+        if (/[\\/]assets[\\/][^\\/]+-[A-Za-z0-9_-]{8,}\.[a-z0-9]+$/i.test(filePath)) {
+          response.header("Cache-Control", "public, max-age=31536000, immutable");
+        } else if (filePath.endsWith("index.html")) {
+          response.header("Cache-Control", "no-cache");
+        }
+      },
     });
     app.get("/*", async (request, reply) => {
       if (request.url.startsWith("/api/") || request.url === "/healthz") {

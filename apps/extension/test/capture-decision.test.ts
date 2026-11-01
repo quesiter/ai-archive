@@ -21,9 +21,14 @@ const state = {
   lastMessageRole: "assistant" as const,
   lastMessageTextHash: "hash-a1",
   completeness: "complete" as const,
+  baselineContentHash: "b".repeat(64),
 };
 
 describe("capture decision state machine", () => {
+  it("uses full capture when an old server did not issue a baseline content hash", () => {
+    expect(decideCaptureAction({ light: { ...light, messageCount: 4, lastMessageId: "a2" }, state: { ...state, baselineContentHash: undefined }, requestedReason: "new_messages" })).toMatchObject({ action: "full" });
+    expect(decideCaptureAction({ light: { ...light, messageCount: 3, lastMessageId: "a2", virtualized: true }, state: { ...state, messageCount: 24, baselineContentHash: undefined }, requestedReason: "new_messages" })).toMatchObject({ action: "full" });
+  });
   it("skips unchanged conversations without requesting a full scan", () => {
     expect(
       decideCaptureAction({

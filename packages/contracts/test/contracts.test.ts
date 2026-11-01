@@ -19,11 +19,72 @@ describe("stripInternalConversationMetadata", () => {
 });
 
 describe("CaptureSnapshotV1", () => {
+  it("preserves PostgreSQL UUID format compatibility for legacy revision identifiers", () => {
+    const delta = {
+      schemaVersion: 1, captureMode: "append", provider: "codex", sessionId: "child",
+      parentSessionId: "parent", branchFingerprint: "12345678", adapterVersion: "test",
+      capturedAt: "2026-10-25T00:00:00.000Z", baseMessageCount: 2,
+      baseLastMessageId: "last", appendedMessages: [],
+      baseRevisionId: "11111111-1111-1111-1111-111111111111",
+    };
+    expect(CaptureDeltaV1Schema.parse(delta).baseRevisionId).toBe(delta.baseRevisionId);
+    for (const baseRevisionId of ["not-a-uuid", "11111111-1111-1111-1111", "11111111-1111-1111-1111-11111111111g"]) {
+      expect(CaptureDeltaV1Schema.safeParse({ ...delta, baseRevisionId }).success).toBe(false);
+    }
+  });
+
+  it("requires stable native branch identity independently of a completeness claim", () => {
+    const snapshot = { schemaVersion: 1, provider: "chatgpt", sessionId: "session", captureMode: "full",
+      sourceKind: "chatgpt_current_branch", canonicalUrl: "https://chatgpt.com/c/session",
+      branchFingerprint: "12345678", adapterVersion: "1.2.13", capturedAt: "2026-10-07T00:00:00.000Z",
+      completeness: { status: "complete", topReached: true, bottomReached: true, stable: true },
+      messages: [{ externalMessageId: "source-id", ordinal: 0, role: "user", segments: [{ type: "text", content: "hello" }] }] };
+    expect(CaptureSnapshotV1Schema.parse(snapshot).sourceKind).toBe("chatgpt_current_branch");
+    for (const change of [{ provider: "gemini" }, { captureMode: "import" },
+      { completeness: { ...snapshot.completeness, status: "partial", topReached: false } },
+      { messages: [{ ...snapshot.messages[0], externalMessageId: "fallback-turn-0:0:user" }] },
+      { messages: [{ ...snapshot.messages[0], externalMessageId: undefined }] },
+      { messages: [...snapshot.messages, { ...snapshot.messages[0], ordinal: 1 }] }]) {
+      expect(CaptureSnapshotV1Schema.safeParse({ ...snapshot, ...change }).success).toBe(false);
+    }
+  });
+  it("accepts an optional content baseline hash for mutable conversation appends", () => {
+    const delta = {
+      schemaVersion: 1, captureMode: "append", provider: "codex", sessionId: "session",
+      parentSessionId: "parent", branchFingerprint: "12345678", adapterVersion: "2.4.0",
+      capturedAt: "2026-09-14T00:00:00.000Z", baseMessageCount: 2,
+      baseLastMessageId: "last", appendedMessages: [], baseContentHash: "a".repeat(64),
+    };
+    expect(CaptureDeltaV1Schema.parse(delta).baseContentHash).toBe(delta.baseContentHash);
+    expect(CaptureDeltaV1Schema.safeParse({ ...delta, baseContentHash: undefined }).success).toBe(true);
+    expect(CaptureDeltaV1Schema.safeParse({ ...delta, baseContentHash: "not-a-hash" }).success).toBe(false);
+  });
+  it("accepts parent-only deltas for existing subagents but rejects self-parenting and empty updates", () => {
+    const delta = {
+      schemaVersion: 1, captureMode: "append", provider: "codex",
+      sessionId: "child-session", parentSessionId: "root-session",
+      branchFingerprint: "12345678", adapterVersion: "codex-jsonl-v6",
+      capturedAt: "2026-09-13T12:00:00.000Z", baseMessageCount: 2,
+      baseLastMessageTextHash: "a".repeat(64), appendedMessages: [],
+    };
+    expect(CaptureDeltaV1Schema.parse(delta).parentSessionId).toBe("root-session");
+    expect(CaptureDeltaV1Schema.safeParse({ ...delta, parentSessionId: "child-session" }).success).toBe(false);
+    expect(CaptureDeltaV1Schema.safeParse({ ...delta, parentSessionId: undefined }).success).toBe(false);
+    const snapshot = {
+      ...delta, captureMode: "import",
+      completeness: { status: "complete", topReached: true, bottomReached: true, stable: true },
+      messages: [{ ordinal: 0, role: "user", segments: [{ type: "text", content: "Task" }] }],
+    };
+    expect(CaptureSnapshotV1Schema.parse(snapshot).parentSessionId).toBe("root-session");
+    expect(CaptureSnapshotV1Schema.safeParse({ ...snapshot, parentSessionId: "child-session" }).success).toBe(false);
+  });
+
   it("contains all planned providers", () => {
     expect(providers).toEqual([
       "chatgpt",
       "gemini",
       "grok",
+      "grok_build",
       "yuanbao",
       "doubao",
       "minimax_agent",

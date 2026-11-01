@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { adapterDefinitions } from "../lib/adapters/definitions";
 import { createAdapterRuntime } from "../lib/adapters/runtime";
 import type { ExtractedMessage } from "../lib/adapters/types";
@@ -17,6 +17,7 @@ const fixtures = [
   ["chatgpt", "chatgpt.html", "https://chatgpt.com/c/chatgpt-session"],
   ["gemini", "gemini.html", "https://gemini.google.com/app/gemini-session"],
   ["grok", "grok.html", "https://grok.com/c/grok-session"],
+  ["doubao", "doubao.html", "https://www.doubao.com/chat/doubao-session"],
   ["yuanbao", "yuanbao.html", "https://yuanbao.tencent.com/chat/yuanbao-app/yuanbao-session"],
   ["minimax_agent", "minimax.html", "https://agent.minimaxi.com/mavis?id=minimax-session"],
   ["deepseek", "deepseek.html", "https://chat.deepseek.com/a/chat/s/deepseek-session"],
@@ -68,6 +69,207 @@ describe.each(fixtures)("%s adapter contract", (provider, fixture, url) => {
 });
 
 describe("segment and virtual-list behavior", () => {
+  it("keeps repeated legacy Doubao turns distinct and ignores generic branding", () => {
+    document.title = "豆包 - 字节跳动旗下 AI 智能助手";
+    document.body.innerHTML = `<main><div data-testid="send_message">Same question</div><div data-testid="receive_message">First answer</div><div data-testid="send_message">Same question</div><div data-testid="receive_message">Second answer</div></main>`;
+    const runtime = createAdapterRuntime(adapterDefinitions.find((item) => item.provider === "doubao")!);
+    expect(runtime.extractVisibleMessages()).toHaveLength(4);
+    expect(runtime.extractVisibleMessages().map((message) => message.externalMessageId)).toEqual([undefined, undefined, undefined, undefined]);
+    expect(runtime.getTitle()).toBeUndefined();
+    expect(runtime.getSessionId(new URL("https://www.doubao.com/chat/"))).toBeNull();
+    expect(runtime.getSessionId(new URL("https://www.doubao.com/chat/123456"))).toBe("123456");
+  });
+  it("keeps user IDs from ChatGPT search units without selection wrappers", () => {
+    document.body.innerHTML = `<main><div data-chatgpt-search-unit-key="fallback-turn-0:0:user" data-chatgpt-search-message-ids="user-id user-id">Question</div><div data-chatgpt-search-unit-key="fallback-turn-0:2:assistant" data-chatgpt-search-message-ids="answer-id answer-id"><div data-chatgpt-selection-message-id="answer-id">Answer</div></div></main>`;
+    expect(createAdapterRuntime(adapterDefinitions[0]!).extractVisibleMessages().map((message) => message.externalMessageId)).toEqual(["user-id", "answer-id"]);
+    document.querySelector('[data-chatgpt-search-unit-key$=":user"]')!.setAttribute("data-chatgpt-search-message-ids", "first-id second-id");
+    expect(createAdapterRuntime(adapterDefinitions[0]!).extractVisibleMessages()[0]?.externalMessageId).toBeUndefined();
+  });
+  it.each(["with search roles", "with markdown roles"])("extracts ChatGPT selection message roots %s without legacy attributes", (variant) => {
+    const unit = (role: string) => variant === "with search roles" ? `data-chatgpt-search-unit-key="fallback-turn-0:2:${role}"` : "";
+    document.body.innerHTML = `<main>
+      <div ${unit("user")}><div data-chatgpt-selection-message-id="new-user-id"><div data-markdown-text-style="user-message">Question</div></div></div>
+      <div ${unit("assistant")} data-chatgpt-search-message-ids="new-answer-id new-answer-id"><div><div class="group flex min-w-0 flex-col" data-chatgpt-selection-conversation-id="session" data-chatgpt-selection-message-id="new-answer-id"><div data-selected-text-overlay-target="_r_kj_" data-markdown-text-style="assistant-message" class="MarkdownRoot-rZKhxa"><p class="Paragraph-kKnbIo" data-markdown-han-text="true">Answer</p><ol><li>First step</li></ol></div><button>Copy</button></div></div></div>
+      <div data-composer-body><div role="textbox" class="ProseMirror"><p data-empty-paragraph="true" data-placeholder="询问 ChatGPT">Draft</p><div data-chatgpt-selection-message-id="draft">Unsaved draft</div></div></div>
+      <div id="ai-archive-floating-indicator"><div data-chatgpt-selection-message-id="status">Sync status</div></div>
+    </main>`;
+    const runtime = createAdapterRuntime(adapterDefinitions[0]!);
+    expect(document.querySelectorAll('[data-message-author-role], [data-message-id], [data-testid^="conversation-turn-"], .markdown')).toHaveLength(0);
+    const messages = runtime.extractVisibleMessages();
+    expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(messages.map((message) => message.externalMessageId)).toEqual(["new-user-id", "new-answer-id"]);
+    expect(messages[0]?.segments).toEqual([{ type: "text", content: "Question" }]);
+    expect(messages[1]?.segments).toEqual([{ type: "text", content: "AnswerFirst step" }]);
+  });
+
+  it("reads ChatGPT user search units without a selection message wrapper", () => {
+    document.body.innerHTML = `<main><div data-chatgpt-search-unit-key="fallback-turn-0:1:user">Question</div><div data-chatgpt-search-unit-key="fallback-turn-0:2:assistant"><div data-chatgpt-selection-message-id="answer-id"><p>Answer</p></div></div></main>`;
+    const messages = createAdapterRuntime(adapterDefinitions[0]!).extractVisibleMessages();
+    expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(messages.map((message) => message.externalMessageId)).toEqual([undefined, "answer-id"]);
+  });
+
+  it.each(["data-testid", "id"])("recognizes ChatGPT %s turns with accessibility speaker headings only", (attribute) => {
+    document.body.innerHTML = `<aside><p>Sidebar conversation title</p></aside><main>
+      <article ${attribute}="conversation-turn-7"><h6 class="sr-only">ChatGPT said:</h6><div class="markdown"><p>Previous answer</p></div><button>Copy</button></article>
+      <article ${attribute}="conversation-turn-8"><h5 class="sr-only">你说：</h5><div>Follow-up question</div></article>
+      <article ${attribute}="conversation-turn-9"><h6 class="sr-only">ChatGPT 说：</h6><div class="markdown"><p>New answer</p></div></article>
+      <article ${attribute}="conversation-turn-10" data-turn="tool"><p>Internal tool</p></article>
+      <div id="ai-archive-floating-indicator"><article ${attribute}="conversation-turn-11"><h6 class="sr-only">ChatGPT said:</h6>Sync status</article></div>
+    </main>`;
+    const messages = createAdapterRuntime(adapterDefinitions[0]!).extractVisibleMessages();
+    expect(messages.map((message) => message.role)).toEqual(["assistant", "user", "assistant"]);
+    expect(messages.map((message) => message.externalMessageId)).toEqual([undefined, undefined, undefined]);
+    expect(messages.map((message) => message.segments)).toEqual([
+      [{ type: "text", content: "Previous answer" }],
+      [{ type: "text", content: "Follow-up question" }],
+      [{ type: "text", content: "New answer" }],
+    ]);
+  });
+
+  it("extracts ChatGPT turn wrappers when inner message attributes are absent", () => {
+    document.body.innerHTML = `<main>
+      <article data-testid="conversation-turn-7" data-turn="assistant"><p>Previous answer</p><button>Copy</button></article>
+      <article data-testid="conversation-turn-8" data-turn="user"><p>Follow-up question</p></article>
+      <article data-testid="conversation-turn-9" data-turn="assistant"><p>New answer</p></article>
+      <article data-testid="conversation-turn-10" data-turn="tool"><p>Internal tool</p></article>
+      <aside data-turn="user">Sidebar</aside>
+    </main>`;
+    const runtime = createAdapterRuntime(adapterDefinitions[0]!);
+    const messages = runtime.extractVisibleMessages();
+    expect(messages.map((message) => message.role)).toEqual(["assistant", "user", "assistant"]);
+    expect(messages.map((message) => message.externalMessageId)).toEqual([undefined, undefined, undefined]);
+    expect(messages.map((message) => message.segments)).toEqual([
+      [{ type: "text", content: "Previous answer" }],
+      [{ type: "text", content: "Follow-up question" }],
+      [{ type: "text", content: "New answer" }],
+    ]);
+  });
+
+  it("keeps existing ChatGPT message IDs instead of replacing them with turn indices", () => {
+    document.body.innerHTML = `<main>
+      <article data-testid="conversation-turn-0" data-turn="user"><div data-message-author-role="user" data-message-id="u1">Question</div></article>
+      <article data-testid="conversation-turn-1" data-turn="assistant"><div data-message-author-role="assistant" data-message-id="a1">Answer</div></article>
+    </main>`;
+    expect(createAdapterRuntime(adapterDefinitions[0]!).extractVisibleMessages().map((message) => message.externalMessageId)).toEqual(["u1", "a1"]);
+  });
+
+  it("recognizes rendered children inside display:contents message wrappers", () => {
+    document.body.innerHTML = `<main><div data-message-author-role="user" style="display:contents"><p>Question</p></div></main>`;
+    const wrapper = document.querySelector<HTMLElement>("[data-message-author-role]")!;
+    wrapper.getBoundingClientRect = () => ({ width: 0, height: 0 }) as DOMRect;
+    const runtime = createAdapterRuntime(adapterDefinitions[0]!);
+    expect(runtime.extractVisibleMessages()).toHaveLength(1);
+    wrapper.style.display = "none";
+    expect(runtime.extractVisibleMessages()).toHaveLength(0);
+  });
+
+  it("keeps ChatGPT authored content stable when its map widget finishes loading", () => {
+    document.body.innerHTML = `<main><section data-testid="conversation-turn-6">
+      <div data-message-id="answer-id" data-message-author-role="assistant">
+        <p>可以，以下是行程。</p>
+        <div class="not-prose"><table><tbody><tr><td>正文表格</td></tr></tbody></table></div>
+        <a href="https://example.com/source">正常引用</a>
+        <pre><code class="language-js">const days = 10;</code></pre>
+        <div class="not-prose" data-testid="businesses-map-widget" data-w-component="map" data-d-component="map">
+          <div class="mapboxgl-map"><a href="https://example.com/map">地图署名</a><span>正在加载地点</span></div>
+        </div>
+      </div></section></main>`;
+    const runtime = createAdapterRuntime(adapterDefinitions.find((item) => item.provider === "chatgpt")!);
+    const before = runtime.extractVisibleMessages()[0]!;
+    const map = document.querySelector('[data-testid="businesses-map-widget"]')!;
+    map.innerHTML = '<a href="https://example.com/poi">新地点标记</a><span>已加载地图</span>';
+    const after = runtime.extractVisibleMessages()[0]!;
+
+    expect(after.segments).toEqual(before.segments);
+    expect(after.externalMessageId).toBe("answer-id");
+    expect(after.segments).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "text", content: expect.stringContaining("正文表格") }),
+      { type: "citation", content: "正常引用", href: "https://example.com/source" },
+      { type: "code", content: "const days = 10;", language: "js" },
+    ]));
+    expect(JSON.stringify(after.segments)).not.toMatch(/地图|地点|example\.com\/(map|poi)/);
+    expect(map.textContent).toContain("新地点标记");
+
+    const otherProvider = createAdapterRuntime(adapterDefinitions.find((item) => item.provider === "deepseek")!);
+    expect(otherProvider.getSegments(after.element)).toContainEqual({
+      type: "citation", content: "新地点标记", href: "https://example.com/poi",
+    });
+  });
+
+  it("keeps the ChatGPT attachment title without treating its partial canvas grid as message text", () => {
+    document.body.innerHTML = `<main><section><div data-message-id="question-id" data-message-author-role="user">
+      <div class="not-prose"><span>行程资料.xlsx</span>
+        <canvas data-testid="data-grid-canvas"><table role="grid" aria-rowcount="82"><tbody>
+          <tr><td>预览第一行</td></tr><tr><td>预览第二行</td></tr>
+          <tr><td><a href="https://example.com/preview">预览第三行</a></td></tr>
+        </tbody></table></canvas>
+      </div>
+      <p>请根据附件安排旅行。</p>
+      <table><tbody><tr><td>正文中的普通表格</td></tr></tbody></table>
+      <canvas data-testid="other-canvas">其他画布替代文字</canvas>
+    </div></section></main>`;
+    const runtime = createAdapterRuntime(adapterDefinitions.find((item) => item.provider === "chatgpt")!);
+    const message = runtime.extractVisibleMessages()[0]!;
+    const body = message.segments.find((segment) => segment.type === "text")!.content;
+    expect(body).toContain("行程资料.xlsx");
+    expect(body).toContain("请根据附件安排旅行。");
+    expect(body).toContain("正文中的普通表格");
+    expect(body).toContain("其他画布替代文字");
+    expect(JSON.stringify(message.segments)).not.toMatch(/预览|example\.com\/preview/);
+    expect(document.querySelector('canvas[data-testid="data-grid-canvas"] table')?.getAttribute("aria-rowcount")).toBe("82");
+
+    const otherProvider = createAdapterRuntime(adapterDefinitions.find((item) => item.provider === "deepseek")!);
+    expect(JSON.stringify(otherProvider.getSegments(message.element))).toContain("预览第一行");
+  });
+
+  it("ignores only the observed status badge in a ChatGPT grid attachment header", () => {
+    const card = (name: string, label: string, grid: boolean) => `
+      <div class="border-token-border-default text-token-text-primary relative overflow-hidden rounded-2xl border">
+        <div class="flex items-center justify-between gap-2 px-4 py-3 bg-token-main-surface-primary">
+          <span class="grow items-center truncate font-semibold capitalize">${name}</span>
+          <div class="flex items-center gap-3"><div class="absolute end-3 top-3">
+            <div class="flex shrink-0 cursor-pointer flex-nowrap items-center gap-1 rounded-lg text-blue-400">${label}</div>
+          </div></div>
+        </div>
+        ${grid ? '<div><canvas data-testid="data-grid-canvas"><table><tbody><tr><td>局部预览</td></tr></tbody></table></canvas></div>' : ""}
+      </div>`;
+    document.body.innerHTML = `<main><div data-message-author-role="user" data-message-id="attachment-status-message">
+      ${card("资料.xlsx", "", true)}${card("其他附件.txt", "现已交互！", false)}${card("未确认状态.xlsx", "Interactive", true)}
+      <p>请解释正文里的“现已交互！”。</p>
+    </div></main>`;
+    const runtime = createAdapterRuntime(adapterDefinitions.find((item) => item.provider === "chatgpt")!);
+    const before = runtime.extractVisibleMessages()[0]!;
+    const badge = document.querySelector(".text-blue-400")!;
+    badge.textContent = "现已交互！";
+    const after = runtime.extractVisibleMessages()[0]!;
+
+    expect(after.segments).toEqual(before.segments);
+    const body = after.segments.find((segment) => segment.type === "text")!.content;
+    expect(body).toContain("资料.xlsx");
+    expect(body).toContain("其他附件.txt");
+    expect(body).toContain("未确认状态.xlsx");
+    expect(body).toContain("Interactive");
+    expect(body).toContain("请解释正文里的“现已交互！”。");
+    expect(body.match(/现已交互！/g)).toHaveLength(2);
+    expect(badge.textContent).toBe("现已交互！");
+    const otherProvider = createAdapterRuntime(adapterDefinitions.find((item) => item.provider === "deepseek")!);
+    expect(otherProvider.getSegments(after.element).find((segment) => segment.type === "text")?.content.match(/现已交互！/g)).toHaveLength(3);
+  });
+
+  it.each(["data-testid", "id"])("does not use a ChatGPT positional %s as a stable message ID", (attribute) => {
+    const element = document.createElement("section");
+    element.setAttribute(attribute, "conversation-turn-6");
+    element.setAttribute("data-turn-id", "different-turn-id");
+    const runtime = createAdapterRuntime(adapterDefinitions.find((item) => item.provider === "chatgpt")!);
+    expect(runtime.getExternalMessageId(element)).toBeUndefined();
+
+    const otherProvider = createAdapterRuntime(adapterDefinitions.find((item) => item.provider === "deepseek")!);
+    expect(otherProvider.getExternalMessageId(element)).toBe("conversation-turn-6");
+    element.setAttribute("data-message-id", "stable-message-id");
+    expect(runtime.getExternalMessageId(element)).toBe("stable-message-id");
+  });
+
   it("ignores ChatGPT's skip-to-content link and reads the Session sidebar title", () => {
     document.title = "ChatGPT";
     document.body.innerHTML = `
@@ -234,7 +436,7 @@ describe("segment and virtual-list behavior", () => {
     expect(ordered.map((item) => item.key)).toEqual(["same", "same", "next"]);
   });
 
-  it("drops a virtual-list remount when the platform message ID is unchanged", () => {
+  it("places a newly mounted message before its known platform-ID anchor", () => {
     const element = document.createElement("article");
     const message = (externalMessageId: string): ExtractedMessage => ({
       key: externalMessageId,
@@ -247,8 +449,8 @@ describe("segment and virtual-list behavior", () => {
     const ordered = [message("message-1")];
     mergeVisible(ordered, [message("message-2"), message("message-1")]);
     expect(ordered.map((item) => item.externalMessageId)).toEqual([
-      "message-1",
       "message-2",
+      "message-1",
     ]);
   });
 
@@ -276,6 +478,7 @@ describe("segment and virtual-list behavior", () => {
       // already have declared the list complete.
       if (extractionCount === 5) {
         earliestMessageId = "user-first";
+        element.setAttribute("data-testid", "conversation-turn-0");
         scrollHeight = 1_800;
         container.scrollTop = 240;
       }
@@ -306,6 +509,7 @@ describe("segment and virtual-list behavior", () => {
     const firstContainer = document.createElement("section");
     const secondContainer = document.createElement("section");
     const element = document.createElement("article");
+    element.setAttribute("data-testid", "conversation-turn-0");
     for (const container of [firstContainer, secondContainer]) {
       container.style.overflowY = "auto";
       Object.defineProperties(container, {
@@ -414,6 +618,7 @@ describe("segment and virtual-list behavior", () => {
     const baseLast = runtime.extractVisibleMessages()[1]!;
     const delta = await scanAppendedMessages(runtime, {
       revisionId: "11111111-1111-1111-1111-111111111111",
+      baselineContentHash: "b".repeat(64),
       messageCount: 2,
       branchFingerprint: "branch-fingerprint-chatgpt",
       lastMessageId: "a1",
@@ -422,6 +627,7 @@ describe("segment and virtual-list behavior", () => {
 
     expect(delta?.captureMode).toBe("append");
     expect(delta?.baseMessageCount).toBe(2);
+    expect(delta?.baseContentHash).toBe("b".repeat(64));
     expect(delta?.appendedMessages.map((message) => message.ordinal)).toEqual([2, 3]);
     expect(delta?.appendedMessages.map((message) => message.externalMessageId)).toEqual([
       "u2",
@@ -442,6 +648,7 @@ describe("segment and virtual-list behavior", () => {
     const baseLast = runtime.extractVisibleMessages()[1]!;
     const delta = await scanAppendedMessages(runtime, {
       revisionId: "11111111-1111-1111-1111-111111111111",
+      baselineContentHash: "c".repeat(64),
       messageCount: 24,
       branchFingerprint: "branch-fingerprint-chatgpt",
       lastMessageId: "a12",
@@ -455,5 +662,15 @@ describe("segment and virtual-list behavior", () => {
       "u13",
       "a13",
     ]);
+  });
+
+  it("does not read or append a viewport without the server's content baseline", async () => {
+    const runtime = createAdapterRuntime(adapterDefinitions[0]!);
+    const readNative = vi.fn();
+    expect(await scanAppendedMessages(runtime, {
+      revisionId: "11111111-1111-1111-1111-111111111111", messageCount: 24,
+      branchFingerprint: "branch-fingerprint", lastMessageId: "archived-tail",
+    }, { readNative })).toBeNull();
+    expect(readNative).not.toHaveBeenCalled();
   });
 });

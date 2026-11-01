@@ -8,10 +8,12 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import tarfile
 import tempfile
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +26,7 @@ EXPECTED_FILES = {
 
 
 def current_version() -> str:
-    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+    package = json.loads((ROOT / "apps" / "openclaw-sync" / "package.json").read_text(encoding="utf-8"))
     return f"V{package['version']}"
 
 
@@ -43,7 +45,7 @@ def add_file(
     *,
     normalize_lf: bool = False,
 ) -> None:
-    if not source.is_file():
+    if not source.is_file() or source.is_symlink():
         raise FileNotFoundError(f"Required release input is missing: {source}")
     content = source.read_bytes()
     if normalize_lf:
@@ -62,17 +64,24 @@ def verify_archive(path: Path, version: str | None = None) -> tuple[int, str]:
     if not path.is_file():
         raise FileNotFoundError(f"Release archive does not exist: {path}")
 
-    expected_root = f"macos-sync-{version}" if version else None
+    expected_root = f"macos-sync-{version or current_version()}"
     with tarfile.open(path, "r:gz") as archive:
-        members = {member.name.rstrip("/"): member for member in archive.getmembers()}
-        roots = {name.split("/", 1)[0] for name in members}
-        if expected_root is None:
-            if len(roots) != 1:
-                raise ValueError(f"Expected one archive root, found: {sorted(roots)}")
-            expected_root = roots.pop()
+        members = {}
+        names = set()
+        for member in archive.getmembers():
+            pure = PurePosixPath(member.name)
+            if "\\" in member.name or ":" in member.name or pure.is_absolute() or ".." in pure.parts:
+                raise ValueError(f"Unsafe archive path: {member.name}")
+            name = pure.as_posix().rstrip("/")
+            if name.casefold() in names:
+                raise ValueError(f"Duplicate archive path: {member.name}")
+            names.add(name.casefold())
+            if not member.isfile() and not member.isdir():
+                raise ValueError(f"Archive links or special files are not allowed: {member.name}")
+            members[name] = member
 
         root = members.get(expected_root)
-        if root is None or not root.isdir() or root.mode & 0o777 != 0o755:
+        if root is None or not root.isdir() or root.mode & 0o7777 != 0o755:
             raise ValueError(f"Archive root must be a 0755 directory: {expected_root}")
 
         expected_names = {expected_root}
@@ -82,7 +91,7 @@ def verify_archive(path: Path, version: str | None = None) -> tuple[int, str]:
             member = members.get(archive_name)
             if member is None or not member.isfile():
                 raise ValueError(f"Missing release file: {archive_name}")
-            actual_mode = member.mode & 0o777
+            actual_mode = member.mode & 0o7777
             if actual_mode != expected_mode:
                 raise ValueError(
                     f"Incorrect mode for {archive_name}: "
@@ -99,23 +108,46 @@ def verify_archive(path: Path, version: str | None = None) -> tuple[int, str]:
             raise ValueError("AI-Archive-Sync.command has an invalid shell entry point")
         if b"\r" in command_content:
             raise ValueError("AI-Archive-Sync.command must contain LF line endings only")
+        for filename, source in input_files().items():
+            if source.is_symlink():
+                raise ValueError(f"Release input must not be a symbolic link: {source}")
+            expected = source.read_bytes()
+            if filename == "AI-Archive-Sync.command":
+                expected = expected.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            entry = archive.extractfile(f"{expected_root}/{filename}")
+            if entry is None or entry.read() != expected:
+                raise ValueError(f"macOS bundle does not match the current build/source: {filename}")
 
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     return path.stat().st_size, digest
 
 
-def build_archive(version: str, output: Path) -> None:
-    folder = f"macos-sync-{version}"
+def input_files() -> dict[str, Path]:
     macos_guides = sorted((ROOT / "docs").glob("12-*.md"))
     if len(macos_guides) != 1:
         raise FileNotFoundError(
             f"Expected one numbered macOS guide under {ROOT / 'docs'}, found {len(macos_guides)}"
         )
-    inputs = {
+    return {
         "AI-Archive-Sync.command": ROOT / "scripts" / "AI-Archive-Sync.command",
         "openclaw-sync.cjs": ROOT / "apps" / "openclaw-sync" / "dist" / "index.cjs",
         "README-MACOS-SYNC.md": macos_guides[0],
     }
+
+
+def build_sync_agent() -> None:
+    command = shutil.which("pnpm.cmd" if os.name == "nt" else "pnpm")
+    if command is None:
+        raise FileNotFoundError("pnpm is required to build the current sync agent")
+    for package in ("@ai-archive/contracts", "@ai-archive/openclaw-sync"):
+        subprocess.run([command, "--filter", package, "build"], cwd=ROOT, check=True)
+
+
+def build_archive(version: str, output: Path) -> None:
+    if version != current_version():
+        raise ValueError(f"Requested version {version} does not match sync source {current_version()}")
+    folder = f"macos-sync-{version}"
+    inputs = input_files()
     for source in inputs.values():
         if not source.is_file():
             raise FileNotFoundError(f"Required release input is missing: {source}")
@@ -176,6 +208,9 @@ def main() -> None:
             if args.output
             else RELEASE_DIR / f"ai-conversation-archive-macos-sync-{version}.tar.gz"
         )
+        if version != current_version():
+            raise ValueError(f"Requested version {version} does not match sync source {current_version()}")
+        build_sync_agent()
         build_archive(version, archive)
 
     size, digest = verify_archive(archive, version)

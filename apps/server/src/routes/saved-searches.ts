@@ -10,6 +10,7 @@ const allowedQueryKeys = new Set([
   "q",
   "provider",
   "source",
+  "sourceDevice",
   "completeness",
   "captureMode",
   "projectId",
@@ -27,7 +28,7 @@ const SavedSearchInputSchema = z.object({
     }
     return name;
   }),
-  query: z.record(z.string().max(500)).transform((query) =>
+  query: z.record(z.string(), z.string().max(500)).transform((query) =>
     Object.fromEntries(
       Object.entries(query).filter(([key, value]) => allowedQueryKeys.has(key) && value),
     ),
@@ -63,7 +64,7 @@ export async function savedSearchRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/saved-searches/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const [deleted] = await db.delete(savedSearches).where(eq(savedSearches.id, params.id)).returning({ id: savedSearches.id });
       if (!deleted) return reply.code(404).send({ error: "Saved search not found" });
       return reply.code(204).send();

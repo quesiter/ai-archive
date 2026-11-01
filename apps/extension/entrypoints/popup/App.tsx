@@ -5,20 +5,11 @@ import type {
   ExtensionSettings,
 } from "../../lib/messages";
 import type { OutboxRecord } from "../../lib/outbox";
+import { activeTabState, PAGE_RECONNECT_MESSAGE, type CurrentTabState } from "../../lib/current-tab";
 import {
   packagedServerOrigin,
   serverPermissionPattern,
 } from "../../lib/packaged-origin";
-
-interface CurrentTabState {
-  tabId?: number;
-  hostname?: string;
-  supported?: boolean;
-  provider?: string;
-  title?: string;
-  sessionId?: string | null;
-  scanning?: boolean;
-}
 
 // Keep this list in sync with the content-script matches and the manifest's
 // optional host permissions.  Requesting these permissions during pairing is
@@ -29,6 +20,8 @@ const captureOrigins = [
   "https://chat.openai.com/*",
   "https://gemini.google.com/*",
   "https://grok.com/*",
+  "https://www.doubao.com/*",
+  "https://doubao.com/*",
   "https://yuanbao.tencent.com/*",
   "https://agent.minimax.io/*",
   "https://agent.minimaxi.com/*",
@@ -38,25 +31,6 @@ const captureOrigins = [
   "https://www.kimi.com/*",
   "https://kimi.com/*",
 ];
-
-async function activeTabState(): Promise<CurrentTabState> {
-  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id || !tab.url) return {};
-  let hostname: string | undefined;
-  try {
-    hostname = new URL(tab.url).hostname;
-  } catch {
-    return { tabId: tab.id };
-  }
-  try {
-    const content = (await browser.tabs.sendMessage(tab.id, {
-      type: "getContentState",
-    } satisfies ExtensionMessage)) as CurrentTabState;
-    return { ...content, tabId: tab.id, hostname };
-  } catch {
-    return { tabId: tab.id, hostname, supported: false };
-  }
-}
 
 export default function App() {
   const [settings, setSettings] = useState<ExtensionSettings>({});
@@ -114,15 +88,40 @@ export default function App() {
   async function manualCapture(): Promise<void> {
     if (!tab.tabId) return;
     setBusy(true);
+    setMessage("正在请求采集…");
     try {
-      await browser.tabs.sendMessage(tab.tabId, {
+      const response = await browser.tabs.sendMessage(tab.tabId, {
         type: "manualCapture",
-      } satisfies ExtensionMessage);
+      } satisfies ExtensionMessage) as { ok?: boolean } | undefined;
+      if (!response?.ok) throw new Error(PAGE_RECONNECT_MESSAGE);
+      setMessage("采集请求已接收；操作页面会停止自动滚动，已加载消息仍会保存。");
+    } catch (error) {
+      setMessage(`${PAGE_RECONNECT_MESSAGE}（${error instanceof Error ? error.message : String(error)}）`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshPage(): Promise<void> {
+    if (tab.tabId === undefined) return;
+    try {
+      await browser.tabs.reload(tab.tabId);
       window.close();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
-      setBusy(false);
     }
+  }
+
+  async function authorizeCurrentSite(): Promise<void> {
+    const origin = `https://${tab.hostname}/*`;
+    if (!captureOrigins.includes(origin)) return;
+    setBusy(true);
+    try {
+      if (await browser.permissions.request({ origins: [origin] })) await refreshPage();
+      else setMessage("尚未授予本站权限，可再次点击授权后采集。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally { setBusy(false); }
   }
 
   async function togglePause(): Promise<void> {
@@ -163,7 +162,7 @@ export default function App() {
 
   return (
     <main>
-      <header><img className="logo" src="/icon/128.png" alt="" /><div><strong>知言归藏</strong><small>汇智能之言，成项目之知。</small></div></header>
+      <header><img className="logo" src="/icon/128.png" alt="" /><div><strong>知言归藏</strong><small>汇智能之言，成项目之知。</small><small>V{browser.runtime.getManifest().version}</small></div></header>
       {!settings.deviceToken ? (
         <form onSubmit={(event) => void pair(event)}>
           <h2>连接归档服务</h2>
@@ -178,11 +177,16 @@ export default function App() {
             <div className="status-dot" />
             <div><strong>{({idle:"待机",checking:"检查变化",waiting:"等待生成",skipped:"内容未变化",scanning:"正在采集",queued:"等待上传",syncing:"正在同步",complete:"完整归档",partial:"部分归档",failed:"同步失败"} as Record<string,string>)[status.status]}</strong><p>{status.message}</p><small>{status.provider && `${status.provider} · `}{status.captureMode === "append" ? "增量 · " : status.captureMode === "full" ? "快照 · " : ""}{new Date(status.updatedAt).toLocaleString()}</small></div>
           </section>
-          <section className="current"><h2>当前页面</h2>{tab.supported ? <><p><strong>{tab.provider}</strong><span className="conversation-title">{tab.title || "标题将在采集时从首个问题生成"}</span>{tab.sessionId ? <code>{tab.sessionId}</code> : <span>等待 Session ID</span>}</p><div className="actions"><button disabled={busy || !tab.sessionId || paused} onClick={() => void manualCapture()}>完整采集（会滚动）</button><button className="secondary" onClick={() => void togglePause()}>{paused ? "恢复本站" : "暂停本站"}</button><button className="secondary" onClick={() => void toggleFloatingIndicator()}>{floatingVisible ? "隐藏浮窗" : "显示浮窗"}</button></div></> : <p className="muted">当前页面不在支持列表中</p>}</section>
+          {status.status === "partial" && <p className="message">未完整原因：{status.incompleteReason || "此次采集未记录具体原因，请重新完整采集以获取诊断。"}</p>}
+          <section className="current"><h2>当前页面</h2>{tab.connectionError ? <><p>{tab.connectionError}</p><div className="actions"><button onClick={() => void refreshPage()}>刷新当前页面</button><button className="secondary" disabled={busy} onClick={() => void authorizeCurrentSite()}>授权本站并刷新</button></div></> : tab.supported ? <><p><strong>{tab.provider}</strong><span className="conversation-title">{tab.title || "标题将在采集时从首个问题生成"}</span>{tab.sessionId ? <code>{tab.sessionId}</code> : <span>请先打开一条已有的对话，等待会话加载完成。</span>}</p><div className="actions"><button disabled={busy || !tab.sessionId || paused} onClick={() => void manualCapture()}>完整采集（会滚动）</button><button className="secondary" onClick={() => void togglePause()}>{paused ? "恢复本站" : "暂停本站"}</button><button className="secondary" onClick={() => void toggleFloatingIndicator()}>{floatingVisible ? "隐藏浮窗" : "显示浮窗"}</button></div></> : <p className="muted">当前页面不在支持列表中</p>}</section>
           <footer><span>{settings.deviceName}</span><button className="link" onClick={() => void browser.runtime.sendMessage({type:"flushOutbox"} satisfies ExtensionMessage)}>重试上传</button></footer>
         </>
       )}
       <section className="outbox-section">
+        <div className="message"><strong>批量补采</strong><p>{settings.batchStatus?.message ?? "在归档网页创建队列，扩展会逐条重新采集 ChatGPT 不完整会话。"}</p><a href={`${serverOrigin}/recapture`} target="_blank" rel="noreferrer">管理补采队列</a></div>
+        {tab.adapterVersion && <small>当前页面采集适配器：{tab.adapterVersion}</small>}
+        {settings.lastManualCapture && settings.lastManualCapture.sessionId === tab.sessionId && <div className="message"><strong>最近一次手动采集</strong><p>{settings.lastManualCapture.message}</p><small>{new Date(settings.lastManualCapture.updatedAt).toLocaleString()}</small></div>}
+        {tab.provider === "chatgpt" && settings.nativeReadDiagnostic && <div className="message"><strong>完整历史读取诊断</strong><p>{settings.nativeReadDiagnostic.stage} · {settings.nativeReadDiagnostic.code}{settings.nativeReadDiagnostic.parseReason ? ` · ${settings.nativeReadDiagnostic.parseReason}` : ""}{settings.nativeReadDiagnostic.httpStatus ? ` · HTTP ${settings.nativeReadDiagnostic.httpStatus}` : ""}</p><small>{new Date(settings.nativeReadDiagnostic.updatedAt).toLocaleString()}</small></div>}
         <div className="outbox-heading">
           <h2>待上传 <span>{outbox.length}</span></h2>
           {outbox.length > 0 && settings.deviceToken && (

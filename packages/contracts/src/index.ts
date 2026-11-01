@@ -1,37 +1,10 @@
 import { z } from "zod";
-
-export const providers = [
-  "chatgpt",
-  "gemini",
-  "grok",
-  "yuanbao",
-  "doubao",
-  "minimax_agent",
-  "deepseek",
-  "qianwen",
-  "kimi",
-  "openclaw",
-  "codex",
-  "claude_code",
-] as const;
+import { providers } from "./presentation.js";
+export { providers, providerLabels, stripInternalConversationMetadata } from "./presentation.js";
+export type { RecaptureItemStatus, RecaptureItem, RecaptureJob, RecaptureTask, RecaptureNext, RecaptureReport } from "./recapture.js";
 
 export const ProviderSchema = z.enum(providers);
 export type Provider = z.infer<typeof ProviderSchema>;
-
-export const providerLabels: Record<Provider, string> = {
-  chatgpt: "ChatGPT",
-  gemini: "Gemini",
-  grok: "Grok",
-  yuanbao: "腾讯元宝",
-  doubao: "豆包",
-  minimax_agent: "MiniMax Agent",
-  deepseek: "DeepSeek",
-  qianwen: "千问",
-  kimi: "Kimi",
-  openclaw: "OpenClaw",
-  codex: "Codex",
-  claude_code: "Claude Code",
-};
 
 export const MessageRoleSchema = z.enum([
   "user",
@@ -41,38 +14,6 @@ export const MessageRoleSchema = z.enum([
   "unknown",
 ]);
 export type MessageRole = z.infer<typeof MessageRoleSchema>;
-
-const INTERNAL_CONVERSATION_BLOCK_TAGS = [
-  "recommended_plugins",
-  "environment_context",
-  "app-context",
-  "skills_instructions",
-  "permissions instructions",
-  "apps_instructions",
-  "plugins_instructions",
-  "collaboration_mode",
-  "multi_agent_mode",
-] as const;
-
-function escapedRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * Removes product/runtime envelopes that can be stored in the same message as
- * the user's actual prompt. The original archived content remains unchanged.
- */
-export function stripInternalConversationMetadata(value: string): string {
-  let output = value.replace(/\r\n/g, "\n");
-  for (const tag of INTERNAL_CONVERSATION_BLOCK_TAGS) {
-    const escaped = escapedRegExp(tag);
-    output = output.replace(
-      new RegExp(`<${escaped}(?:\\s[^>]*)?>[\\s\\S]*?<\\/${escaped}\\s*>`, "gi"),
-      "",
-    );
-  }
-  return output.replace(/\n{3,}/g, "\n\n").trim();
-}
 
 export const SegmentTypeSchema = z.enum([
   "text",
@@ -88,6 +29,10 @@ const HttpUrlSchema = z
   .url()
   .max(8_192)
   .refine((value) => /^https?:\/\//i.test(value), "Only HTTP(S) links are allowed");
+
+// Database UUIDs retain the canonical hex format accepted by PostgreSQL and
+// Zod 3; z.guid() also accepts older identifiers without RFC version bits.
+const DatabaseUuidSchema = z.guid();
 
 export const MessageSegmentSchema = z.object({
   type: SegmentTypeSchema,
@@ -161,15 +106,17 @@ export const CaptureSnapshotV1Schema = z
     schemaVersion: z.literal(1),
     provider: ProviderSchema,
     sessionId: z.string().min(1).max(1_024),
+    parentSessionId: z.string().min(1).max(1_024).optional(),
     branchFingerprint: z.string().min(8).max(256),
     title: z.string().max(2_048).optional(),
     canonicalUrl: HttpUrlSchema.optional(),
+    sourceKind: z.literal("chatgpt_current_branch").optional(),
     adapterVersion: z.string().min(1).max(64),
     capturedAt: z.string().datetime({ offset: true }),
     captureMode: CaptureModeSchema.default("full"),
     triggerReason: CaptureTriggerReasonSchema.optional(),
     tokenUsage: TokenUsageSchema.optional(),
-    baseRevisionId: z.string().uuid().optional(),
+    baseRevisionId: DatabaseUuidSchema.optional(),
     baseMessageCount: z.number().int().nonnegative().optional(),
     baseLastMessageId: z.string().min(1).max(512).optional(),
     baseLastMessageTextHash: z.string().min(16).max(128).optional(),
@@ -177,6 +124,15 @@ export const CaptureSnapshotV1Schema = z
     messages: z.array(CaptureMessageSchema).min(1).max(100_000),
   })
   .superRefine((snapshot, context) => {
+    if (snapshot.sourceKind && (snapshot.provider !== "chatgpt" || snapshot.captureMode !== "full" ||
+        !snapshot.completeness.topReached || !snapshot.completeness.bottomReached || !snapshot.completeness.stable ||
+        snapshot.messages.some(message => !message.externalMessageId || /^(?:fallback-)?(?:turn|conversation-turn)-\d+/i.test(message.externalMessageId)) ||
+        new Set(snapshot.messages.map(message => message.externalMessageId)).size !== snapshot.messages.length)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["sourceKind"], message: "native branch evidence requires a stable full ChatGPT chain with unique source IDs" });
+    }
+    if (snapshot.parentSessionId === snapshot.sessionId) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["parentSessionId"], message: "a conversation cannot be its own parent" });
+    }
     if (snapshot.tokenUsage?.scope === "incremental") {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -222,6 +178,7 @@ export const CaptureDeltaV1Schema = z
     captureMode: z.literal("append"),
     provider: ProviderSchema,
     sessionId: z.string().min(1).max(1_024),
+    parentSessionId: z.string().min(1).max(1_024).optional(),
     branchFingerprint: z.string().min(8).max(256),
     title: z.string().max(2_048).optional(),
     canonicalUrl: HttpUrlSchema.optional(),
@@ -229,18 +186,22 @@ export const CaptureDeltaV1Schema = z
     capturedAt: z.string().datetime({ offset: true }),
     triggerReason: CaptureTriggerReasonSchema.default("new_messages"),
     tokenUsage: TokenUsageSchema.optional(),
-    baseRevisionId: z.string().uuid().optional(),
+    baseRevisionId: DatabaseUuidSchema.optional(),
     baseMessageCount: z.number().int().positive(),
+    baseContentHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     baseLastMessageId: z.string().min(1).max(512).optional(),
     baseLastMessageTextHash: z.string().min(16).max(128).optional(),
     appendedMessages: z.array(CaptureMessageSchema).max(10_000),
   })
   .superRefine((delta, context) => {
-    if (!delta.appendedMessages.length && !delta.tokenUsage) {
+    if (delta.parentSessionId === delta.sessionId) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["parentSessionId"], message: "a conversation cannot be its own parent" });
+    }
+    if (!delta.appendedMessages.length && !delta.tokenUsage && !delta.parentSessionId) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["appendedMessages"],
-        message: "append captures require new messages or token usage",
+        message: "append captures require new messages, token usage, or a parent session",
       });
     }
     if (!delta.baseLastMessageId && !delta.baseLastMessageTextHash) {
@@ -295,7 +256,7 @@ export const PairingClaimSchema = z.object({
 export type PairingClaim = z.infer<typeof PairingClaimSchema>;
 
 export const ProjectSuggestionSchema = z.object({
-  existingProjectId: z.string().uuid().nullable(),
+  existingProjectId: DatabaseUuidSchema.nullable(),
   suggestedName: z.string().min(1).max(200).nullable(),
   confidence: z.number().min(0).max(1),
   rationale: z.string().max(2_000),
@@ -310,7 +271,7 @@ export type TagSuggestion = z.infer<typeof TagSuggestionSchema>;
 
 export const ConversationOrganizationSuggestionSchema = z.object({
   project: z.object({
-    projectId: z.string().uuid().nullable(),
+    projectId: DatabaseUuidSchema.nullable(),
     suggestedProjectName: z.string().min(1).max(200).nullable(),
     confidence: z.number().min(0).max(1),
   }),

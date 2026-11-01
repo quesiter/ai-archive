@@ -292,16 +292,16 @@ export function redactSensitiveUrlForStorage(
   return { text: redacted.text, replacements: totalReplacements };
 }
 
-export async function redactForStorage(input: string): Promise<RedactionResult> {
-  return redactSensitiveTextForStorage(input, await loadEnabledCustomRedactionRules());
+export async function redactForStorage(input: string, customRules?: readonly CompiledCustomRedactionRule[]): Promise<RedactionResult> {
+  return redactSensitiveTextForStorage(input, customRules ?? await loadEnabledCustomRedactionRules());
 }
 
-export async function redactForCloud(input: string): Promise<RedactionResult> {
+export async function redactForCloud(input: string, customRules?: readonly CompiledCustomRedactionRule[]): Promise<RedactionResult> {
   const secure = applyPatterns(input, securityPatterns);
   const privateText = applyPatterns(secure.text, cloudPrivacyPatterns);
   const custom = applyCustomRules(
     privateText.text,
-    await loadEnabledCustomRedactionRules(),
+    customRules ?? await loadEnabledCustomRedactionRules(),
   );
   return {
     text: custom.text,

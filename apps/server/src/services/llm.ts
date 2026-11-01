@@ -146,8 +146,12 @@ function excerpt(value: string, limit = 700): string {
     : `${normalized.slice(0, limit)}...`;
 }
 
-function stripClosedReasoningBlocks(value: string): string {
-  return value.replace(/<(?:think|reasoning)>[\s\S]*?<\/(?:think|reasoning)>/gi, "");
+function stripReasoningBlocks(value: string): string {
+  // Never recover an example from a reasoning block, even if the final answer
+  // is malformed or a provider leaves its last reasoning block unclosed.
+  return value
+    .replace(/<(think|reasoning)>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<(?:think|reasoning)>[\s\S]*$/gi, "");
 }
 
 function balancedJsonSliceFrom(value: string, startIndex: number): string | null {
@@ -194,32 +198,29 @@ function jsonSlices(value: string): string[] {
   return slices;
 }
 
-export function extractJson(content: string): unknown {
-  const trimmed = content.trim();
-  const withoutReasoning = stripClosedReasoningBlocks(trimmed).trim();
-  const afterReasoning = trimmed.includes("</think>")
-    ? trimmed.slice(trimmed.lastIndexOf("</think>") + "</think>".length).trim()
-    : "";
+function* parsedJsonCandidates(content: string): Generator<unknown> {
+  const withoutReasoning = stripReasoningBlocks(content).trim();
   const candidates = [
-    trimmed,
     withoutReasoning,
-    afterReasoning,
-    ...Array.from(trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)).map((match) =>
+    ...Array.from(withoutReasoning.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)).map((match) =>
       match[1]?.trim() ?? "",
     ),
-    ...jsonSlices(withoutReasoning || trimmed),
-    ...jsonSlices(trimmed),
+    ...jsonSlices(withoutReasoning),
   ];
   const seen = new Set<string>();
   for (const candidate of candidates) {
     if (!candidate || seen.has(candidate)) continue;
     seen.add(candidate);
     try {
-      return JSON.parse(candidate);
+      yield JSON.parse(candidate);
     } catch {
       // Try the next candidate before reporting the original model output.
     }
   }
+}
+
+export function extractJson(content: string): unknown {
+  for (const parsed of parsedJsonCandidates(content)) return parsed;
   throw new Error("Model did not return valid JSON");
 }
 
@@ -512,25 +513,97 @@ export function isRetryableRateLimitError(error: unknown): boolean {
 }
 
 function parseStructured<T>(
-  schema: z.ZodType<T, z.ZodTypeDef, unknown>,
+  schema: z.ZodType<T, unknown>,
   content: string,
 ): T {
-  const parsed = extractJson(content);
-  try {
-    return schema.parse(parsed);
-  } catch (error) {
-    if (error instanceof ZodError) throw new Error(schemaErrorMessage(error));
-    throw error;
+  let firstSchemaError: ZodError | undefined;
+  for (const parsed of parsedJsonCandidates(content)) {
+    const result = schema.safeParse(parsed);
+    if (result.success) return result.data;
+    firstSchemaError ??= result.error;
   }
+  throw new Error(firstSchemaError
+    ? schemaErrorMessage(firstSchemaError)
+    : "Model did not return valid JSON");
+}
+
+export interface StructuredResponseDiagnostic {
+  /** One-based quality attempt; a response_format fallback shares its attempt. */
+  attempt: number;
+  model: string;
+  responseId?: string;
+  requestId?: string;
+  finishReason?: string;
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
+  content: string;
+  responseChars: number;
+  status: "accepted" | "rejected" | "request_failed";
+  error?: string;
+}
+
+export class StructuredResponseDiagnosticError extends Error {
+  constructor(error: unknown) {
+    super("Failed to persist structured response diagnostic", { cause: error });
+    this.name = "StructuredResponseDiagnosticError";
+  }
+}
+
+function diagnosticErrorMessage(error: unknown, apiKey: string): string {
+  const record = error && typeof error === "object"
+    ? error as Record<string, unknown>
+    : {};
+  const status = typeof record.status === "number" ? `HTTP ${record.status}: ` : "";
+  const message = error instanceof Error
+    ? error.message
+    : typeof record.message === "string" ? record.message : String(error);
+  // Do not serialize error objects: SDK errors may carry request headers.
+  const sanitized = message
+    .split(apiKey).join("[REDACTED]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/([?&](?:api[_-]?key|token|access_token)=)[^\s&#]+/gi, "$1[REDACTED]");
+  return `${status}${excerpt(sanitized, 1_200)}`;
+}
+
+function errorRequestId(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const record = error as Record<string, unknown>;
+  return typeof record.request_id === "string" ? record.request_id : undefined;
+}
+
+function supportsResponseFormatFallback(error: unknown): boolean {
+  if (isRetryableRateLimitError(error)) return false;
+  const status = error && typeof error === "object"
+    ? (error as Record<string, unknown>).status
+    : undefined;
+  if (status === 401 || status === 403) return false;
+  const message = error instanceof Error ? error.message : "";
+  return /response_format|json_object|unsupported/i.test(message);
 }
 
 export async function completeStructured<T>(input: {
   system: string;
   user: string;
-  schema: z.ZodType<T, z.ZodTypeDef, unknown>;
+  schema: z.ZodType<T, unknown>;
   priority?: AiRequestPriority;
+  maxAttempts?: number;
+  timeoutMs?: number;
+  onDiagnostic?: (diagnostic: StructuredResponseDiagnostic) => Promise<void> | void;
 }): Promise<T> {
   const llm = await loadLlmConfig();
+  const maxAttempts = Number.isFinite(input.maxAttempts)
+    ? Math.max(1, Math.min(3, Math.trunc(input.maxAttempts!)))
+    : 1;
+  const recordDiagnostic = async (diagnostic: StructuredResponseDiagnostic): Promise<void> => {
+    try {
+      await input.onDiagnostic?.(diagnostic);
+    } catch (error) {
+      throw new StructuredResponseDiagnosticError(error);
+    }
+  };
   return withPinnedNetworkDispatcher(llm.baseURL, async (dispatcher) => {
     const client = new OpenAI({
       apiKey: llm.apiKey,
@@ -545,28 +618,82 @@ export async function completeStructured<T>(input: {
         { role: "user" as const, content: input.user },
       ],
     };
-    let response;
-    try {
-      await waitForAiRequestPacing(input.priority);
-      response = await client.chat.completions.create(
-        {
-          ...baseRequest,
-          response_format: { type: "json_object" },
-        },
-        { timeout: STRUCTURED_COMPLETION_TIMEOUT_MS },
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "";
-      if (!/response_format|json_object|unsupported/i.test(message)) throw error;
-      await waitForAiRequestPacing(input.priority);
-      response = await client.chat.completions.create(
-        baseRequest,
-        { timeout: STRUCTURED_COMPLETION_TIMEOUT_MS },
-      );
+    let useResponseFormat = true;
+    let correction: string | undefined;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const request = {
+        ...baseRequest,
+        messages: [
+          ...baseRequest.messages,
+          ...(correction ? [{ role: "user" as const, content: correction }] : []),
+        ],
+      };
+      const sendRequest = async () => {
+        try {
+          await waitForAiRequestPacing(input.priority);
+          return await client.chat.completions.create(
+            { ...request, ...(useResponseFormat ? { response_format: { type: "json_object" as const } } : {}) },
+            { timeout: input.timeoutMs ?? STRUCTURED_COMPLETION_TIMEOUT_MS, maxRetries: input.timeoutMs ? 0 : 2 },
+          );
+        } catch (error) {
+          const requestId = errorRequestId(error);
+          await recordDiagnostic({
+            attempt,
+            model: llm.model,
+            ...(requestId ? { requestId } : {}),
+            content: "",
+            responseChars: 0,
+            status: "request_failed",
+            error: diagnosticErrorMessage(error, llm.apiKey),
+          });
+          throw error;
+        }
+      };
+      let response;
+      try {
+        response = await sendRequest();
+      } catch (error) {
+        if (error instanceof StructuredResponseDiagnosticError || !useResponseFormat || !supportsResponseFormatFallback(error)) throw error;
+        useResponseFormat = false;
+        response = await sendRequest();
+      }
+      const choice = response?.choices?.[0];
+      const rawContent = choice?.message?.content;
+      const content = typeof rawContent === "string" ? rawContent : "";
+      const metadata = {
+        attempt,
+        model: response?.model || llm.model,
+        ...(response?.id ? { responseId: response.id } : {}),
+        ...(response?._request_id ? { requestId: response._request_id } : {}),
+        ...(choice?.finish_reason ? { finishReason: choice.finish_reason } : {}),
+        ...(response?.usage ? { usage: {
+          promptTokens: response.usage.prompt_tokens,
+          completionTokens: response.usage.completion_tokens,
+          totalTokens: response.usage.total_tokens,
+        } } : {}),
+        content,
+        responseChars: content.length,
+      };
+      let result: T;
+      try {
+        if (choice?.finish_reason && choice.finish_reason !== "stop") {
+          throw new Error(`Model response was incomplete (finish_reason=${choice.finish_reason}); return a complete JSON object without truncation`);
+        }
+        if (!content.trim()) throw new Error("Model returned an empty response");
+        result = parseStructured(input.schema, content);
+      } catch (error) {
+        const message = diagnosticErrorMessage(error, llm.apiKey);
+        await recordDiagnostic({ ...metadata, status: "rejected", error: message });
+        if (attempt >= maxAttempts) throw error;
+        correction = `The previous response failed validation: ${message}\nGenerate the entire response again using the original source material and requirements. Return exactly one complete JSON object matching the required schema. Include all required sections and substantive content. Do not return placeholders, ellipses, a sample object, or an explanation of the JSON. Do not invent facts to fill missing information.`;
+        continue;
+      }
+      // Kept outside the validation catch so storage failures cannot be retried
+      // or misreported as model quality failures.
+      await recordDiagnostic({ ...metadata, status: "accepted" });
+      return result;
     }
-    const content = response.choices[0]?.message.content;
-    if (!content) throw new Error("Model returned an empty response");
-    return parseStructured(input.schema, content);
+    throw new Error("Structured response attempts exhausted");
   });
 }
 

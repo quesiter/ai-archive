@@ -80,11 +80,14 @@ describe("report email test", () => {
 
     expect(sent).toBe(true);
     expect(mocks.sendMail).toHaveBeenCalledWith(expect.objectContaining({
+      subject: kind === "weekly" ? "【知言归藏】周报" : "【知言归藏】月报",
       text: `${bodyMarkdown}\n\n在线查看报告：https://archive.example.test/reports/00000000-0000-4000-8000-000000000001`,
     }));
     const message = mocks.sendMail.mock.calls[0]?.[0] as { text: string; html: string };
     expect(message.text).not.toContain("这段摘要不应出现在邮件正文中");
     expect(message.html).toContain("详细内容".repeat(5_000));
+    expect(message.html).toMatch(/<h2\b[^>]*>完整正文<\/h2>/);
+    expect(message.html).not.toContain("## 完整正文");
     expect(message.html).toContain("&lt;script&gt;alert(&quot;unsafe&quot;)&lt;/script&gt;");
     expect(message.html).not.toContain("<script>");
     expect(mocks.close).toHaveBeenCalledOnce();

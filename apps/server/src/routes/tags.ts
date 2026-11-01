@@ -61,7 +61,7 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/tags/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const input = TagNameSchema.parse(request.body);
       const normalized = normalizeTagName(input.name);
       const [conflict] = await db
@@ -93,8 +93,8 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       const user = await requireWebUser(request, reply);
       if (!user) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
-      const input = z.object({ targetTagId: z.string().uuid() }).parse(request.body);
+      const params = z.object({ id: z.guid() }).parse(request.params);
+      const input = z.object({ targetTagId: z.guid() }).parse(request.body);
       if (params.id === input.targetTagId) {
         return reply.code(400).send({ error: "Source and target tags must be different" });
       }
@@ -121,7 +121,7 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/tags/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const [tag] = await db
         .delete(tags)
         .where(eq(tags.id, params.id))
@@ -135,7 +135,7 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/conversations/:id/tags",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const input = TagNameSchema.extend({
         lockedByUser: z.boolean().default(true),
       }).parse(request.body);
@@ -177,7 +177,7 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
       const params = z
-        .object({ id: z.string().uuid(), tagId: z.string().uuid() })
+        .object({ id: z.guid(), tagId: z.guid() })
         .parse(request.params);
       const input = z.object({ lockedByUser: z.boolean() }).parse(request.body);
       const now = new Date();
@@ -214,7 +214,7 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
       const params = z
-        .object({ id: z.string().uuid(), tagId: z.string().uuid() })
+        .object({ id: z.guid(), tagId: z.guid() })
         .parse(request.params);
       const [link] = await db
         .delete(conversationTags)

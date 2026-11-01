@@ -34,6 +34,8 @@ const sleep = (milliseconds: number, signal?: AbortSignal): Promise<void> =>
   });
 
 export interface ConversationScanOptions {
+  onProgress?: (progress: { message: string; messageCount: number }) => Promise<void>;
+  scrollSignal?: AbortSignal;
   triggerReason?: CaptureTriggerReason;
   signal?: AbortSignal;
   readNative?: (visible: ExtractedMessage[]) => Promise<NativeConversation | null>;
@@ -54,31 +56,45 @@ function elementScrollContainer(element: HTMLElement): HTMLElement {
   return (document.scrollingElement as HTMLElement | null) ?? document.documentElement;
 }
 
+function reversedScroll(container: HTMLElement): boolean {
+  return getComputedStyle(container).flexDirection === "column-reverse";
+}
+
+function scrollOffset(container: HTMLElement): number {
+  return reversedScroll(container)
+    ? Math.max(0, container.scrollHeight - container.clientHeight) + container.scrollTop
+    : container.scrollTop;
+}
+
+function setScrollOffset(container: HTMLElement, offset: number): void {
+  const maximum = Math.max(0, container.scrollHeight - container.clientHeight);
+  const clamped = Math.max(0, Math.min(offset, maximum));
+  container.scrollTop = reversedScroll(container) ? clamped - maximum : clamped;
+}
+
 function atTop(container: HTMLElement): boolean {
-  return container.scrollTop <= 2;
+  return scrollOffset(container) <= 2;
 }
 
 function atBottom(container: HTMLElement): boolean {
   return (
-    container.scrollTop + container.clientHeight >= container.scrollHeight - 4
+    scrollOffset(container) + container.clientHeight >= container.scrollHeight - 4
   );
 }
 
-async function waitForGeneration(adapter: AdapterRuntime, signal?: AbortSignal): Promise<boolean> {
-  const deadline = Date.now() + 120_000;
-  const sessionId = adapter.getSessionId();
-  let quietPasses = 0;
-  while (Date.now() < deadline) {
-    checkActive(adapter, sessionId, signal);
-    if (!adapter.isStreaming()) quietPasses += 1;
-    else quietPasses = 0;
-    if (quietPasses >= 2) return true;
-    await sleep(800, signal);
-  }
+function hasFirstTurnEvidence(adapter: AdapterRuntime, messages: ExtractedMessage[]): boolean {
+  if (adapter.definition.provider !== "chatgpt") return true;
+  const first = messages[0];
+  if (!first || first.role !== "user" || !first.element.isConnected) return false;
+  // Explicit turn markers can prove the beginning. The current ChatGPT UI
+  // assigns fallback-turn-0 to the first loaded turn even when older history
+  // failed to load; its fallback index is not an absolute history index.
+  if (first.element.closest('[data-testid="conversation-turn-0"], [id="conversation-turn-0"]')) return true;
   return false;
 }
 
 export interface ReachConversationTopOptions {
+  onProgress?: ConversationScanOptions["onProgress"];
   maxIterations?: number;
   stablePasses?: number;
   delayMs?: number;
@@ -115,7 +131,7 @@ function forceScrollToTop(
       behavior: "auto",
     });
   }
-  container.scrollTop = 0;
+  setScrollOffset(container, 0);
 }
 
 function topLoadEvidence(
@@ -151,6 +167,10 @@ export async function reachConversationTop(
     await wait(delayMs);
     checkActive(adapter, sessionId, options.signal);
     visibleMessages = adapter.extractVisibleMessages();
+    if (iteration % 5 === 0) await options.onProgress?.({
+      message: `正在向上加载历史，已等待 ${Math.round((iteration + 1) * delayMs / 1000)} 秒；当前加载 ${visibleMessages.length} 条消息${hasFirstTurnEvidence(adapter, visibleMessages) ? "，已识别首轮" : "，尚未识别首轮"}`,
+      messageCount: visibleMessages.length,
+    });
     const currentContainer = scrollContainerForMessages(visibleMessages, container);
     if (currentContainer !== container) {
       container = currentContainer;
@@ -167,7 +187,11 @@ export async function reachConversationTop(
     }
     previousEvidence = evidence;
     if (stableHeightPasses >= stablePasses) {
-      return { container, reached: true };
+      const reached = hasFirstTurnEvidence(adapter, visibleMessages);
+      // A virtualized range can stay unchanged while older history is loading.
+      // Keep waiting within the bounded iteration budget until the first turn
+      // is proven, rather than treating a quiet truncated window as the top.
+      if (reached || !chatGptHistory) return { container, reached };
     }
   }
   return { container, reached: false };
@@ -176,8 +200,68 @@ export async function reachConversationTop(
 export function mergeVisible(
   ordered: ExtractedMessage[],
   visibleMessages: ExtractedMessage[],
-): void {
-  if (!visibleMessages.length) return;
+): boolean {
+  if (!visibleMessages.length) return true;
+  // Virtualized history can mount a message shell before its full body. Keep
+  // the latest extraction for stable IDs rather than freezing the first shell.
+  const positionsById = new Map(ordered.flatMap((message, index) =>
+    message.externalMessageId ? [[message.externalMessageId, index] as const] : [],
+  ));
+  for (const message of visibleMessages) {
+    const position = message.externalMessageId ? positionsById.get(message.externalMessageId) : undefined;
+    if (position !== undefined) {
+      const previous = ordered[position]!;
+      const textLength = (value: ExtractedMessage) => value.segments.reduce((total, segment) => total + segment.content.length, 0);
+      ordered[position] = textLength(message) >= textLength(previous)
+        ? message : { ...previous, element: message.element };
+    }
+  }
+  let orderVerified = true;
+  if (ordered.every((message) => message.externalMessageId) &&
+      visibleMessages.every((message) => message.externalMessageId)) {
+    const visibleIds = visibleMessages.map((message) => message.externalMessageId!);
+    const knownPositions = visibleIds.flatMap((id) => {
+      const position = positionsById.get(id);
+      return position === undefined ? [] : [position];
+    });
+    orderVerified = positionsById.size === ordered.length &&
+      new Set(visibleIds).size === visibleIds.length &&
+      (knownPositions.length > 0 || ordered.length === 0) &&
+      knownPositions.every((position, index) => index === 0 || position > knownPositions[index - 1]!);
+    if (orderVerified) {
+      // A body can mount between two messages already seen. Preserve the
+      // later window's anchors instead of appending the delayed ID at the end.
+      const insertions = new Map<number, ExtractedMessage[]>();
+      let previousAnchor = -1;
+      let pending: ExtractedMessage[] = [];
+      for (const message of visibleMessages) {
+        const position = positionsById.get(message.externalMessageId!);
+        if (position === undefined) {
+          pending.push(message);
+          continue;
+        }
+        if (pending.length) {
+          // Existing and newly observed runs between the same anchors have
+          // no proven relative order. Retain both but do not certify the scan.
+          if (position > previousAnchor + 1) orderVerified = false;
+          insertions.set(position, pending);
+          pending = [];
+        }
+        previousAnchor = position;
+      }
+      if (pending.length) {
+        if (previousAnchor < ordered.length - 1) orderVerified = false;
+        insertions.set(previousAnchor + 1, pending);
+      }
+      const merged: ExtractedMessage[] = [];
+      for (let index = 0; index <= ordered.length; index += 1) {
+        merged.push(...(insertions.get(index) ?? []));
+        if (index < ordered.length) merged.push(ordered[index]!);
+      }
+      ordered.splice(0, ordered.length, ...merged);
+      return orderVerified;
+    }
+  }
   let overlap = Math.min(ordered.length, visibleMessages.length);
   while (overlap > 0) {
     const orderedStart = ordered.length - overlap;
@@ -204,49 +288,127 @@ export function mergeVisible(
     }
     ordered.push(message);
   }
+  return orderVerified;
+}
+
+function viewportEvidence(container: HTMLElement, messages: ExtractedMessage[]): string {
+  return JSON.stringify([
+    container.scrollHeight,
+    messages.map((message) => [message.key, message.role, message.segments]),
+  ]);
+}
+
+async function settledViewport(
+  initialContainer: HTMLElement,
+  adapter: AdapterRuntime,
+  signal?: AbortSignal,
+): Promise<{ container: HTMLElement; messages: ExtractedMessage[]; stable: boolean }> {
+  const sessionId = adapter.getSessionId();
+  let container = initialContainer;
+  let messages = adapter.extractVisibleMessages();
+  let evidence = viewportEvidence(container, messages);
+  let quietPasses = 0;
+  const startedAt = Date.now();
+  // A constant virtual scroll height is not evidence that the next window has
+  // rendered. Historical bodies regularly mount later than a single 180ms step.
+  while (Date.now() - startedAt < 5_000) {
+    await sleep(180, signal);
+    checkActive(adapter, sessionId, signal);
+    messages = adapter.extractVisibleMessages();
+    const currentContainer = scrollContainerForMessages(messages, container);
+    const nextEvidence = viewportEvidence(currentContainer, messages);
+    quietPasses = currentContainer === container && nextEvidence === evidence
+      ? quietPasses + 1 : 0;
+    container = currentContainer;
+    evidence = nextEvidence;
+    const minimumWait = atBottom(container) ? 1_800 : 900;
+    if (messages.length && quietPasses >= 3 && Date.now() - startedAt >= minimumWait) {
+      return { container, messages, stable: true };
+    }
+  }
+  return { container, messages, stable: false };
+}
+
+function windowsOverlap(previous: ExtractedMessage[], current: ExtractedMessage[]): boolean {
+  const keys = new Set(previous.map((message) => message.externalMessageId ?? message.key));
+  return current.some((message) => keys.has(message.externalMessageId ?? message.key));
 }
 
 async function scanToBottom(
   initialContainer: HTMLElement,
   adapter: AdapterRuntime,
   signal?: AbortSignal,
+  onProgress?: ConversationScanOptions["onProgress"],
 ): Promise<{
   messages: ExtractedMessage[];
   bottomReached: boolean;
   container: HTMLElement;
+  coverageVerified: boolean;
+  contentStable: boolean;
+  firstTurnVerified: boolean;
 }> {
   const ordered: ExtractedMessage[] = [];
   const sessionId = adapter.getSessionId();
   let container = initialContainer;
-  let stableBottomPasses = 0;
-  let previousHeight = -1;
-  for (let iteration = 0; iteration < 2_000; iteration += 1) {
+  let coverageVerified = true;
+  let contentStable = true;
+  const firstTurnKeys = new Set<string>();
+  const firstTurnVerified = () => adapter.definition.provider !== "chatgpt" ||
+    Boolean(ordered[0] && firstTurnKeys.has(ordered[0].key));
+  let previousWindow: ExtractedMessage[] = [];
+  let previousTop = scrollOffset(container);
+  let step = Math.max(Math.floor(container.clientHeight * 0.5), 32);
+  let connectedPasses = 0;
+  const deadline = Date.now() + 360_000;
+  for (let iteration = 0; iteration < 2_000 && Date.now() < deadline; iteration += 1) {
     checkActive(adapter, sessionId, signal);
-    const visibleMessages = adapter.extractVisibleMessages();
-    const currentContainer = scrollContainerForMessages(visibleMessages, container);
-    if (currentContainer !== container) {
-      container = currentContainer;
-      stableBottomPasses = 0;
-      previousHeight = -1;
+    const viewport = await settledViewport(container, adapter, signal);
+    if (viewport.container !== container) {
+      container = viewport.container;
+      previousTop = scrollOffset(container);
     }
-    mergeVisible(ordered, visibleMessages);
-    if (atBottom(container)) {
-      if (container.scrollHeight === previousHeight) stableBottomPasses += 1;
-      else stableBottomPasses = 0;
-      previousHeight = container.scrollHeight;
-      if (stableBottomPasses >= 2) {
-        mergeVisible(ordered, adapter.extractVisibleMessages());
-        return { messages: ordered, bottomReached: true, container };
+    const visibleMessages = viewport.messages;
+    if (hasFirstTurnEvidence(adapter, visibleMessages) && visibleMessages[0]) {
+      firstTurnKeys.add(visibleMessages[0].key);
+    }
+    contentStable &&= viewport.stable;
+    if (!viewport.stable) {
+      mergeVisible(ordered, visibleMessages);
+      return { messages: ordered, bottomReached: false, container, coverageVerified, contentStable, firstTurnVerified: firstTurnVerified() };
+    }
+    if (previousWindow.length && !windowsOverlap(previousWindow, visibleMessages)) {
+      connectedPasses = 0;
+      const distance = scrollOffset(container) - previousTop;
+      if (distance > 32) {
+        // Recover skipped windows before accepting a disconnected batch.
+        step = Math.max(Math.floor(distance / 2), 32);
+        setScrollOffset(container, previousTop + step);
+        continue;
+      }
+      coverageVerified = false;
+    }
+    coverageVerified = mergeVisible(ordered, visibleMessages) && coverageVerified;
+    await onProgress?.({ message: `正在逐段读取会话，已读取 ${ordered.length} 条消息${atBottom(container) ? "，正在确认末轮" : ""}`, messageCount: ordered.length });
+    if (atBottom(container) && viewport.stable) {
+      return { messages: ordered, bottomReached: true, container, coverageVerified, contentStable, firstTurnVerified: firstTurnVerified() };
+    }
+    if (previousWindow.length && windowsOverlap(previousWindow, visibleMessages)) {
+      connectedPasses += 1;
+      if (connectedPasses >= 3) {
+        // A short dense section must not leave the rest of a long conversation
+        // crawling at the recovery step until the overall deadline expires.
+        step = Math.min(step * 2, Math.max(Math.floor(container.clientHeight * 0.5), 32));
+        connectedPasses = 0;
       }
     }
-    const step = Math.max(Math.floor(container.clientHeight * 0.75), 320);
-    container.scrollTop = Math.min(
-      container.scrollTop + step,
-      container.scrollHeight - container.clientHeight,
-    );
-    await sleep(180, signal);
+    previousWindow = visibleMessages;
+    previousTop = scrollOffset(container);
+    setScrollOffset(container, Math.min(
+      scrollOffset(container) + step,
+      Math.max(0, container.scrollHeight - container.clientHeight),
+    ));
   }
-  return { messages: ordered, bottomReached: atBottom(container), container };
+  return { messages: ordered, bottomReached: false, container, coverageVerified, contentStable, firstTurnVerified: firstTurnVerified() };
 }
 
 async function sha256(value: string): Promise<string> {
@@ -337,58 +499,102 @@ function fallbackTitle(messages: CaptureMessage[]): string | undefined {
     : firstQuestion;
 }
 
+export async function interruptedConversationSnapshot(
+  adapter: AdapterRuntime,
+  sessionId: string,
+  initialMessages: ExtractedMessage[],
+): Promise<CaptureSnapshotV1> {
+  if (adapter.getSessionId() !== sessionId) throw new CaptureInterruptedError();
+  const ordered = [...initialMessages];
+  mergeVisible(ordered, adapter.extractVisibleMessages());
+  const messages = ordered.map(({ key: _key, element: _element, ...message }, ordinal) => ({ ...message, ordinal }));
+  const branchFingerprint = await sha256(messages.map((message) =>
+    `${message.role}:${message.segments.map((segment) => `${segment.type}:${segment.content}:${segment.href ?? ""}`).join("|")}`,
+  ).join("\n"));
+  if (adapter.getSessionId() !== sessionId) throw new CaptureInterruptedError();
+  const title = adapter.getTitle() ?? fallbackTitle(messages);
+  return {
+    schemaVersion: 1, provider: adapter.definition.provider, sessionId,
+    branchFingerprint, ...(title ? { title } : {}), canonicalUrl: adapter.getCanonicalUrl(),
+    adapterVersion: adapter.definition.version, capturedAt: new Date().toISOString(),
+    captureMode: "full", triggerReason: "manual_retry",
+    completeness: {
+      status: "partial", topReached: false, bottomReached: false, stable: false,
+      reason: "完整采集已中止，已保存读取到的消息；历史覆盖尚未确认",
+    },
+    messages,
+  };
+}
+
 export async function scanConversation(
   adapter: AdapterRuntime,
   options: ConversationScanOptions = {},
 ): Promise<CaptureSnapshotV1> {
   const sessionId = adapter.getSessionId();
   if (!sessionId) throw new Error("当前页面还没有稳定的对话 Session ID");
-  const generationStable = await waitForGeneration(adapter, options.signal);
   checkActive(adapter, sessionId, options.signal);
-  const initialMessages = adapter.extractVisibleMessages();
+  let initialMessages = adapter.extractVisibleMessages();
   if (initialMessages.length < 1) throw new Error("未识别到对话消息");
+  await options.onProgress?.({ message: "正在读取完整历史接口，最多等待 8 秒", messageCount: initialMessages.length });
   const native = await options.readNative?.(initialMessages);
   checkActive(adapter, sessionId, options.signal);
-  const initialContainer = elementScrollContainer(initialMessages[0]!.element);
+  let initialContainer = elementScrollContainer(initialMessages[0]!.element);
+  let contentStable = true;
+  // A native response is one coherent snapshot even if the answer continues
+  // afterwards. DOM history still needs to finish mounting before extraction.
+  if (!native && options.scrollSignal?.aborted) contentStable = false;
+  else if (!native) {
+    await options.onProgress?.({ message: "正在确认页面内容已加载", messageCount: initialMessages.length });
+    const viewport = await settledViewport(initialContainer, adapter, options.signal);
+    initialMessages = viewport.messages;
+    initialContainer = viewport.container;
+    contentStable = viewport.stable;
+  }
   // A full payload does not authorize moving the page. New sessions, branch
   // changes and server-requested repairs must all remain passive, including
   // when the user is idle or the archived append baseline is no longer mounted.
-  const allowScroll = options.triggerReason === "manual_retry";
+  const allowScroll = options.triggerReason === "manual_retry" && !options.scrollSignal?.aborted;
   const hasLayout = initialContainer.clientHeight > 0;
-  let topReached = Boolean(native) || hasLayout && atTop(initialContainer);
+  let topReached = Boolean(native) || hasLayout && atTop(initialContainer) && hasFirstTurnEvidence(adapter, initialMessages);
   let bottomReached = Boolean(native) || hasLayout && atBottom(initialContainer);
+  let coverageVerified = true;
   let messages: CaptureMessage[] = native?.messages ?? initialMessages.map(
     ({ key: _key, element: _element, ...message }, ordinal) => ({ ...message, ordinal }),
   );
-  if (allowScroll && !native) {
-    const originalTop = initialContainer.scrollTop;
+  if (allowScroll && !native && hasLayout) {
+    const scrollingSignal = options.scrollSignal
+      ? AbortSignal.any([options.scrollSignal, ...(options.signal ? [options.signal] : [])])
+      : options.signal;
+    const originalTop = scrollOffset(initialContainer);
     const originalHeight = initialContainer.scrollHeight;
     const topResult = await reachConversationTop(initialContainer, adapter, {
-      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+      ...(scrollingSignal ? { signal: scrollingSignal } : {}),
     });
-    const scanned = await scanToBottom(topResult.container, adapter, options.signal);
+    const scanned = await scanToBottom(topResult.container, adapter, scrollingSignal, options.onProgress);
     checkActive(adapter, sessionId, options.signal);
-    topReached = topResult.reached;
-    bottomReached = scanned.bottomReached;
+    topReached = topResult.reached && scanned.firstTurnVerified && topResult.container.clientHeight > 0;
+    bottomReached = scanned.bottomReached && scanned.container.clientHeight > 0;
+    coverageVerified = scanned.coverageVerified;
+    contentStable = scanned.contentStable;
     messages = scanned.messages.map(
       ({ key: _key, element: _element, ...message }, ordinal) => ({ ...message, ordinal }),
     );
     const restoreRatio = originalHeight > initialContainer.clientHeight
       ? originalTop / (originalHeight - initialContainer.clientHeight)
       : 0;
-    scanned.container.scrollTop = Math.max(
+    setScrollOffset(scanned.container, Math.max(
       0,
       restoreRatio * Math.max(
         0,
         scanned.container.scrollHeight - scanned.container.clientHeight,
       ),
-    );
+    ));
   }
-  const finalStable = generationStable && !adapter.isStreaming();
+  const finalStable = contentStable && !(adapter.definition.provider === "doubao" && adapter.isStreaming());
 
-  const roles = new Set(messages.map((message) => message.role));
-  const rolesValid = roles.has("user") && roles.has("assistant");
-  const complete = topReached && bottomReached && finalStable && rolesValid;
+  const rolesValid = messages.length > 0;
+  const complete = topReached && bottomReached && finalStable && rolesValid && coverageVerified && !native?.incompleteReason;
   const fingerprintInput = messages
     .map((message) =>
       `${message.role}:${message.segments
@@ -406,6 +612,7 @@ export async function scanConversation(
     branchFingerprint,
     ...(title ? { title } : {}),
     canonicalUrl: adapter.getCanonicalUrl(),
+    ...(native && finalStable ? { sourceKind: "chatgpt_current_branch" as const } : {}),
     adapterVersion: adapter.definition.version,
     capturedAt: new Date().toISOString(),
     captureMode: "full",
@@ -415,17 +622,22 @@ export async function scanConversation(
       topReached,
       bottomReached,
       stable: finalStable,
+      ...(complete && native?.sourceNotice ? { reason: native.sourceNotice } : {}),
       ...(!complete
         ? {
-            reason: !allowScroll && (!topReached || !bottomReached)
+            reason: native?.incompleteReason ?? (options.triggerReason === "manual_retry" && options.scrollSignal?.aborted && (!topReached || !bottomReached)
+              ? "已停止自动滚动，已保存当前加载的消息；历史覆盖尚未确认"
+              : !allowScroll && (!topReached || !bottomReached)
               ? "自动采集仅保存已加载消息；如需补全历史，请手动完整采集（会滚动页面）"
               : !topReached
               ? "未能确认首轮"
               : !bottomReached
                 ? "未能确认末轮"
+                : !coverageVerified
+                  ? "虚拟列表消息之间存在未能补齐的缺口或无法确认的顺序"
                 : !finalStable
-                  ? "回答仍在生成或内容不稳定"
-                  : "未可靠识别用户与助手消息",
+                  ? "页面内容尚未稳定加载"
+                  : "未识别到可采集的消息"),
           }
         : {}),
     },
@@ -437,6 +649,7 @@ export async function scanAppendedMessages(
   adapter: AdapterRuntime,
   base: {
     revisionId?: string | undefined;
+    baselineContentHash?: string | undefined;
     messageCount: number;
     branchFingerprint: string;
     lastMessageId?: string | undefined;
@@ -444,12 +657,14 @@ export async function scanAppendedMessages(
   },
   options: ConversationScanOptions = {},
 ): Promise<CaptureDeltaV1 | null> {
+  if (!base.baselineContentHash) return null;
   const sessionId = adapter.getSessionId();
   if (!sessionId) throw new Error("当前页面还没有稳定的对话 Session ID");
   if (adapter.isStreaming()) return null;
   const mounted = adapter.extractVisibleMessages();
   const native = await options.readNative?.(mounted);
   checkActive(adapter, sessionId, options.signal);
+  if (native?.incompleteReason) return null;
   if (adapter.isStreaming()) return null;
   const visible: CaptureMessage[] = native?.messages ?? mounted.map(
     ({ key: _key, element: _element, ...message }) => message,
@@ -505,6 +720,7 @@ export async function scanAppendedMessages(
     capturedAt: new Date().toISOString(),
     triggerReason: options.triggerReason ?? "new_messages",
     ...(base.revisionId ? { baseRevisionId: base.revisionId } : {}),
+    baseContentHash: base.baselineContentHash,
     baseMessageCount: base.messageCount,
     ...(base.lastMessageId ? { baseLastMessageId: base.lastMessageId } : {}),
     ...(base.lastMessageTextHash

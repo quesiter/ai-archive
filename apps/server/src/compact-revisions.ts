@@ -39,6 +39,7 @@ async function candidates(): Promise<Candidate[]> {
     .from(conversationRevisions)
     .where(
       and(
+        eq(conversationRevisions.isAccumulated, false),
         eq(conversationRevisions.captureMode, "append"),
         eq(conversationRevisions.storageKind, "snapshot"),
         isNotNull(conversationRevisions.baseRevisionId),
@@ -53,6 +54,7 @@ async function candidates(): Promise<Candidate[]> {
 
 async function compactCandidate(candidate: Candidate): Promise<number> {
   return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(847231955)`);
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`revision-compaction:${candidate.conversationId}`}, 0))`,
     );
@@ -61,7 +63,7 @@ async function compactCandidate(candidate: Candidate): Promise<number> {
       .from(conversationRevisions)
       .where(eq(conversationRevisions.id, candidate.id))
       .limit(1);
-    if (!revision || revision.storageKind !== "snapshot") return 0;
+    if (!revision || revision.isAccumulated || revision.storageKind !== "snapshot") return 0;
     if (!revision.baseRevisionId || revision.baseMessageCount === null) {
       throw new RevisionNotCompactableError(
         `Revision ${revision.id} is missing its compaction base metadata`,

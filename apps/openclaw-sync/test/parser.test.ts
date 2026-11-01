@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  CLAUDE_CODE_ADAPTER_VERSION,
   EmptyOpenClawTranscriptError,
+  IncompleteClaudeCodeDeltaError,
+  MissingCodexUserMessagesError,
   captureMessageFingerprint,
+  codexParentSessionId,
   parseClaudeCodeJsonl,
   parseCodexJsonl,
   parseLocalJsonlDelta,
@@ -114,6 +118,62 @@ describe("OpenClaw JSONL parser", () => {
 });
 
 describe("Codex JSONL parser", () => {
+  it.each(["compaction", "assistant-only"])("reports %s without user text as skippable", (kind) => {
+    const content = [
+      { type: "session_meta", payload: { id: "without-user" } },
+      kind === "compaction"
+        ? { type: "response_item", payload: { type: "compaction", content: "Summary" } }
+        : { type: "response_item", payload: { type: "message", role: "assistant", content: "Done" } },
+    ].map((record) => JSON.stringify(record)).join("\n");
+    expect(() => parseCodexJsonl({ path: "/tmp/no-user.jsonl", content }))
+      .toThrowError(MissingCodexUserMessagesError);
+    expect(() => parseCodexJsonl({ path: "/tmp/no-user.jsonl", content }))
+      .toThrowError(expect.objectContaining({ sessionId: "without-user" }));
+  });
+
+  it("keeps a spawned agent as a child of its explicit parent", () => {
+    const snapshot = parseCodexJsonl({
+      path: "/repo/child.jsonl",
+      content: [
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "child-thread",
+            cwd: "/repo/homeassistant",
+            source: { subagent: { thread_spawn: { parent_thread_id: "main-thread" } } },
+          },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          payload: { type: "message", role: "user", content: "Inspect the thermostat" },
+        }),
+      ].join("\n"),
+    });
+    expect(snapshot.sessionId).toBe("child-thread");
+    expect(snapshot.parentSessionId).toBe("main-thread");
+    expect(snapshot.messages).toHaveLength(1);
+  });
+
+  it.each([
+    { source: { subagent: { parent_thread_id: "main-thread" } } },
+    { source: { subagent: "review" }, parent_thread_id: "main-thread" },
+  ])("accepts an explicit parent only for a subagent source: %j", (meta) => {
+    expect(codexParentSessionId({ id: "child-thread", ...meta })).toBe("main-thread");
+  });
+
+  it.each([
+    { source: "cli", parent_thread_id: "main-thread" },
+    { source: "vscode", forked_from_id: "main-thread" },
+    { source: "appServer", forked_from_id: "main-thread" },
+    { forked_from_id: "main-thread" },
+    { source: { subagent: null }, parent_thread_id: "main-thread" },
+    { source: { subagent: { thread_spawn: { parent_thread_id: "child-thread" } } } },
+    { source: { subagent: { parent_thread_id: " " } } },
+    { source: { subagent: { parent_thread_id: "p".repeat(1_025) } } },
+  ])("does not infer a child relationship from a fork or invalid metadata: %j", (meta) => {
+    expect(codexParentSessionId({ id: "child-thread", ...meta })).toBeUndefined();
+  });
+
   it("imports local Codex messages under the Codex provider", () => {
     const snapshot = parseCodexJsonl({
       path: "/Users/me/.codex/sessions/2026/07/24/rollout-2026-07-24T22-07-25-thread-1.jsonl",
@@ -178,7 +238,7 @@ describe("Codex JSONL parser", () => {
     expect(snapshot.provider).toBe("codex");
     expect(snapshot.sessionId).toBe("thread-1");
     expect(snapshot.title).toBe("Local Codex task");
-    expect(snapshot.adapterVersion).toBe("codex-jsonl-v5");
+    expect(snapshot.adapterVersion).toBe("codex-jsonl-v6");
     expect(snapshot.messages.map((message) => message.role)).toEqual([
       "user",
       "assistant",
@@ -302,6 +362,91 @@ describe("Claude Code JSONL parser", () => {
       "unknown",
     ]);
     expect(snapshot.messages[2]?.segments[0]?.type).toBe("tool_status");
+    expect(snapshot.adapterVersion).toBe(CLAUDE_CODE_ADAPTER_VERSION);
+    expect(snapshot.completeness).toMatchObject({
+      status: "partial",
+      stable: false,
+      reason: "Transcript contains 1 malformed JSONL record at line 3",
+    });
+  });
+
+  it("reports every damaged middle record without losing later messages or source line numbers", () => {
+    const snapshot = parseClaudeCodeJsonl({
+      path: "/sessions/claude.jsonl",
+      content: [
+        JSON.stringify({ sessionId: "claude-session" }),
+        JSON.stringify({ uuid: "u1", type: "user", message: { role: "user", content: "question" } }),
+        "",
+        '{"sensitiveText":"damaged secret value',
+        JSON.stringify({ type: "progress", elapsed: 2 }),
+        "{damaged again",
+        JSON.stringify({ uuid: "a1", type: "assistant", message: { role: "assistant", content: "answer" } }),
+      ].join("\r\n"),
+    });
+
+    expect(snapshot.messages.map((message) => message.segments[0]?.content)).toEqual(["question", "answer"]);
+    expect(snapshot.messages.map((message) => message.ordinal)).toEqual([0, 1]);
+    expect(snapshot.completeness).toEqual({
+      status: "partial",
+      topReached: true,
+      bottomReached: true,
+      stable: false,
+      reason: "Transcript contains 2 malformed JSONL records at lines 4, 6",
+    });
+    expect(snapshot.completeness.reason).not.toContain("secret value");
+  });
+
+  it("keeps valid mixed event logs complete, including a final record without a newline", () => {
+    const snapshot = parseClaudeCodeJsonl({
+      path: "/sessions/claude.jsonl",
+      content: [
+        JSON.stringify({ sessionId: "claude-session" }),
+        JSON.stringify({ type: "file-history-snapshot", snapshot: { files: [] } }),
+        JSON.stringify({ type: "user", message: { role: "user", content: "question" } }),
+        JSON.stringify({ type: "progress", elapsed: 2 }),
+        JSON.stringify({ type: "assistant", message: { role: "assistant", content: "answer" } }),
+      ].join("\n"),
+    });
+
+    expect(snapshot.messages).toHaveLength(2);
+    expect(snapshot.completeness).toEqual({ status: "complete", topReached: true, bottomReached: true, stable: true });
+  });
+
+  it.each([false, true])("preserves trailing partial record evidence with middle corruption=%s", (middleCorruption) => {
+    const snapshot = parseClaudeCodeJsonl({
+      path: "/sessions/claude.jsonl",
+      content: [
+        JSON.stringify({ sessionId: "claude-session", role: "user", content: "question" }),
+        ...(middleCorruption ? ["{damaged middle"] : []),
+        JSON.stringify({ role: "assistant", content: "answer" }),
+        '{"role":"assistant","content":',
+        "",
+        "  ",
+      ].join("\n"),
+    });
+
+    expect(snapshot.messages).toHaveLength(2);
+    expect(snapshot.completeness.status).toBe("partial");
+    expect(snapshot.completeness.stable).toBe(false);
+    expect(snapshot.completeness.reason).toBe(middleCorruption
+      ? "Transcript contains 1 malformed JSONL record at line 2; Transcript ended with a partial JSONL record"
+      : "Transcript ended with a partial JSONL record");
+  });
+
+  it("bounds malformed-line diagnostics for heavily damaged transcripts", () => {
+    const snapshot = parseClaudeCodeJsonl({
+      path: "/sessions/claude.jsonl",
+      content: [
+        JSON.stringify({ sessionId: "claude-session", role: "user", content: "question" }),
+        ...Array.from({ length: 2_000 }, () => "{damaged"),
+        JSON.stringify({ role: "assistant", content: "answer" }),
+      ].join("\n"),
+    });
+
+    expect(snapshot.completeness.status).toBe("partial");
+    expect(snapshot.completeness.reason).toContain("2000 malformed JSONL records at lines 2, 3");
+    expect(snapshot.completeness.reason).toContain("and 1990 more");
+    expect(snapshot.completeness.reason!.length).toBeLessThanOrEqual(1_000);
   });
 
   it("does not archive credential-looking metadata fields as message text", () => {
@@ -326,6 +471,102 @@ describe("Claude Code JSONL parser", () => {
 });
 
 describe("local JSONL incremental parsing", () => {
+  const claudeDeltaInput = {
+    provider: "claude_code" as const,
+    path: "/sessions/claude.jsonl",
+    base: {
+      sessionId: "claude-session",
+      baselineContentHash: "b".repeat(64),
+      branchFingerprint: "claude-branch-fingerprint",
+      messageCount: 2,
+      lastMessageId: "a1",
+    },
+  };
+
+  it.each([
+    { damagedLines: ["{damaged"], lineNumbers: [2] },
+    { damagedLines: ["{damaged", "{damaged again"], lineNumbers: [2, 3] },
+  ])("requires a full Claude import after damaged middle records: $lineNumbers", ({ damagedLines, lineNumbers }) => {
+    const parse = () => parseLocalJsonlDelta({
+      ...claudeDeltaInput,
+      content: [
+        JSON.stringify({ id: "u2", role: "user", content: "next question" }),
+        ...damagedLines,
+        JSON.stringify({ id: "a2", role: "assistant", content: "next answer" }),
+      ].join("\n"),
+    });
+
+    expect(parse).toThrowError(IncompleteClaudeCodeDeltaError);
+    expect(parse).toThrowError(expect.objectContaining({ malformedLineNumbers: lineNumbers }));
+  });
+
+  it("does not hide damaged Claude records in a tail without messages", () => {
+    expect(() => parseLocalJsonlDelta({
+      ...claudeDeltaInput,
+      content: ["{damaged", JSON.stringify({ type: "progress", elapsed: 2 })].join("\n"),
+    })).toThrowError(IncompleteClaudeCodeDeltaError);
+  });
+
+  it("preserves a valid Claude delta with interleaved event records and a complete final line", () => {
+    const delta = parseLocalJsonlDelta({
+      ...claudeDeltaInput,
+      content: [
+        JSON.stringify({ type: "file-history-snapshot", snapshot: { files: [] } }),
+        JSON.stringify({ id: "u2", role: "user", content: "next question" }),
+        JSON.stringify({ type: "progress", elapsed: 2 }),
+        JSON.stringify({ id: "a2", role: "assistant", content: "next answer" }),
+      ].join("\n"),
+    });
+
+    expect(delta?.adapterVersion).toBe(CLAUDE_CODE_ADAPTER_VERSION);
+    expect(delta?.baseContentHash).toBe(claudeDeltaInput.base.baselineContentHash);
+    expect(delta?.appendedMessages.map((message) => [message.ordinal, message.externalMessageId])).toEqual([[2, "u2"], [3, "a2"]]);
+  });
+
+  it("waits for a trailing incomplete Claude record rather than uploading a shortened delta", () => {
+    expect(parseLocalJsonlDelta({
+      ...claudeDeltaInput,
+      content: [
+        JSON.stringify({ id: "u2", role: "user", content: "next question" }),
+        '{"id":"a2","role":"assistant","content":',
+        "  ",
+      ].join("\n"),
+    })).toBeNull();
+  });
+
+  it("sends a requested parent relationship without replaying transcript messages", () => {
+    const input = {
+      provider: "codex" as const,
+      path: "/repo/child.jsonl",
+      content: "",
+      base: {
+        sessionId: "child-thread",
+        baselineContentHash: "b".repeat(64),
+        parentSessionId: "main-thread",
+        branchFingerprint: "branch-fingerprint-child",
+        messageCount: 40,
+        lastMessageTextHash: "a".repeat(64),
+      },
+    };
+    expect(parseLocalJsonlDelta(input)).toBeNull();
+    expect(parseLocalJsonlDelta({ ...input, includeSessionMetadata: true })).toMatchObject({
+      captureMode: "append",
+      sessionId: "child-thread",
+      parentSessionId: "main-thread",
+      baseMessageCount: 40,
+      appendedMessages: [],
+    });
+    const appended = parseLocalJsonlDelta({
+      ...input,
+      content: JSON.stringify({
+        type: "response_item",
+        payload: { type: "message", role: "assistant", content: "Inspection complete" },
+      }),
+    });
+    expect(appended?.parentSessionId).toBe("main-thread");
+    expect(appended?.appendedMessages).toHaveLength(1);
+  });
+
   it("builds an append delta from only the newly read tail", () => {
     const baseLastMessage = {
       ordinal: 1,
@@ -342,6 +583,7 @@ describe("local JSONL incremental parsing", () => {
       ].join("\n"),
       base: {
         revisionId: "11111111-1111-1111-1111-111111111111",
+        baselineContentHash: "b".repeat(64),
         sessionId: "session-1",
         branchFingerprint: "branch-fingerprint-1",
         messageCount: 2,
@@ -352,11 +594,20 @@ describe("local JSONL incremental parsing", () => {
 
     expect(delta?.captureMode).toBe("append");
     expect(delta?.baseMessageCount).toBe(2);
+    expect(delta?.baseContentHash).toBe("b".repeat(64));
     expect(delta?.appendedMessages.map((message) => message.ordinal)).toEqual([2, 3]);
     expect(delta?.appendedMessages.map((message) => message.externalMessageId)).toEqual([
       "u2",
       "a2",
     ]);
+  });
+
+  it("does not build a delta from a legacy baseline without a server content hash", () => {
+    expect(parseLocalJsonlDelta({
+      provider: "openclaw", path: "/sessions/session.jsonl",
+      content: JSON.stringify({ id: "a2", role: "assistant", content: "New answer" }),
+      base: { sessionId: "session-1", branchFingerprint: "branch-fingerprint-1", messageCount: 2, lastMessageId: "a1" },
+    })).toBeNull();
   });
 
   it("returns null for tails that contain no importable messages", () => {
@@ -366,6 +617,7 @@ describe("local JSONL incremental parsing", () => {
       content: JSON.stringify({ type: "session_meta", payload: { id: "thread-1" } }),
       base: {
         sessionId: "thread-1",
+        baselineContentHash: "b".repeat(64),
         branchFingerprint: "branch-fingerprint-2",
         messageCount: 4,
         lastMessageTextHash: "a".repeat(64),
@@ -396,6 +648,7 @@ describe("local JSONL incremental parsing", () => {
       }),
       base: {
         sessionId: "thread-1",
+        baselineContentHash: "b".repeat(64),
         branchFingerprint: "branch-fingerprint-2",
         messageCount: 4,
         lastMessageTextHash: "a".repeat(64),

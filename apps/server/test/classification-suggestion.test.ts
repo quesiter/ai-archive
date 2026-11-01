@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   classificationCandidateReason,
-  coarseProjectNameFromMaterial,
-  fallbackSuggestedNameFromTitle,
   isLikelyOverSpecificProjectName,
   isRecoverableClassificationAiError,
-  localProjectGuess,
   parseClassificationSuggestion,
   parseTagSuggestions,
   projectRelevanceScore,
@@ -102,36 +99,6 @@ describe("parseTagSuggestions", () => {
   });
 });
 
-describe("localProjectGuess", () => {
-  it("assigns by project name in the conversation title without using AI", () => {
-    const result = localProjectGuess(
-      {
-        title: "腾讯元宝采集仍然识别错误",
-        text: "",
-      },
-      projectRows,
-    );
-
-    expect(result?.projectId).toBe("11111111-1111-1111-1111-111111111111");
-    expect(result?.reason).toBe("local_title_match");
-    expect(result?.usedAi).toBe(false);
-  });
-
-  it("assigns by project name in compact conversation content", () => {
-    const result = localProjectGuess(
-      {
-        title: "同步代理配置",
-        text: "本地 MacBook 上的 OpenClaw 同步代理需要导入 Codex 会话。",
-      },
-      projectRows,
-    );
-
-    expect(result?.projectId).toBe("22222222-2222-2222-2222-222222222222");
-    expect(result?.reason).toBe("local_content_match");
-    expect(result?.usedAi).toBe(false);
-  });
-});
-
 describe("project candidate relevance", () => {
   const candidates = [
     {
@@ -169,23 +136,6 @@ describe("project candidate relevance", () => {
   });
 });
 
-describe("fallbackSuggestedNameFromTitle", () => {
-  it("falls back to coarse categories instead of one-off titles", () => {
-    expect(fallbackSuggestedNameFromTitle("盐水鸭搭配建议")).toBe(
-      "生活消费与饮食出行",
-    );
-    expect(fallbackSuggestedNameFromTitle("SSH密钥交换算法不匹配问题")).toBe(
-      "网络安全与系统运维",
-    );
-  });
-
-  it("ignores empty, untitled, and opaque id-like titles", () => {
-    expect(fallbackSuggestedNameFromTitle("  ")).toBeNull();
-    expect(fallbackSuggestedNameFromTitle("无标题")).toBeNull();
-    expect(fallbackSuggestedNameFromTitle("019f9d356f96761081f88f75c90b6b4e")).toBeNull();
-  });
-});
-
 describe("project granularity", () => {
   it("detects over-specific one-off project names", () => {
     expect(
@@ -197,14 +147,7 @@ describe("project granularity", () => {
     expect(isLikelyOverSpecificProjectName("网络安全与系统运维")).toBe(false);
   });
 
-  it("maps detailed titles into reusable coarse categories", () => {
-    expect(coarseProjectNameFromMaterial("微信零钱通与定期理财产品咨询")).toBe(
-      "金融市场与投资研究",
-    );
-    expect(coarseProjectNameFromMaterial("微信公众号文章配图与发布管理")).toBe(
-      "内容运营与公众号",
-    );
-  });
+
 });
 
 describe("shouldReuseClassification", () => {
@@ -247,6 +190,14 @@ describe("classificationCandidateReason", () => {
   const revisionCapturedAt = new Date("2026-07-25T00:00:00.000Z");
   const freshAssignmentAt = new Date("2026-07-25T00:01:00.000Z");
   const staleAssignmentAt = new Date("2026-07-24T23:59:00.000Z");
+
+  it("invalidates a stable result when an older capture changes the same archive after classification", () => {
+    const archiveUpdatedAt = new Date("2026-07-25T00:02:00.000Z");
+    const input = { projectId: "project", confidence: 0.95, assignmentUpdatedAt: freshAssignmentAt, revisionCapturedAt, archiveUpdatedAt };
+    expect(shouldReuseClassification({ ...input, mode: "economy", reuseStable: true })).toBe(false);
+    expect(classificationCandidateReason({ ...input, scope: "incremental", tagCount: 1 })).toBe("changed");
+    expect(shouldReuseClassification({ ...input, mode: "economy", reuseStable: true, assignmentUpdatedAt: archiveUpdatedAt })).toBe(true);
+  });
 
   it("marks all rows as candidates for explicit full re-evaluation", () => {
     expect(

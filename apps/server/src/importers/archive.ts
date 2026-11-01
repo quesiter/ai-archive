@@ -296,6 +296,7 @@ function chatMemoProvider(value: string | undefined): Provider | undefined {
   }
   if (normalized === "kimi") return "kimi";
   if (normalized === "grok") return "grok";
+  if (["grokbuild", "grokcli", "grokbuildcli", "grokbuilddesktop"].includes(normalized)) return "grok_build";
   if (normalized === "minimax" || normalized === "minimaxagent") return "minimax_agent";
   if (normalized === "openclaw") return "openclaw";
   return undefined;

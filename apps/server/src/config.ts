@@ -99,11 +99,13 @@ const EnvSchema = z
 
 const env = EnvSchema.parse(process.env);
 
-function parseTrustProxy(value: string): boolean | number | string {
+function parseTrustProxy(value: string): boolean | string {
   const normalized = value.trim().toLowerCase();
   if (!normalized || normalized === "false") return false;
   if (normalized === "true") return true;
-  if (/^[1-9]\d*$/.test(normalized)) return Number(normalized);
+  if (/^[0-9]+$/.test(normalized)) {
+    throw new Error("TRUST_PROXY hop counts are no longer supported; configure explicit trusted proxy IP addresses/CIDRs or use false");
+  }
   return value.trim();
 }
 

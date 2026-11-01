@@ -6,9 +6,13 @@ import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promis
 import { homedir, platform, release } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { createGunzip, gzip } from "node:zlib";
-import chokidar from "chokidar";
+import { gzip } from "node:zlib";
 import fg from "fast-glob";
+import { readTranscript } from "./transcript-reader.js";
+import { createTranscriptPathFilter, createTranscriptWatcher } from "./transcript-watcher.js";
+import { scanCodexHistoryLineage, uploadCodexHistoryLineage } from "./codex-history-lineage.js";
+import { AuthenticationRevoked } from "./sync-auth.js";
+import { EmptyGrokBuildTranscriptError, GROK_BUILD_ADAPTER_VERSION, parseGrokBuildUpdates } from "./grok-build.js";
 import { z } from "zod";
 import type {
   CaptureDeltaV1,
@@ -17,7 +21,11 @@ import type {
 } from "@ai-archive/contracts";
 import {
   captureMessageFingerprint,
+  CLAUDE_CODE_ADAPTER_VERSION,
+  codexParentSessionId,
   EmptyOpenClawTranscriptError,
+  IncompleteClaudeCodeDeltaError,
+  MissingCodexUserMessagesError,
   parseClaudeCodeJsonl,
   parseCodexRecords,
   parseLocalJsonlDelta,
@@ -49,8 +57,9 @@ const SAFE_MAX_MESSAGES = 12_000;
 const SAFE_DELAY_MS = 750;
 const BYTES_PER_MIB = 1024 * 1024;
 const MAX_DECOMPRESSED_TRANSCRIPT_BYTES = 200 * BYTES_PER_MIB;
-const SYNC_AGENT_VERSION = "V2.3.1";
+const SYNC_AGENT_VERSION = "V2.4.12";
 const MAX_UPLOAD_ATTEMPTS = 6;
+const CODEX_LINEAGE_VERSION = 1;
 const TRANSCRIPT_IGNORE_PATTERNS = [
   "**/*.bak",
   "**/*.deleted",
@@ -78,18 +87,20 @@ const ConfigSchema = z.object({
   openClawRoot: z.string().default(join(homedir(), ".openclaw")),
   codexRoots: z.array(z.string()).default([]),
   claudeCodeRoots: z.array(z.string()).default([]),
+  grokBuildRoots: z.array(z.string()).default([]),
   scanSeconds: z.number().int().min(15).max(3600).default(60),
 });
 type SyncConfig = z.infer<typeof ConfigSchema>;
 
 interface TranscriptSource {
-  provider: "openclaw" | "codex" | "claude_code";
+  provider: "openclaw" | "codex" | "claude_code" | "grok_build";
   path: string;
   titleBySessionId?: Record<string, string>;
 }
 
 interface LocalFileState {
-  source: "openclaw" | "codex" | "claude_code";
+  source: "openclaw" | "codex" | "claude_code" | "grok_build";
+  adapterVersion?: string | undefined;
   filePath: string;
   fileSize: number;
   modifiedAt: number;
@@ -98,6 +109,8 @@ interface LocalFileState {
   fullFileHash?: string | undefined;
   sessionId?: string | undefined;
   revisionId?: string | undefined;
+  baselineContentHash?: string | undefined;
+  completeness?: "complete" | "partial" | undefined;
   branchFingerprint?: string | undefined;
   messageCount?: number | undefined;
   lastMessageId?: string | undefined;
@@ -105,11 +118,14 @@ interface LocalFileState {
   lastSuccessfulSyncAt?: string | undefined;
   lastSkippedReason?: string | undefined;
   lastSkippedSyncAt?: string | undefined;
+  codexLineageVersion?: number | undefined;
+  parentSessionId?: string | undefined;
 }
 
 interface SyncState {
   files: Record<string, string | LocalFileState>;
   lastReconciliation?: string;
+  codexHistoryLineageVersion?: number;
 }
 
 interface SyncRunOptions {
@@ -137,7 +153,10 @@ function parseJsonText(value: string): unknown {
 }
 
 async function loadConfig(): Promise<SyncConfig> {
-  return ConfigSchema.parse(parseJsonText(await readFile(configPath, "utf8")));
+  const config = ConfigSchema.parse(parseJsonText(await readFile(configPath, "utf8")));
+  const grokRoot = process.env.AI_ARCHIVE_GROK_BUILD_ROOT;
+  if (grokRoot && !config.grokBuildRoots.includes(grokRoot)) config.grokBuildRoots.push(grokRoot);
+  return config;
 }
 
 async function loadState(): Promise<SyncState> {
@@ -277,25 +296,6 @@ async function gzipJson(value: unknown): Promise<ArrayBuffer> {
   ) as ArrayBuffer;
 }
 
-async function readTranscript(path: string): Promise<string> {
-  if (!/\.gz$/i.test(path)) return readFile(path, "utf8");
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
-  const decompressor = createReadStream(path).pipe(createGunzip());
-  for await (const chunk of decompressor) {
-    const buffer = Buffer.from(chunk as Buffer);
-    totalBytes += buffer.length;
-    if (totalBytes > MAX_DECOMPRESSED_TRANSCRIPT_BYTES) {
-      decompressor.destroy();
-      throw new Error(
-        `Decompressed transcript exceeds ${MAX_DECOMPRESSED_TRANSCRIPT_BYTES / BYTES_PER_MIB} MiB`,
-      );
-    }
-    chunks.push(buffer);
-  }
-  return Buffer.concat(chunks, totalBytes).toString("utf8");
-}
-
 async function readTranscriptTail(path: string, start: number): Promise<string> {
   if (start < 0 || !Number.isSafeInteger(start)) {
     throw new Error("Transcript read offset is invalid");
@@ -330,11 +330,15 @@ function hasIncrementalBase(
   sessionId: string;
   branchFingerprint: string;
   messageCount: number;
+  baselineContentHash: string;
 } {
   return (
     isLocalFileState(value) &&
     Boolean(value.sessionId) &&
     Boolean(value.branchFingerprint) &&
+    value.completeness === "complete" &&
+    Boolean(value.baselineContentHash) &&
+    !value.lastSkippedReason &&
     typeof value.messageCount === "number" &&
     Boolean(value.lastMessageId || value.lastMessageTextHash)
   );
@@ -394,25 +398,40 @@ async function parseCodexJsonlFile(source: TranscriptSource, capturedAt: Date) {
   });
 }
 
+async function readCodexParentSessionId(path: string): Promise<string | undefined> {
+  const input = createReadStream(path, { encoding: "utf8" });
+  for await (const line of lfSeparatedLines(input)) {
+    if (!line.trim()) continue;
+    const parsed = JSON.parse(line) as unknown;
+    if (!parsed || typeof parsed !== "object") continue;
+    const record = parsed as Record<string, unknown>;
+    if (record.type === "session_meta") return codexParentSessionId(record.payload);
+  }
+  return undefined;
+}
+
 interface CaptureUploadResult {
   conversationId?: string;
   revisionId?: string;
   messageCount?: number;
   completeness?: "complete" | "partial";
+  baselineContentHash?: string;
+  archiveMessageCount?: number;
+  archiveCompleteness?: "complete" | "partial";
   captureMode?: "full" | "append" | "import";
+}
+
+function uploadCountSummary(sourceCount: number, result: CaptureUploadResult): string {
+  const captured = result.messageCount ?? sourceCount;
+  return result.archiveMessageCount === undefined
+    ? `${captured} messages`
+    : `${captured} source messages; ${result.archiveMessageCount} archived (${result.archiveCompleteness ?? "partial"})`;
 }
 
 class IncrementalBaseMismatch extends Error {
   constructor(message = "Incremental base mismatch") {
     super(message);
     this.name = "IncrementalBaseMismatch";
-  }
-}
-
-class AuthenticationRevoked extends Error {
-  constructor() {
-    super("AUTH_REVOKED: device authorization is invalid; pair this agent again");
-    this.name = "AuthenticationRevoked";
   }
 }
 
@@ -430,6 +449,16 @@ class CaptureUploadError extends Error {
 function formatError(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
   return error.stack ?? error.message;
+}
+
+function warnRecoverableError(error: unknown): void {
+  if (error instanceof AuthenticationRevoked) throw error;
+  console.warn(formatError(error));
+}
+
+function reportAuthenticationRevoked(error: AuthenticationRevoked): void {
+  console.error(error.message);
+  process.exitCode = process.argv.includes("--auth-revoked-exit-success") ? 0 : 3;
 }
 
 function textFromHtmlResponse(value: string): string {
@@ -493,6 +522,10 @@ async function sendCaptureOnce(
     },
     body: await gzipJson(payload),
   });
+  if (response.status === 401) {
+    void response.body?.cancel().catch(() => undefined);
+    throw new AuthenticationRevoked();
+  }
   const rawBody = await response.text();
   const body = (() => {
     try {
@@ -506,7 +539,6 @@ async function sendCaptureOnce(
     requiresFullCapture?: boolean;
   } & CaptureUploadResult;
   if (!response.ok) {
-    if (response.status === 401) throw new AuthenticationRevoked();
     if (response.status === 409 && body.requiresFullCapture) {
       throw new IncrementalBaseMismatch(body.error);
     }
@@ -598,13 +630,24 @@ function stateFromSnapshot(input: {
   const lastMessage = input.snapshot.messages.at(-1);
   return {
     source: input.source.provider,
+    adapterVersion: input.snapshot.adapterVersion,
     filePath: input.source.path,
     fileSize: Number(input.metadata.size),
     modifiedAt: Number(input.metadata.mtimeMs),
     readOffset: Number(input.metadata.size),
     ...(input.fullFileHash ? { fullFileHash: input.fullFileHash } : {}),
     sessionId: input.snapshot.sessionId,
+    ...(input.source.provider === "codex"
+      ? {
+          codexLineageVersion: CODEX_LINEAGE_VERSION,
+          parentSessionId: input.snapshot.parentSessionId,
+        }
+      : {}),
     ...(input.result.revisionId ? { revisionId: input.result.revisionId } : {}),
+    completeness: input.result.completeness ?? input.snapshot.completeness.status,
+    ...(input.snapshot.completeness.status === "complete" && input.result.completeness === "complete" &&
+        input.result.baselineContentHash && (input.result.messageCount ?? input.snapshot.messages.length) === input.snapshot.messages.length
+      ? { baselineContentHash: input.result.baselineContentHash } : {}),
     branchFingerprint: input.snapshot.branchFingerprint,
     messageCount: input.result.messageCount ?? input.snapshot.messages.length,
     ...(lastMessage?.externalMessageId ? { lastMessageId: lastMessage.externalMessageId } : {}),
@@ -625,6 +668,7 @@ function stateFromDelta(input: {
   return {
     ...input.previous,
     source: input.source.provider,
+    adapterVersion: input.delta.adapterVersion,
     filePath: input.source.path,
     fileSize: Number(input.metadata.size),
     modifiedAt: Number(input.metadata.mtimeMs),
@@ -632,7 +676,17 @@ function stateFromDelta(input: {
     lastLineHash: input.tailHash,
     fullFileHash: undefined,
     sessionId: input.delta.sessionId,
+    ...(input.source.provider === "codex"
+      ? {
+          codexLineageVersion: CODEX_LINEAGE_VERSION,
+          parentSessionId: input.delta.parentSessionId,
+        }
+      : {}),
     revisionId: input.result.revisionId ?? input.previous.revisionId,
+    completeness: input.result.completeness,
+    baselineContentHash: input.result.completeness === "complete" &&
+      (input.result.messageCount ?? input.delta.baseMessageCount + input.delta.appendedMessages.length) === input.delta.baseMessageCount + input.delta.appendedMessages.length
+      ? input.result.baselineContentHash : undefined,
     branchFingerprint: input.delta.branchFingerprint,
     messageCount:
       input.result.messageCount ??
@@ -645,6 +699,15 @@ function stateFromDelta(input: {
   };
 }
 
+async function readGrokBuildSummary(path: string): Promise<unknown> {
+  try {
+    const summaryPath = join(dirname(path), "summary.json");
+    const metadata = await lstat(summaryPath);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > BYTES_PER_MIB) return undefined;
+    return parseJsonText(await readFile(summaryPath, "utf8"));
+  } catch { return undefined; }
+}
+
 async function upload(
   source: TranscriptSource,
   config: SyncConfig,
@@ -655,8 +718,35 @@ async function upload(
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error("Transcript path must be a regular file, not a symbolic link");
   }
-  const previous = state.files[source.path];
+  let previous = state.files[source.path];
+  const adapterVersion = source.provider === "claude_code" ? CLAUDE_CODE_ADAPTER_VERSION
+    : source.provider === "grok_build" ? GROK_BUILD_ADAPTER_VERSION : undefined;
+  const adapterNeedsSync = adapterVersion !== undefined &&
+    (typeof previous !== "object" || previous.adapterVersion !== adapterVersion);
+  let lineageNeedsSync = false;
+  let lineageState: Pick<LocalFileState, "codexLineageVersion" | "parentSessionId"> = {};
+  if (source.provider === "codex" && previous) {
+    lineageState = {
+      codexLineageVersion: CODEX_LINEAGE_VERSION,
+      parentSessionId: typeof previous === "object" ? previous.parentSessionId : undefined,
+    };
+    if (typeof previous !== "object" || previous.codexLineageVersion !== CODEX_LINEAGE_VERSION) {
+      lineageState.parentSessionId = await readCodexParentSessionId(source.path);
+      lineageNeedsSync = Boolean(lineageState.parentSessionId);
+      if (typeof previous === "object") {
+        previous = { ...previous, ...lineageState };
+        // Root sessions have no relationship to upload. Children are marked current
+        // only after a successful capture, so a failed backfill is retried.
+        if (!lineageNeedsSync) {
+          state.files[source.path] = previous;
+          await saveJson(statePath, state);
+        }
+      }
+    }
+  }
   if (
+    !lineageNeedsSync &&
+    !adapterNeedsSync &&
     typeof previous === "object" &&
     previous.fileSize === metadata.size &&
     previous.modifiedAt === metadata.mtimeMs &&
@@ -665,38 +755,52 @@ async function upload(
     return;
   }
   if (
-    hasIncrementalBase(previous) &&
+    source.provider !== "grok_build" && !adapterNeedsSync && hasIncrementalBase(previous) &&
     source.provider === previous.source &&
     !/\.gz$/i.test(source.path) &&
-    metadata.size > previous.readOffset &&
+    (metadata.size > previous.readOffset ||
+      (lineageNeedsSync && metadata.size === previous.readOffset)) &&
     metadata.size >= previous.fileSize
   ) {
     const tail = await readTranscriptTail(source.path, previous.readOffset);
     if (!tailHasCompleteLastRecord(tail)) return;
     const tailHash = createHash("sha256").update(tail).digest("hex");
-    const delta = parseLocalJsonlDelta({
-      provider: source.provider,
-      path: source.path,
-      content: tail,
-      capturedAt: observedCaptureTime({
+    let delta: CaptureDeltaV1 | null = null;
+    let requiresFullSnapshot = false;
+    try {
+      delta = parseLocalJsonlDelta({
         provider: source.provider,
-        fileModifiedAt: metadata.mtime,
-        hasPreviousSync: true,
-      }),
-      triggerReason: "local_file_appended",
-      base: {
-        revisionId: previous.revisionId,
-        sessionId: previous.sessionId,
-        branchFingerprint: previous.branchFingerprint,
-        messageCount: previous.messageCount,
-        lastMessageId: previous.lastMessageId,
-        lastMessageTextHash: previous.lastMessageTextHash,
-      },
-    });
+        path: source.path,
+        content: tail,
+        capturedAt: observedCaptureTime({
+          provider: source.provider,
+          fileModifiedAt: metadata.mtime,
+          hasPreviousSync: true,
+        }),
+        triggerReason: "local_file_appended",
+        includeSessionMetadata: lineageNeedsSync,
+        base: {
+          revisionId: previous.revisionId,
+          baselineContentHash: previous.baselineContentHash,
+          sessionId: previous.sessionId,
+          parentSessionId: previous.parentSessionId,
+          branchFingerprint: previous.branchFingerprint,
+          messageCount: previous.messageCount,
+          lastMessageId: previous.lastMessageId,
+          lastMessageTextHash: previous.lastMessageTextHash,
+        },
+      });
+    } catch (error) {
+      if (!(error instanceof IncompleteClaudeCodeDeltaError)) throw error;
+      // Append captures cannot express partial coverage. Re-read the full
+      // transcript so the missing lines remain visible as incomplete evidence.
+      requiresFullSnapshot = true;
+    }
     if (delta) {
       const projectedMessageCount = delta.baseMessageCount + delta.appendedMessages.length;
       if (
         !options.includeLarge &&
+        delta.appendedMessages.length > 0 &&
         options.maxMessages !== undefined &&
         projectedMessageCount > options.maxMessages
       ) {
@@ -735,13 +839,13 @@ async function upload(
         });
         await saveJson(statePath, state);
         console.log(
-          `synced ${delta.provider}:${delta.sessionId} (+${delta.appendedMessages.length} messages)`,
+          `synced ${delta.provider}:${delta.sessionId} (+${delta.appendedMessages.length} messages; ${uploadCountSummary(projectedMessageCount, result)})`,
         );
         return;
       } catch (error) {
         if (!(error instanceof IncrementalBaseMismatch)) throw error;
       }
-    } else {
+    } else if (!requiresFullSnapshot) {
       state.files[source.path] = {
         ...previous,
         source: source.provider,
@@ -758,12 +862,12 @@ async function upload(
   const content =
     source.provider === "codex"
       ? ""
-      : await readTranscript(source.path);
+      : await readTranscript(source.path, MAX_DECOMPRESSED_TRANSCRIPT_BYTES);
   const hash =
     source.provider === "codex"
       ? await fileHash(source.path)
       : createHash("sha256").update(content).digest("hex");
-  if (stateHash(previous) === hash) {
+  if (!lineageNeedsSync && !adapterNeedsSync && stateHash(previous) === hash) {
     state.files[source.path] = {
       ...(typeof previous === "object" ? previous : {}),
       source: source.provider,
@@ -772,6 +876,7 @@ async function upload(
       modifiedAt: metadata.mtimeMs,
       readOffset: metadata.size,
       fullFileHash: hash,
+      ...lineageState,
     };
     await saveJson(statePath, state);
     return;
@@ -790,6 +895,9 @@ async function upload(
     snapshot =
       source.provider === "codex"
         ? await parseCodexJsonlFile(source, capturedAt)
+        : source.provider === "grok_build"
+          ? parseGrokBuildUpdates({ path: source.path, content, capturedAt,
+              summary: await readGrokBuildSummary(source.path) })
         : source.provider === "claude_code"
           ? parseClaudeCodeJsonl({
               path: source.path,
@@ -802,8 +910,12 @@ async function upload(
               capturedAt,
             });
   } catch (error) {
-    if (!(error instanceof EmptyOpenClawTranscriptError)) throw error;
-    const reason = "no textual messages";
+    if (!(error instanceof EmptyOpenClawTranscriptError) &&
+        !(error instanceof EmptyGrokBuildTranscriptError) &&
+        !(error instanceof MissingCodexUserMessagesError)) throw error;
+    const reason = error instanceof MissingCodexUserMessagesError || error instanceof EmptyGrokBuildTranscriptError
+      ? "no textual user messages"
+      : "no textual messages";
     state.files[source.path] = {
       source: source.provider,
       filePath: source.path,
@@ -812,11 +924,12 @@ async function upload(
       readOffset: Number(metadata.size),
       fullFileHash: hash,
       sessionId: error.sessionId,
+      ...(source.provider === "codex" ? { codexLineageVersion: CODEX_LINEAGE_VERSION } : {}),
       lastSkippedReason: reason,
       lastSkippedSyncAt: new Date().toISOString(),
     };
     await saveJson(statePath, state);
-    console.warn(`skipped openclaw:${error.sessionId}: ${reason}`);
+    console.warn(`skipped ${source.provider}:${error.sessionId}: ${reason}`);
     return;
   }
   snapshot.captureMode = "import";
@@ -829,11 +942,15 @@ async function upload(
     const reason = `message count ${snapshot.messages.length} exceeds safe max ${options.maxMessages}`;
     state.files[source.path] = {
       source: source.provider,
+      adapterVersion: snapshot.adapterVersion,
       filePath: source.path,
       fileSize: Number(metadata.size),
       modifiedAt: Number(metadata.mtimeMs),
       readOffset: Number(metadata.size),
       sessionId: snapshot.sessionId,
+      ...(source.provider === "codex"
+        ? { codexLineageVersion: CODEX_LINEAGE_VERSION, parentSessionId: snapshot.parentSessionId }
+        : {}),
       branchFingerprint: snapshot.branchFingerprint,
       messageCount: snapshot.messages.length,
       lastSkippedReason: reason,
@@ -859,7 +976,7 @@ async function upload(
     fullFileHash: hash,
   });
   await saveJson(statePath, state);
-  console.log(`synced ${snapshot.provider}:${snapshot.sessionId} (${snapshot.messages.length} messages)`);
+  console.log(`synced ${snapshot.provider}:${snapshot.sessionId} (${uploadCountSummary(snapshot.messages.length, result)})`);
 }
 
 async function codexTitleIndex(root: string): Promise<Record<string, string>> {
@@ -1034,7 +1151,15 @@ async function transcriptFiles(
     }).catch(() => []);
     sources.push(...files.map((path) => ({ provider: "claude_code" as const, path })));
   }
-  return filterTranscriptFiles(sources, options);
+  for (const root of config.grokBuildRoots) {
+    const files = await fg("sessions/*/*/updates.jsonl", {
+      cwd: root, absolute: true, onlyFiles: true, followSymbolicLinks: false,
+      ignore: TRANSCRIPT_IGNORE_PATTERNS,
+    }).catch(() => []);
+    sources.push(...files.map((path) => ({ provider: "grok_build" as const, path })));
+  }
+  const allowedSource = createTranscriptPathFilter(config);
+  return filterTranscriptFiles(sources.filter((source) => allowedSource(source.provider, source.path)), options);
 }
 
 async function reconcileOpenClawCli(state: SyncState): Promise<void> {
@@ -1067,36 +1192,44 @@ async function reconcileOpenClawCli(state: SyncState): Promise<void> {
   }
 }
 
+async function reconcileCodexHistoryLineage(config: SyncConfig, state: SyncState): Promise<void> {
+  if (state.codexHistoryLineageVersion === 1 || !config.codexRoots.length) return;
+  const scan = await scanCodexHistoryLineage(config.codexRoots);
+  if (scan.conflicts.length) throw new Error(`Conflicting Codex history metadata for ${scan.conflicts.length} sessions`);
+  const result = await uploadCodexHistoryLineage({ ...config, relations: scan.relations });
+  if (result.rejected) throw new Error(`Codex history lineage rejected ${result.rejected} cyclic relations`);
+  state.codexHistoryLineageVersion = 1;
+  await saveJson(statePath, state);
+  console.log(`Codex history lineage: checked ${scan.files} files without age/size/count limits; updated ${result.updated}, unchanged ${result.unchanged}, not archived ${result.notFound}.`);
+}
+
 async function run(args: string[]): Promise<void> {
   const config = await loadConfig();
   const state = await loadState();
   const options = parseSyncOptions(args);
   await logVersionHandshake(config.serverUrl);
   console.log(formatLimitSummary(options));
+  let stopping = false;
   const scan = createCoalescedRunner(async () => {
-    const sources = await transcriptFiles(config, options);
-    let lastError: { at: string; code: string } | undefined;
-    let authRevoked = false;
-    for (const source of sources) {
-      try {
-        await upload(source, config, state, options);
-      } catch (error) {
-        const code = error instanceof AuthenticationRevoked
-          ? "AUTH_REVOKED"
-          : error instanceof CaptureUploadError && error.status
+    if (stopping) return;
+    try {
+      await reconcileCodexHistoryLineage(config, state).catch(warnRecoverableError);
+      const sources = await transcriptFiles(config, options);
+      let lastError: { at: string; code: string } | undefined;
+      for (const source of sources) {
+        try {
+          await upload(source, config, state, options);
+        } catch (error) {
+          if (error instanceof AuthenticationRevoked) throw error;
+          const code = error instanceof CaptureUploadError && error.status
             ? `HTTP_${error.status}`
             : "SYNC_FAILED";
-        lastError = { at: new Date().toISOString(), code };
-        console.error(`sync failed for ${source.provider}:${source.path}:\n${formatError(error)}`);
-        if (error instanceof AuthenticationRevoked) {
-          authRevoked = true;
-          break;
+          lastError = { at: new Date().toISOString(), code };
+          console.error(`sync failed for ${source.provider}:${source.path}:\n${formatError(error)}`);
         }
+        if (options.delayMs > 0) await delay(options.delayMs);
       }
-      if (options.delayMs > 0) await delay(options.delayMs);
-    }
-    await reconcileOpenClawCli(state);
-    if (!authRevoked) {
+      await reconcileOpenClawCli(state);
       const skippedFiles = Object.values(state.files).filter(
         (value) => typeof value === "object" && Boolean(value.lastSkippedReason),
       ).length;
@@ -1106,7 +1239,10 @@ async function run(args: string[]): Promise<void> {
         trackedFiles: sources.length,
         skippedFiles,
         ...(lastError ? { lastError } : {}),
-      }).catch((error) => console.warn(formatError(error)));
+      }).catch(warnRecoverableError);
+    } catch (error) {
+      if (error instanceof AuthenticationRevoked) stopping = true;
+      throw error;
     }
   });
   if (options.skipInitialScan) {
@@ -1114,38 +1250,44 @@ async function run(args: string[]): Promise<void> {
   } else {
     await scan();
   }
-  const watchPaths = [
-    join(config.openClawRoot, "agents/*/sessions/*.jsonl{,.*}"),
-    ...config.codexRoots.flatMap((root) => [
-      join(root, "sessions/**/*.jsonl"),
-      join(root, "archived_sessions/*.jsonl"),
-      join(root, "session_index.jsonl"),
-    ]),
-    ...config.claudeCodeRoots.flatMap((root) => [
-      join(root, "**/*.jsonl"),
-      join(root, "**/*.jsonl.*"),
-    ]),
-  ];
-  const watcher = chokidar.watch(
-    watchPaths,
-    { ignoreInitial: true, awaitWriteFinish: { stabilityThreshold: 1_000, pollInterval: 200 } },
-  );
-  watcher.on("add", () => void scan());
-  watcher.on("change", () => void scan());
-  const timer = options.skipInitialScan
-    ? null
-    : setInterval(() => void scan(), config.scanSeconds * 1_000);
+  const watcher = await createTranscriptWatcher(config);
+  let timer: ReturnType<typeof setInterval> | null = null;
   const shutdown = async () => {
+    stopping = true;
     if (timer) clearInterval(timer);
     await watcher.close();
   };
+  const scanInBackground = () => {
+    void scan().catch(async (error: unknown) => {
+      if (error instanceof AuthenticationRevoked) {
+        await shutdown();
+        reportAuthenticationRevoked(error);
+      } else {
+        console.error(formatError(error));
+      }
+    });
+  };
+  watcher.on("add", scanInBackground);
+  watcher.on("change", scanInBackground);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      watcher.once("ready", resolve);
+      watcher.once("error", reject);
+    });
+  } catch (error) {
+    await shutdown();
+    throw error;
+  }
+  watcher.on("error", (error) => console.error(`Transcript watcher failed: ${formatError(error)}`));
+  if (!options.skipInitialScan) timer = setInterval(scanInBackground, config.scanSeconds * 1_000);
   process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
   process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
   console.log(
     `OpenClaw/Codex sync watching ${[
-    config.openClawRoot,
-    ...config.codexRoots,
-    ...config.claudeCodeRoots,
+      config.openClawRoot,
+      ...config.codexRoots,
+      ...config.claudeCodeRoots,
+      ...config.grokBuildRoots,
     ].join(", ")}`,
   );
 }
@@ -1154,6 +1296,7 @@ async function rebuild(args: string[]): Promise<void> {
   const config = await loadConfig();
   const options = parseSyncOptions(args);
   const state: SyncState = options.resetState ? { files: {} } : await loadState();
+  await reconcileCodexHistoryLineage(config, state).catch(warnRecoverableError);
   const files = await transcriptFiles(config, options);
   let failed = 0;
   await logVersionHandshake(config.serverUrl);
@@ -1163,6 +1306,7 @@ async function rebuild(args: string[]): Promise<void> {
     try {
       await upload(source, config, state, options);
     } catch (error) {
+      if (error instanceof AuthenticationRevoked) throw error;
       failed += 1;
       console.error(`sync failed for ${source.provider}:${source.path}:\n${formatError(error)}`);
     }
@@ -1178,7 +1322,7 @@ async function rebuild(args: string[]): Promise<void> {
     trackedFiles: files.length,
     skippedFiles,
     ...(failed ? { lastError: { at: new Date().toISOString(), code: "SYNC_FAILED" } } : {}),
-  }).catch((error) => console.warn(formatError(error)));
+  }).catch(warnRecoverableError);
   console.log(
     `Rebuild completed from ${files.length} eligible transcript files${failed ? ` (${failed} failed)` : ""}`,
   );
@@ -1215,30 +1359,35 @@ async function logVersionHandshake(serverUrl: string): Promise<void> {
 }
 
 async function pair(args: string[]): Promise<void> {
+  const preserveConfig = hasFlag(args, "preserve-config");
+  const previousRaw = preserveConfig
+    ? parseJsonText(await readFile(configPath, "utf8")) as Record<string, unknown>
+    : {};
+  const previous = preserveConfig ? ConfigSchema.parse(previousRaw) : undefined;
   const optionValues = (name: string) =>
     args.flatMap((value, index) =>
       value === `--${name}` && args[index + 1] ? [args[index + 1]!] : [],
     );
-  const values = Object.fromEntries(
-    args.flatMap((value, index) =>
-      value.startsWith("--") && args[index + 1]
-        ? [[value.slice(2), args[index + 1]!]]
-        : [],
-    ),
-  );
-  const serverUrl = values.server;
-  const code = values.code;
-  const openClawRoot = values["openclaw-root"] ?? join(homedir(), ".openclaw");
-  const codexRoots = [
+  const serverUrl = optionValue(args, "server") ?? previous?.serverUrl;
+  const code = optionValue(args, "code")?.trim();
+  const openClawRoot = optionValue(args, "openclaw-root") ?? previous?.openClawRoot ?? join(homedir(), ".openclaw");
+  const requestedCodexRoots = [
     ...optionValues("codex-root"),
     ...(args.includes("--with-codex") ? [join(homedir(), ".codex")] : []),
   ];
-  const claudeCodeRoots = [
+  const requestedClaudeCodeRoots = [
     ...optionValues("claude-code-root"),
     ...(args.includes("--with-claude-code")
       ? [join(homedir(), ".claude"), join(homedir(), ".config", "claude")]
       : []),
   ];
+  const codexRoots = requestedCodexRoots.length ? requestedCodexRoots : previous?.codexRoots ?? [];
+  const claudeCodeRoots = requestedClaudeCodeRoots.length ? requestedClaudeCodeRoots : previous?.claudeCodeRoots ?? [];
+  const requestedGrokBuildRoots = [
+    ...optionValues("grok-build-root"),
+    ...(args.includes("--with-grok-build") ? [process.env.GROK_HOME ?? join(homedir(), ".grok")] : []),
+  ];
+  const grokBuildRoots = requestedGrokBuildRoots.length ? requestedGrokBuildRoots : previous?.grokBuildRoots ?? [];
   if (!serverUrl || !code) {
     throw new Error(
       "Usage: pair --server https://archive.example.com --code ABCD1234 [--openclaw-root /path/to/.openclaw] [--with-codex | --codex-root /path/to/.codex]",
@@ -1259,15 +1408,19 @@ async function pair(args: string[]): Promise<void> {
   if (!response.ok || !payload.deviceId || !payload.token) {
     throw new Error(payload.error ?? "Pairing failed");
   }
-  await saveJson(configPath, {
+  const nextConfig = {
+    ...previousRaw,
     serverUrl: normalizedUrl,
     deviceId: payload.deviceId,
     deviceToken: payload.token,
     openClawRoot,
     codexRoots,
     claudeCodeRoots,
-    scanSeconds: 60,
-  });
+    ...(!preserveConfig || requestedGrokBuildRoots.length || "grokBuildRoots" in previousRaw ? { grokBuildRoots } : {}),
+    scanSeconds: previous?.scanSeconds ?? 60,
+  };
+  ConfigSchema.parse(nextConfig);
+  await saveJson(configPath, nextConfig);
   console.log(`Paired device ${payload.deviceId}; config written to ${configPath}`);
 }
 
@@ -1275,7 +1428,8 @@ function printUsage(): void {
   console.log(`知言归藏本地同步 ${SYNC_AGENT_VERSION}
 
 Usage:
-  ai-archive-openclaw-sync pair --server https://archive.example.com --code ABCD1234 [--openclaw-root /path/to/.openclaw] [--with-codex | --codex-root /path/to/.codex]
+  ai-archive-openclaw-sync pair --server https://archive.example.com --code ABCD1234 [--openclaw-root /path/to/.openclaw] [--with-codex | --codex-root /path/to/.codex] [--with-grok-build | --grok-build-root /path/to/.grok]
+  ai-archive-openclaw-sync pair --preserve-config --code ABCD1234
   ai-archive-openclaw-sync run [--recent-days 14] [--skip-initial-scan]
   ai-archive-openclaw-sync rebuild [--recent-days 14] [--max-files 500]
   ai-archive-openclaw-sync rebuild --recent-days 0 --max-files 0
@@ -1303,6 +1457,10 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
+  if (error instanceof AuthenticationRevoked) {
+    reportAuthenticationRevoked(error);
+    return;
+  }
   console.error(error instanceof Error ? error.message : error);
   process.exitCode = 1;
 });

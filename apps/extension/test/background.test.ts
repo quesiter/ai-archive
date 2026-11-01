@@ -6,6 +6,8 @@ import type { ExtensionMessage } from "../lib/messages";
 
 const outbox = vi.hoisted(() => ({ records: new Map<string, { id: string; payload: CapturePayloadV1; attempts: number }>() }));
 vi.mock("wxt/utils/define-background", () => ({ defineBackground: (main: () => void) => ({ main }) }));
+vi.mock("../lib/batch-background", () => ({ startBatchBackground: vi.fn() }));
+vi.mock("../lib/device-heartbeat", () => ({ startDeviceHeartbeat: vi.fn() }));
 vi.mock("../lib/packaged-origin", () => ({ packagedServerOrigin: () => "https://archive.example" }));
 vi.mock("../lib/outbox", () => ({
   enqueue: async (payload: CapturePayloadV1) => {
@@ -66,6 +68,22 @@ beforeEach(async () => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("upload results stay tied to the requesting conversation", () => {
+  it("passes the source baseline hash and separate archive counts through the upload receipt", async () => {
+    fetchMock.mockResolvedValue(Response.json({ revisionId: "source-revision", messageCount: 2, completeness: "complete",
+      baselineContentHash: "a".repeat(64), archiveMessageCount: 2, archiveCompleteness: "complete" }));
+    const result = await send({ type: "enqueueCapture", payload: snapshot("source") });
+    expect(result.lastResult).toMatchObject({ messageCount: 2, completeness: "complete", baselineContentHash: "a".repeat(64), archiveMessageCount: 2 });
+    fetchMock.mockResolvedValue(Response.json({ revisionId: "archive-revision", messageCount: 2, completeness: "partial", archiveMessageCount: 40, archiveCompleteness: "complete" }));
+    const partialSnapshot = snapshot("partial-source");
+    const partialResult = await send({ type: "enqueueCapture", payload: partialSnapshot });
+    expect(statuses.at(-1)).toMatchObject({ status: "complete", messageCount: 2, archiveMessageCount: 40, archiveCompleteness: "complete" });
+    expect(statuses.at(-1)?.message).toBe("本次保存 2 条消息，累计归档 40 条（完整）");
+    expect(partialResult.lastResult).toMatchObject({ completeness: "partial", messageCount: 2, archiveMessageCount: 40 });
+    expect(partialResult.lastResult).not.toHaveProperty("baselineContentHash");
+    expect(partialSnapshot.completeness.status).toBe("partial");
+    const sentPayload = JSON.parse(await (fetchMock.mock.calls.at(-1)![1]!.body as Blob).text()) as CaptureSnapshotV1;
+    expect(sentPayload.completeness.status).toBe("partial");
+  });
   it("serializes concurrent tabs and returns each tab its own revision", async () => {
     let active = 0;
     let peak = 0;

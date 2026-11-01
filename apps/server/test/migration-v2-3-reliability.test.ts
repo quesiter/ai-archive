@@ -17,17 +17,17 @@ describe("V2.3 long-term reliability migration", () => {
     expect(sql).toMatch(/rebuilding_search/i);
   });
 
-  it("registers every migration through 0022 in order", async () => {
+  it("registers every migration through 0030 in order", async () => {
     const journal = JSON.parse(await readFile(
       new URL("../migrations/meta/_journal.json", import.meta.url),
       "utf8",
     )) as { entries: Array<{ idx: number; tag: string }> };
     expect(journal.entries.at(-1)).toMatchObject({
-      idx: 22,
-      tag: "0022_tag_identity_hardening",
+      idx: 30,
+      tag: "0030_streamed_search_terms",
     });
     expect(journal.entries.map((entry) => entry.idx)).toEqual(
-      Array.from({ length: 23 }, (_, index) => index),
+      Array.from({ length: 31 }, (_, index) => index),
     );
   });
 
@@ -41,6 +41,16 @@ describe("V2.3 long-term reliability migration", () => {
     expect(sql).toMatch(/payload_identity_hash text/i);
     expect(sql).toMatch(/DROP INDEX IF EXISTS conversation_revision_snapshot_uidx/i);
     expect(sql).not.toMatch(/UPDATE conversation_revisions/i);
+  });
+
+  it("adds accumulated-body and receipt fields without modifying old body rows", async () => {
+    const sql = await readFile(new URL("../migrations/0024_accumulated_conversations.sql", import.meta.url), "utf8");
+    expect(sql).toMatch(/is_accumulated boolean not null default false/i);
+    expect(sql).toMatch(/unique index.*conversation_id\).*where is_accumulated/i);
+    expect(sql).toMatch(/merge_evidence jsonb not null default/i);
+    expect(sql).toMatch(/request_hash text/i);
+    expect(sql).toMatch(/receipt jsonb/i);
+    expect(sql).not.toMatch(/delete from|update conversation_revisions/i);
   });
 
   it("keeps post-commit restore failures in maintenance mode and tracks staged cleanup", async () => {

@@ -4,6 +4,7 @@ export type ConversationListQuery = {
   q: string;
   provider: string;
   source: string;
+  sourceDevice?: string;
   completeness: string;
   captureMode: string;
   projectId: string;
@@ -16,6 +17,7 @@ const conversationListFilterKeys = [
   "q",
   "provider",
   "source",
+  "sourceDevice",
   "completeness",
   "captureMode",
   "projectId",
@@ -64,6 +66,7 @@ export function buildConversationListSearch(query: ConversationListQuery): strin
     ...(query.q ? { q: query.q } : {}),
     ...(query.provider ? { provider: query.provider } : {}),
     ...(query.source ? { source: query.source } : {}),
+    ...(query.sourceDevice ? { sourceDevice: query.sourceDevice } : {}),
     ...(query.completeness ? { completeness: query.completeness } : {}),
     ...(query.captureMode ? { captureMode: query.captureMode } : {}),
     ...(query.projectId ? { projectId: query.projectId } : {}),

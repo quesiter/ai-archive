@@ -1,0 +1,298 @@
+{
+  "version": "V2.4.12",
+  "verifiedAt": "2026-11-01T08:30:25.407969+00:00",
+  "production": "https://ai-archive.cuizhaoyang.cn",
+  "image": "ai-conversation-archive:v2412-20261101-final",
+  "imageId": "sha256:0b32d8977b492387d0a40dedc174ab5acf1290fa3c11e99834e74b1e1b44dca7",
+  "sourcePackageSha256": "8968a3e64491034e1b3da8a7e61c22e4ea3eed3cd49ddff2849e86554fe42566",
+  "health": "healthy",
+  "homepageStatus": 200,
+  "coreCountsBeforeAfterEqual": true,
+  "data": {
+    "migrations": 31,
+    "conversations": 3811,
+    "messages": 935124,
+    "searchMetadataRows": 3811,
+    "pendingTermDocuments": 0,
+    "fullContentColumnPresent": false,
+    "packedTermsColumnPresent": false,
+    "metadataTotalBytes": 352256,
+    "postingsTotalBytes": 943497216
+  },
+  "postingCount": 9435774,
+  "matchSetsIdentical": true,
+  "matchSets": [
+    {
+      "query": "项目",
+      "total": 1432,
+      "idCount": 1432,
+      "sha256": "ac1095cc716d8411eea7b8bc76ddd7492e0c72bbd91226bec66048885e525cd7"
+    },
+    {
+      "query": "归档项目",
+      "total": 11,
+      "idCount": 11,
+      "sha256": "128bab41a89cd5a87fcf9b070129fb0f8939b9431400e20ddc9f2655a8b56e82"
+    }
+  ],
+  "qualification": {
+    "passed": true,
+    "tests": 1341,
+    "files": 144,
+    "checks": [
+      {
+        "id": "release",
+        "status": "PASS"
+      },
+      {
+        "id": "typecheck",
+        "status": "PASS"
+      },
+      {
+        "id": "unit",
+        "status": "PASS"
+      },
+      {
+        "id": "docs",
+        "status": "PASS"
+      },
+      {
+        "id": "packaging",
+        "status": "PASS"
+      },
+      {
+        "id": "launchers",
+        "status": "PASS"
+      },
+      {
+        "id": "audit",
+        "status": "PASS"
+      },
+      {
+        "id": "build",
+        "status": "PASS"
+      }
+    ]
+  },
+  "isolatedPostgres": {
+    "passed": true,
+    "node": "v24.22.2",
+    "postgres": "postgres:17-alpine",
+    "suites": [
+      {
+        "suite": "api",
+        "status": "passed",
+        "migrations": 31
+      },
+      {
+        "suite": "projects",
+        "status": "passed",
+        "migrations": 31
+      },
+      {
+        "suite": "search",
+        "status": "passed",
+        "migrations": 31
+      }
+    ],
+    "cleanupErrors": []
+  },
+  "verifiedWriteAndLifecycleBehavior": [
+    "Append transmits only new-message terms; old posting tuples remain unchanged",
+    "Metadata-only capture skips search writes",
+    "Missing/incomplete index baseline recovered from real chunks in bounded 256-row batches",
+    "Rewrites retain full posting reconciliation",
+    "Business backup excludes derived search tables; restore rebuilds identical posting sets and phrase hits",
+    "Storage redaction removes sensitive terms from actual chunks and derived postings",
+    "Permanent deletion cascades metadata and postings",
+    "Production duplicate content and packed-term columns absent"
+  ],
+  "measurementNote": "Single read-only SQL EXPLAIN (ANALYZE, BUFFERS), jit=off. Warm samples have zero shared read blocks. First post-deploy samples with reads retained. Count/page and snippet times are separate, not full HTTP latency or percentile benchmarks. Final image first/repeated samples are both retained. Host swap activity was observed after the image build; zero PostgreSQL shared read blocks does not prove absence of OS-level I/O. Do not treat these samples as a percentile benchmark.",
+  "beforeWarm": [
+    {
+      "query": "项目",
+      "executionMs": 28.219,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 13919
+    },
+    {
+      "query": "项目_snippets",
+      "executionMs": 7.304,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 1745
+    },
+    {
+      "query": "归档项目",
+      "executionMs": 123.795,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 1817
+    },
+    {
+      "query": "归档项目_snippets",
+      "executionMs": 12.412,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 1965
+    }
+  ],
+  "afterFirst": [
+    {
+      "query": "项目",
+      "executionMs": 51.085,
+      "sharedReadBlocks": 125,
+      "sharedHitBlocks": 13794
+    },
+    {
+      "query": "项目_snippets",
+      "executionMs": 1099.491,
+      "sharedReadBlocks": 2835,
+      "sharedHitBlocks": 4055
+    },
+    {
+      "query": "归档项目",
+      "executionMs": 59.207,
+      "sharedReadBlocks": 723,
+      "sharedHitBlocks": 1606
+    },
+    {
+      "query": "归档项目_snippets",
+      "executionMs": 15.886,
+      "sharedReadBlocks": 36,
+      "sharedHitBlocks": 1167
+    }
+  ],
+  "afterWarm": [
+    {
+      "query": "项目",
+      "executionMs": 28.524,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 13919
+    },
+    {
+      "query": "项目_snippets",
+      "executionMs": 13.455,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 6890
+    },
+    {
+      "query": "归档项目",
+      "executionMs": 15.15,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 2329
+    },
+    {
+      "query": "归档项目_snippets",
+      "executionMs": 2.756,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 1203
+    }
+  ],
+  "additionalPhrasePreflight": [
+    {
+      "query": "的项目",
+      "executionMs": 829.368,
+      "sharedReadBlocks": 1714,
+      "sharedHitBlocks": 52175
+    },
+    {
+      "query": "的项目_snippets",
+      "executionMs": 51.983,
+      "sharedReadBlocks": 71,
+      "sharedHitBlocks": 4787
+    },
+    {
+      "query": "一个项目",
+      "executionMs": 155.302,
+      "sharedReadBlocks": 305,
+      "sharedHitBlocks": 38655
+    },
+    {
+      "query": "一个项目_snippets",
+      "executionMs": 65.731,
+      "sharedReadBlocks": 94,
+      "sharedHitBlocks": 5247
+    },
+    {
+      "query": "项目归档",
+      "executionMs": 12.251,
+      "sharedReadBlocks": 13,
+      "sharedHitBlocks": 2580
+    },
+    {
+      "query": "项目归档_snippets",
+      "executionMs": 3.163,
+      "sharedReadBlocks": 5,
+      "sharedHitBlocks": 412
+    }
+  ],
+  "backupRetained": true,
+  "rollbackImageRetained": true,
+  "notes": [
+    "No new body GIN; selective long CJK phrases reuse the existing trigram index within candidate revision constraints",
+    "English and mixed-query access paths unchanged",
+    "Initial sequential-chunk candidate was rejected after measured regression; not deployed",
+    "Fixed raw Date binding for dashboard organization SQL, validated by real PostgreSQL API E2E",
+    "Dependency audit retains the documented legacy minimatch advisory-range exception",
+    "External model/email services and live third-party site changes are not certified by these automated checks"
+  ],
+  "afterInitialWarm": [
+    {
+      "query": "项目",
+      "executionMs": 28.262,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 13919
+    },
+    {
+      "query": "项目_snippets",
+      "executionMs": 16.244,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 6890
+    },
+    {
+      "query": "归档项目",
+      "executionMs": 14.549,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 2329
+    },
+    {
+      "query": "归档项目_snippets",
+      "executionMs": 3.201,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 1203
+    }
+  ],
+  "afterFinalFirst": [
+    {
+      "query": "项目",
+      "executionMs": 246.502,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 13919
+    },
+    {
+      "query": "项目_snippets",
+      "executionMs": 1570.935,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 6890
+    },
+    {
+      "query": "归档项目",
+      "executionMs": 480.627,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 2329
+    },
+    {
+      "query": "归档项目_snippets",
+      "executionMs": 25.435,
+      "sharedReadBlocks": 0,
+      "sharedHitBlocks": 1203
+    }
+  ],
+  "dailyReleaseNotes": {
+    "file": "release-notes-fMeo-JR6.js",
+    "releaseDays": 19,
+    "todayVersions": [
+      "V2.4.12"
+    ],
+    "uniqueDates": true
+  },
+  "versionPolicy": "Increment patch per release; consolidate all updates on one date into one group under the latest version."
+}

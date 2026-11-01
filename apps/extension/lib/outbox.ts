@@ -55,7 +55,7 @@ async function transaction<T>(
   }
 }
 
-export async function enqueue(payload: CapturePayloadV1): Promise<string> {
+export async function enqueue(payload: CapturePayloadV1, batch?: { itemId: string; operationId: string }): Promise<string> {
   const canonical = JSON.stringify({
     provider: payload.provider,
     sessionId: payload.sessionId,
@@ -64,10 +64,14 @@ export async function enqueue(payload: CapturePayloadV1): Promise<string> {
     title: payload.title ?? null,
     canonicalUrl: payload.canonicalUrl ?? null,
     adapterVersion: payload.adapterVersion,
+    // A new manual observation must reach the server, while retrying that
+    // observation keeps its original request identity.
+    ...(payload.triggerReason === "manual_retry" ? { manualCapturedAt: payload.capturedAt } : {}),
     body:
       isDeltaPayload(payload)
         ? {
             baseRevisionId: payload.baseRevisionId ?? null,
+            baseContentHash: payload.baseContentHash ?? null,
             baseMessageCount: payload.baseMessageCount,
             baseLastMessageId: payload.baseLastMessageId ?? null,
             baseLastMessageTextHash: payload.baseLastMessageTextHash ?? null,
@@ -82,7 +86,7 @@ export async function enqueue(payload: CapturePayloadV1): Promise<string> {
     "SHA-256",
     new TextEncoder().encode(canonical),
   );
-  const id = `capture:${Array.from(new Uint8Array(digest), (byte) =>
+  const id = `${batch ? `recapture:${batch.itemId}:${batch.operationId}` : "capture"}:${Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("")}`;
   const record: OutboxRecord = {

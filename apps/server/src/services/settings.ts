@@ -142,7 +142,7 @@ export async function getNumberSetting(
 export async function getPublicSettings(): Promise<Record<string, string>> {
   const rows = await db.select().from(settings);
   return Object.fromEntries(
-    rows.map((row) => [
+    rows.filter((row) => !row.key.startsWith("internal.projectMerge.")).map((row) => [
       row.key,
       row.encrypted ? (row.value ? "********" : "") : row.value,
     ]),

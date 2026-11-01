@@ -36,10 +36,13 @@ vi.mock("../src/services/operation-log.js", () => ({
 
 const staleUpdatedAt = new Date("2026-08-22T14:00:00.000Z");
 
-function backgroundTask(id: string) {
+function backgroundTask(
+  id: string,
+  kind: "classification_rebuild" | "archive_integrity" = "classification_rebuild",
+) {
   return {
     id,
-    kind: "classification_rebuild" as const,
+    kind,
     status: "running" as const,
     totalCount: 2_001,
     processedCount: 5,
@@ -146,5 +149,25 @@ describe("background task state transitions", () => {
       status: "completed",
       error: null,
     });
+  });
+
+  it("records stale archive checks as system integrity failures", async () => {
+    const staleTask = backgroundTask("integrity-task", "archive_integrity");
+    mocks.selectRows.push([staleTask]);
+    mocks.sqlRows.push([]);
+    mocks.updateRows.push([{ ...staleTask, status: "failed" }]);
+
+    const { failStaleBackgroundTasks } = await import(
+      "../src/services/background-tasks.js"
+    );
+    await failStaleBackgroundTasks("archive_integrity", 1);
+
+    expect(mocks.writeOperationLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: "system",
+        level: "error",
+        message: "超时归档完整性检查已自动标记失败",
+      }),
+    );
   });
 });

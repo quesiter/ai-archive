@@ -164,7 +164,7 @@ export async function importRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/imports/:id/retry",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const [job] = await db.select().from(importJobs).where(eq(importJobs.id, params.id)).limit(1);
       if (!job) return reply.code(404).send({ error: "Import job not found" });
       if (job.status !== "failed" && job.status !== "partial") {

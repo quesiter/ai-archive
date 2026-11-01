@@ -200,7 +200,7 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/redaction-rules/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       const input = z
         .object({ enabled: z.boolean() })
         .parse(request.body);
@@ -218,7 +218,7 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/redaction-rules/:id",
     async (request, reply) => {
       if (!(await requireWebUser(request, reply))) return;
-      const params = z.object({ id: z.string().uuid() }).parse(request.params);
+      const params = z.object({ id: z.guid() }).parse(request.params);
       await db.delete(redactionRules).where(eq(redactionRules.id, params.id));
       return reply.code(204).send();
     },

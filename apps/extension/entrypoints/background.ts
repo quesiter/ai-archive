@@ -4,6 +4,8 @@ import {
   type CapturePayloadV1,
 } from "@ai-archive/contracts";
 import { defineBackground } from "wxt/utils/define-background";
+import { startBatchBackground } from "../lib/batch-background";
+import { startDeviceHeartbeat } from "../lib/device-heartbeat";
 import type {
   CaptureUiState,
   ExtensionMessage,
@@ -21,6 +23,7 @@ import {
   retryRecord,
 } from "../lib/outbox";
 import { packagedServerOrigin } from "../lib/packaged-origin";
+import { fullCaptureResult, type CaptureReceipt } from "../lib/capture-result";
 
 const AUTH_STORAGE_KEYS: Array<keyof AuthStorage> = [
   "serverUrl",
@@ -114,7 +117,7 @@ interface FlushResult {
   sent: number;
   remaining: number;
   requiresFullCapture?: boolean;
-  lastResult?: {
+  lastResult?: CaptureReceipt & {
     conversationId?: string;
     revisionId?: string;
     messageCount?: number;
@@ -183,7 +186,12 @@ async function performFlushOutbox(force = false, targetId?: string): Promise<Flu
         const payload = (await response.json().catch(() => ({}))) as {
           error?: string;
           requiresFullCapture?: boolean;
+          batchExpired?: boolean;
         };
+        if (response.status === 409 && payload.batchExpired && record.id.startsWith("recapture:")) {
+          await markFailed(record.id, payload.error ?? "补采任务已失效", record.attempts + 1, 409);
+          continue;
+        }
         if (
           response.status === 409 &&
           payload.requiresFullCapture &&
@@ -223,7 +231,7 @@ async function performFlushOutbox(force = false, targetId?: string): Promise<Flu
         }
         throw new UploadHttpError(payload.error ?? `上传失败 (${response.status})`, response.status);
       }
-      const result = (await response.json().catch(() => ({}))) as {
+      const result = (await response.json().catch(() => ({}))) as CaptureReceipt & {
         conversationId?: string;
         revisionId?: string;
         messageCount?: number;
@@ -247,11 +255,10 @@ async function performFlushOutbox(force = false, targetId?: string): Promise<Flu
       await remove(record.id);
       sent += 1;
       await setStatus({
-        status: result.completeness ?? (isDeltaPayload(record.payload) ? "complete" : record.payload.completeness.status),
+        ...fullCaptureResult(record.payload, result),
         provider: record.payload.provider,
         sessionId: record.payload.sessionId,
         captureMode,
-        message: `${payloadMessageCount(record.payload)} 条消息已归档`,
         updatedAt: new Date().toISOString(),
       });
     } catch (error) {
@@ -293,7 +300,7 @@ export default defineBackground(() => {
     if (message.type === "enqueueCapture") {
       return (async () => {
         const payload = CapturePayloadV1Schema.parse(message.payload);
-        const captureId = await enqueue(payload);
+        const captureId = await enqueue(payload, message.batch);
         captureOutcomes.delete(captureId);
         await setStatus({
           status: "queued",
@@ -303,7 +310,7 @@ export default defineBackground(() => {
           message: isDeltaPayload(payload) ? "增量采集等待上传" : "会话快照等待上传",
           updatedAt: new Date().toISOString(),
         });
-        return flushOutbox(false, captureId);
+        return { ...await flushOutbox(false, captureId), captureId };
       })();
     }
     if (message.type === "captureState") {
@@ -355,6 +362,8 @@ export default defineBackground(() => {
     return undefined;
   });
 
+  startBatchBackground();
+  startDeviceHeartbeat();
   void (async () => {
     const packagedUrl = normalizedServerUrl(packagedServerOrigin());
     const settings = (await readAuthState()) as Partial<AuthStorage>;

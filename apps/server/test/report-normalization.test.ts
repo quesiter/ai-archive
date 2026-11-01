@@ -58,6 +58,7 @@ describe("report response normalization", () => {
       weeklyReports: [],
     });
     expect(reportSystemPrompt("weekly", windowStart, windowEnd)).toContain("按项目组织，注明相关标签");
+    expect(reportSystemPrompt("weekly", windowStart, windowEnd)).toContain("【知言归藏】周报（");
     expect(JSON.stringify(payload)).not.toMatch(/knowledge/i);
   });
 
@@ -73,5 +74,6 @@ describe("report response normalization", () => {
 
     expect(payload.weeklyReports).toHaveLength(1);
     expect(reportSystemPrompt("monthly", windowStart, windowEnd)).toContain("归档会话、项目、标签与周报材料");
+    expect(reportSystemPrompt("monthly", windowStart, windowEnd)).toContain("标题以“【知言归藏】”开头");
   });
 });
